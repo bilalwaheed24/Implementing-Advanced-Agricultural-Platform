@@ -1,0 +1,18 @@
+%% Level 0 DFD — highest-level system interaction (single process boundary).
+flowchart TB
+    Farmer(["Farm Operator"])
+    Researcher(["Biotech Researcher"])
+    Regulator(["Regulator"])
+    Consumer(["Consumer"])
+    Device(["IoT Device"])
+
+    System(["ABSP\n(one process:\nAPI + Ledger + AI + DB)"])
+
+    Farmer -->|"register farms, devices"| System
+    Device -->|"signed telemetry"| System
+    Researcher -->|"screen sequences,\nregister GMO events"| System
+    Regulator -->|"evaluate compliance,\nverify records"| System
+    System -->|"verified provenance"| Consumer
+    System -->|"alerts, reports"| Farmer
+    System -->|"screening verdicts"| Researcher
+    System -->|"compliance reports"| Regulator

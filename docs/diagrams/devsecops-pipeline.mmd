@@ -1,0 +1,25 @@
+%% DevSecOps Pipeline — Diagram 11. Source: .github/workflows/ci.yml, security.yml.
+%% IMPLEMENTED as workflow files. The workflows HAVE executed on hosted GitHub Actions
+%% runners (three runs, 2026-09-04 and 2026-09-07). All three failed at "Set up job"
+%% because three pinned action SHAs did not resolve; those pins were corrected on
+%% 2026-09-13 but a re-run has not been triggered, so a green pipeline is still unproven.
+%% Two jobs did pass on the hosted runner: secret-scan (gitleaks) and smart-contract-tests.
+%% See EXAM-LIMITATIONS.md.
+flowchart TB
+    Dev["Developer"] --> Git["Git commit"]
+    Git --> PreCommit["Pre-commit hook\nsecret scan + fast tests\nIMPLEMENTED, runs locally"]
+    PreCommit --> CI["CI: lint + syntax check"]
+    CI --> SAST["SAST: Bandit + Semgrep"]
+    SAST --> SCA["SCA: pip-audit"]
+    SCA --> UnitTests["Unit + integration tests\n(399 tests)"]
+    UnitTests --> Build["Docker build"]
+    Build --> SBOM["SBOM: CycloneDX"]
+    Build --> ContainerScan["Container scan: Trivy"]
+    ContainerScan --> IaC["IaC scan: Checkov"]
+    IaC --> IntegrationCI["Integration tests in CI"]
+    IntegrationCI --> DAST["DAST: OWASP ZAP baseline"]
+    DAST --> Deploy["Deployment"]
+    Deploy --> Smoke["Smoke tests\nscripts/smoke_test.py"]
+    Smoke --> Monitor["Monitoring / health checks"]
+
+    style CI fill:#eee,stroke:#333

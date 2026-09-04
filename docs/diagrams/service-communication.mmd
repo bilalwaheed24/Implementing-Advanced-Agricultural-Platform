@@ -1,0 +1,47 @@
+%% Service Communication Diagram — Diagram 5.
+%% This platform is a modular monolith (ADR-001), not microservices — so "service
+%% communication" here means real in-process module calls (Python function calls,
+%% not network hops) plus the genuine external network boundaries. Showing fake
+%% network hops between modules that actually share a process would misrepresent
+%% the architecture, which the audit brief explicitly forbids.
+flowchart TB
+    subgraph External["External boundaries — real network calls"]
+        FE["Frontend (browser)"] -->|"HTTPS/JSON"| API
+        Device["IoT device"] -->|"HTTPS + HMAC"| API
+        Consumer["Consumer browser"] -->|"HTTPS, unauthenticated"| API
+    end
+
+    API["FastAPI router layer"]
+
+    subgraph InProcess["In-process module calls — same Python process, no network hop"]
+        API --> IdentitySvc["identity service"]
+        API --> DeviceSvc["devices service"]
+        API --> TelemetrySvc["telemetry service"]
+        TelemetrySvc --> DeviceSvc
+        TelemetrySvc --> AISvc["ai/* modules"]
+        API --> BioSvc["biosecurity service"]
+        BioSvc --> AISvc
+        API --> GmoSvc["gmo service"]
+        GmoSvc --> BioSvc
+        GmoSvc --> LedgerClient["ledger_client"]
+        API --> SupplySvc["supplychain service"]
+        SupplySvc --> GmoSvc
+        SupplySvc --> LedgerClient
+        SupplySvc --> AISvc
+        API --> ComplianceSvc["compliance service"]
+        ComplianceSvc --> LedgerClient
+        ComplianceSvc --> SupplySvc
+        IdentitySvc --> AuditSvc["audit service"]
+        DeviceSvc --> AuditSvc
+        SupplySvc --> AuditSvc
+        AuditSvc --> LedgerClient
+    end
+
+    LedgerClient -->|"in-process, retried,\ncircuit-breaker"| Ledger["ledger/ package\n(no network hop)"]
+    IdentitySvc --> DB[("Database\nvia SQLAlchemy — no network hop\nfor SQLite; TCP for PostgreSQL")]
+    DeviceSvc --> DB
+    TelemetrySvc --> DB
+    SupplySvc --> DB
+    GmoSvc --> DB
+    ComplianceSvc --> DB
+    AuditSvc --> DB

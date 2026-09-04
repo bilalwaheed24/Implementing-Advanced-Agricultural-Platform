@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and adjust. Never commit terraform.tfvars or any *.tfstate file.
+project           = "absp"
+environment       = "production"
+aws_region        = "us-east-1"
+vpc_cidr          = "10.20.0.0/16"
+db_instance_class = "db.t4g.micro"
+app_cpu           = 512
+app_memory        = 1024
+app_desired_count = 2

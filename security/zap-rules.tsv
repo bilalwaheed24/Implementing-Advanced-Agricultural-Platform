@@ -1,0 +1,3 @@
+# ZAP baseline rule overrides. Format: <rule id>	<action: IGNORE|WARN|FAIL>	<url regex, optional>
+# The public verification endpoint is deliberately unauthenticated by design (FR-D4).
+10015	IGNORE	.*/api/v1/verify/.*

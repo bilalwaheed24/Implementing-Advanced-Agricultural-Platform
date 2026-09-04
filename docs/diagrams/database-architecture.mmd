@@ -1,0 +1,27 @@
+%% Database Architecture — Diagram 12. Source: Backend.md §4 (34 tables; principal
+%% relationships shown here, link/index tables omitted for readability).
+erDiagram
+    ORGANIZATION ||--o{ USER : employs
+    ORGANIZATION ||--o{ FARM : owns
+    ORGANIZATION ||--o{ CERTIFICATION : issues
+    USER ||--o{ AUDIT_LOG : performs
+    FARM ||--o{ FIELD : contains
+    FIELD ||--o{ CROP : grows
+    FIELD ||--o{ DEVICE : hosts
+    DEVICE ||--o{ TELEMETRY : emits
+    DEVICE ||--o{ DEVICE_VULNERABILITY : has
+    TELEMETRY ||--o{ AI_ANALYSIS : scored_by
+    GMO_EVENT ||--o{ SEED_LOT : produces
+    GMO_EVENT ||--o{ CROP : planted_as
+    SEQUENCE_SCREENING ||--o| GMO_EVENT : gates
+    HAZARD_SEQUENCE ||--o{ SCREENING_HIT : matched_in
+    SEED_LOT ||--o{ BATCH : sown_into
+    PRODUCT ||--o{ BATCH : instantiated_as
+    BATCH ||--o{ SUPPLY_CHAIN_EVENT : records
+    BATCH ||--o{ SHIPMENT : ships_in
+    BATCH ||--o{ CERTIFICATION_LINK : claims
+    CERTIFICATION ||--o{ CERTIFICATION_LINK : covers
+    BATCH ||--o{ FRAUD_ASSESSMENT : scored_by
+    ALERT ||--o{ INCIDENT_EVENT : escalates_to
+    INCIDENT ||--o{ INCIDENT_EVENT : timeline
+    BLOCKCHAIN_TX }o--|| BATCH : anchors

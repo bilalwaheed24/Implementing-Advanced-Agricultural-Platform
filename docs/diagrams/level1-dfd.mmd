@@ -1,0 +1,36 @@
+%% Level 1 DFD — breaks the single System bubble from Level 0 into its major
+%% internal processes, matching the actual service modules in backend/app/services/.
+flowchart TB
+    subgraph P["ABSP internal processes"]
+        P1["1.0 Identity &\nAccess Control"]
+        P2["2.0 Farm & Device\nManagement"]
+        P3["3.0 Telemetry\nIngestion"]
+        P4["4.0 Biosecurity\nScreening"]
+        P5["5.0 GMO\nRegistration"]
+        P6["6.0 Supply Chain &\nCertification"]
+        P7["7.0 Compliance\nEvaluation"]
+        P8["8.0 Ledger\nAnchoring"]
+        P9["9.0 Audit"]
+    end
+
+    D1[("Users")]
+    D2[("Devices")]
+    D3[("Batches")]
+    D4[("Ledger state")]
+    D5[("Audit log")]
+
+    D1 --> P1
+    P1 --> P2
+    D2 --> P3
+    P3 --> P4
+    P4 -->|"passing screening required"| P5
+    P5 --> P8
+    P2 --> P6
+    P6 --> D3
+    P6 --> P8
+    P6 --> P7
+    P7 --> P8
+    P8 --> D4
+    P1 --> P9
+    P6 --> P9
+    P9 --> D5

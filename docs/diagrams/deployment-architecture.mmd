@@ -1,0 +1,35 @@
+%% Deployment Architecture — Diagram 13. Source: docker-compose.yml, infrastructure/.
+%% Only components that actually exist are shown, labelled by their real status.
+flowchart TB
+    subgraph Local["Local / demo — IMPLEMENTED, verified this audit"]
+        API["absp-api container\nnon-root uid 10001\nread-only rootfs\nIMPLEMENTED"]
+        Vol[("Named volume\n/app/data — db + ledger")]
+        API --- Vol
+    end
+
+    subgraph Prod["Production target — Terraform, PLANNED/validated, never applied"]
+        ALB["Application Load Balancer"]
+        ECS["ECS/EKS tasks\n(2+ replicas)"]
+        RDS[("RDS PostgreSQL\nprivate subnet")]
+        Secrets["Secrets Manager"]
+        ECR["ECR image registry"]
+        S3[("S3 exports bucket\nSSE-KMS, versioned")]
+        CW["CloudWatch logs"]
+
+        ALB --> ECS --> RDS
+        ECS --> Secrets
+        ECS --> S3
+        ECS --> CW
+        ECR -.->|"image pull"| ECS
+    end
+
+    subgraph K8s["Kubernetes target — manifests valid, never applied to a live cluster"]
+        Ingress["Ingress"]
+        Deploy["Deployment\n(2-6 replicas, HPA)"]
+        NetPol["NetworkPolicy\ndefault-deny"]
+        PVC[("PersistentVolumeClaim")]
+
+        Ingress --> Deploy
+        NetPol -.->|"restricts"| Deploy
+        Deploy --> PVC
+    end

@@ -1,0 +1,20 @@
+%% Blockchain Flow — Diagram 8. Source: Blockchain-integration.md §11.
+%% IMPLEMENTED: everything below. DEMO/SIMULATION: single-node ordering only —
+%% the cryptography (signing, hashing, Merkle proofs) is real.
+sequenceDiagram
+    participant Svc as Service layer
+    participant Client as Ledger client
+    participant CC as Chaincode contract
+    participant Ord as Orderer (single-node, DEMO)
+    participant WS as World state
+
+    Svc->>Client: submit(contract, function, args, submitter_msp)
+    Client->>CC: simulate against current world state
+    CC-->>Client: read_set, write_set (or ContractError — no block produced)
+    Client->>Client: collect endorsements per policy (ECDSA P-256)
+    Client->>Client: submitter signs the transaction
+    Client->>Ord: signed transaction
+    Ord->>Ord: verify all signatures, cut block\n(SHA-256 hash-linked, Merkle root)
+    Ord->>WS: commit write_set
+    Ord-->>Svc: tx_id, block_number, content_hash
+    Note over Svc,WS: Verification later: GET /blockchain/verify\nreplays every block and re-checks every signature

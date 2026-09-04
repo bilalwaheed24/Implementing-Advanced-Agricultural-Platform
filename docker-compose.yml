@@ -1,0 +1,70 @@
+# Local development / demonstration stack. `docker compose up` and the platform is ready.
+# Production deployment uses infrastructure/terraform/ (PostgreSQL/RDS) instead of the
+# postgres service below being wired to the API by default — see README.md.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: absp-api:local
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      ENV: development
+      DEMO_MODE: "true"
+      DATABASE_URL: sqlite:////app/data/absp.db
+      LEDGER_DATA_DIR: /app/data/ledger
+      DATA_DIR: /app/data
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}
+      CORS_ORIGINS: http://127.0.0.1:8000
+    volumes:
+      - absp_data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+  # Documented production path (ADR-002): the application also runs unmodified against
+  # PostgreSQL. Disabled by default so `docker compose up` needs no extra configuration.
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_DB: absp
+      POSTGRES_USER: absp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - absp_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U absp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  iot-simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: absp-api:local
+    profiles: ["simulator"]
+    depends_on:
+      api:
+        condition: service_healthy
+    entrypoint: ["python3", "iot/simulator.py", "--api-url", "http://api:8000", "--mode", "normal", "--count", "60", "--delay", "1"]
+    volumes:
+      - absp_data:/app/data
+
+volumes:
+  absp_data:
+  absp_pgdata:

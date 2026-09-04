@@ -1,0 +1,60 @@
+%% Overall System Architecture — IMPLEMENTED unless labelled otherwise.
+%% Source: Architecture.md §2. This is a modular monolith, not microservices (ADR-001).
+flowchart TB
+    subgraph Clients
+        U1["Web UI — 23 views\n(IMPLEMENTED)"]
+        U2["Public /verify.html\n(IMPLEMENTED, no auth)"]
+        D1["IoT device simulator\n(SIMULATED fleet, REAL security envelope)"]
+    end
+
+    subgraph Edge["Trust boundary — ingress middleware"]
+        RL["Rate limiting + security headers + CORS\n(IMPLEMENTED)"]
+        AUTHN["Authentication: JWT / device HMAC\n(IMPLEMENTED)"]
+        AUTHZ["Authorization: RBAC + org scoping\n(IMPLEMENTED)"]
+    end
+
+    subgraph Core["Application core — one FastAPI process (modular monolith)"]
+        IDN["Identity & Organisations"]
+        FARM["Farm / Field / Crop"]
+        DEV["Device Registry & Vulnerabilities"]
+        TEL["Telemetry Ingestion & Satellite Pipeline"]
+        BIO["Biosecurity: screening, CRISPR, DURC"]
+        GMO["GMO Registry & Labelling"]
+        SUP["Supply Chain, Certification, Fraud"]
+        CMP["Compliance Rule Engine"]
+        NOT["Notifications & Alerts"]
+        AUD["Audit"]
+    end
+
+    subgraph AI["AI services — in-process, IMPLEMENTED"]
+        A1["Anomaly detection\n(Isolation Forest)"]
+        A2["Crop vision\n(TensorFlow CNN)"]
+        A3["Sequence screening\n(k-mer + Smith-Waterman)"]
+        A4["CRISPR risk"]
+        A5["Fraud scoring"]
+    end
+
+    subgraph Ledger["Permissioned ledger — IMPLEMENTED, single-node ordering"]
+        LC["Chaincode-style contracts"]
+        LB["Blocks + Merkle root"]
+        LM["MSP identities (ECDSA P-256)"]
+    end
+
+    DB[("Relational DB\nSQLite (demo) / PostgreSQL (prod)\nIMPLEMENTED")]
+
+    U1 --> RL
+    U2 --> RL
+    D1 --> RL
+    RL --> AUTHN --> AUTHZ --> Core
+    Core --> DB
+    TEL --> A1
+    TEL --> A2
+    BIO --> A3
+    BIO --> A4
+    SUP --> A5
+    GMO --> LC
+    SUP --> LC
+    CMP --> LC
+    AUD --> LC
+    LC --> LB
+    LM --> LC

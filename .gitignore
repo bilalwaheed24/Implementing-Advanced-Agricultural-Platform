@@ -1,0 +1,65 @@
+# Secrets and environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+ledger_data/
+terraform.tfvars
+*.tfstate
+*.tfstate.backup
+
+# Data and artefacts
+*.db
+*.sqlite
+*.sqlite3
+ai/models/*.keras
+ai/models/*.h5
+ai/models/*.joblib
+ai/models/*.pkl
+ai/data/generated/
+exports/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+demo_device_secrets.json
+data/demo_device_secrets.json
+
+# SQLite sidecar files — the -wal/-shm/-journal siblings are NOT matched by *.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Test and tooling caches
+.pytest_cache/
+.tox/
+.nox/
+coverage.xml
+junit*.xml
+
+# Local scratch files
+*.bak
+*.orig
+*.tmp
