@@ -103,6 +103,12 @@ def create_app() -> FastAPI:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        # Cross-origin isolation. Raised by the OWASP ZAP baseline scan (rule 90004). Safe here
+        # because the application is entirely same-origin — the CSP above is 'self' for every
+        # directive and the frontend loads no third-party script, style or font.
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
         response.headers["Cache-Control"] = response.headers.get("Cache-Control", "no-store")
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
