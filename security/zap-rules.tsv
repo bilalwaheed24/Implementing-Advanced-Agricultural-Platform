@@ -1,4 +1,7 @@
-# ZAP baseline rule overrides. Format: <rule id>	<action: IGNORE|WARN|FAIL>	<url regex, optional>
+# ZAP baseline rule overrides.
+# Format: <rule id>\t<action: IGNORE|WARN|FAIL>\t<url regex>
+# All three tab-separated columns are REQUIRED — zap-baseline.py refuses to load the file
+# otherwise. Use .* to apply a rule site-wide.
 # The public verification endpoint is deliberately unauthenticated by design (FR-D4).
 10015	IGNORE	.*/api/v1/verify/.*
 
@@ -7,13 +10,13 @@
 # finding and was FIXED in backend/app/main.py rather than suppressed, so it is not listed here.
 #
 # Informational: ZAP reports that the site is a single-page application. Not a defect.
-10109	IGNORE
+10109	IGNORE	.*
 # A request header the *browser* sends. A server cannot set Sec-Fetch-Dest on its own responses,
 # so this is not actionable server-side.
-90005	IGNORE
+90005	IGNORE	.*
 # Responses are deliberately Cache-Control: no-store. That is the intended control for
 # authenticated agricultural and supply-chain data, not an oversight.
-10049	IGNORE
+10049	IGNORE	.*
 # ZAP flags ordinary English words ("query", "select") inside the served ES modules as suspicious
 # comments. Reviewed: no credentials, endpoints or internal notes are disclosed.
-10027	IGNORE
+10027	IGNORE	.*
