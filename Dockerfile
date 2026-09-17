@@ -16,6 +16,14 @@ LABEL org.opencontainers.image.title="Agricultural Biotechnology Security Platfo
       org.opencontainers.image.description="Precision farming protection, GMO traceability, food supply chain security" \
       org.opencontainers.image.licenses="MIT"
 
+# Apply available Debian security updates before anything else. The base image lags the
+# security archive, and the Trivy gate in CI fails the build on any CRITICAL/HIGH finding
+# that actually has a published fix.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Non-root user (Security.md §15): fixed uid/gid, no login shell, no home directory writes needed.
 RUN groupadd --gid 10001 absp && useradd --uid 10001 --gid absp --no-create-home \
     --shell /usr/sbin/nologin absp

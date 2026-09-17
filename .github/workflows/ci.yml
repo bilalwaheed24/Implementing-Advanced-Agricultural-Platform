@@ -103,6 +103,13 @@ jobs:
           image-ref: absp-api:ci
           format: table
           severity: CRITICAL,HIGH
+          # Fail only on findings that can actually be acted on. The Debian base image
+          # carries ~60 CRITICAL/HIGH OS-package CVEs with no published fix (status
+          # affected / fix_deferred / will_not_fix); blocking on those would make this
+          # gate permanently red and therefore ignored. Anything with a fixed version
+          # still fails the build, and the Dockerfile applies security updates so those
+          # get picked up. Unfixed findings remain visible in the scan output.
+          ignore-unfixed: true
           exit-code: "1"
 
   iac-scan:
