@@ -28,9 +28,9 @@ engine (USDA, FDA, EU, Codex Alimentarius, GS1).
 ## 2. Architecture at a glance
 
 ```
-Browser (23 views, framework-free)  ──┐
+Browser (23 top-level views, framework-free) ──┐
 Public /verify.html (no login)      ──┤
-IoT device simulator                ──┼──►  FastAPI backend (11 services, 16 routers, 120 API operations)
+IoT device simulator                ──┼──►  FastAPI backend (11 services, 16 routers, 121 API operations)
                                         │        │
                                         │        ├─► SQLite / PostgreSQL (34 tables)
                                         │        ├─► Permissioned ledger (ECDSA P-256, Merkle proofs)
@@ -243,6 +243,21 @@ unit/integration tests → container build → SBOM → container scan (Trivy) �
 `.github/workflows/security.yml`: Gitleaks, a scheduled weekly image rescan, and an OWASP ZAP
 baseline scan against a running instance.
 
+**Verified green on GitHub-hosted runners** (commit `d3c1c60`):
+
+| Workflow | Jobs | Status |
+|---|---|---|
+| CI | `iac-scan`, `lint-and-test`, `build-and-scan-image` | ✅ all pass |
+| Security | `secret-scan`, `smart-contract-tests`, `dast` | ✅ all pass |
+
+DAST (OWASP ZAP) against a live instance: **FAIL-NEW 0, PASS 65, WARN-NEW 5** — one warning was a
+real missing security header and was fixed in code; the other four are triaged with a written
+reason each in `security/zap-rules.tsv`.
+
+Container scan: all HIGH/CRITICAL findings with an available vendor fix were remediated. Remaining
+findings are upstream OS-package vulnerabilities with no published fix at the time of testing and
+are documented as residual risk in `docs/EXAM-LIMITATIONS.md` §2.1.
+
 ## 18. Deployment
 
 Local: `docker-compose.yml`. Production: `infrastructure/terraform/` (AWS — VPC, private
@@ -273,7 +288,23 @@ Post-deploy: `python3 scripts/smoke_test.py --api-url https://your-deployment`.
    explorer and compliance report from the previous steps
 5. Open `http://127.0.0.1:8000/verify.html?code=<code from step 2>` on a phone or a second window
 
-## 21. Known limitations
+## 21. Requirements coverage
+
+Traced requirement by requirement in `docs/REQUIREMENTS-TRACEABILITY.md`, against the exam brief,
+the documentation and the running code:
+
+| Status | Count |
+|---|---|
+| **COMPLETE** | 37 |
+| **PARTIAL** | 3 |
+| **MISSING** | 0 |
+
+The three PARTIAL items are: no independent accessibility audit or assistive-technology user
+testing; Hyperledger Fabric and BLAST implemented as model and algorithm rather than the named
+products running; and OpenDroneMap/QGIS not integrated. Each is explained in full — what exists,
+what is missing, and why it is acceptable for an academic demonstration.
+
+## 22. Known limitations
 
 `docs/EXAM-LIMITATIONS.md` is the complete, honest accounting of what is real, what is
 simulated, and what remains outstanding. In short:
@@ -286,11 +317,14 @@ simulated, and what remains outstanding. In short:
   Hyperledger Fabric consortium.
 * Terraform and Kubernetes manifests are implemented and validate, but have **never been applied**
   to live cloud infrastructure.
-* CI workflows have run on hosted runners and are **currently failing**; three unresolvable pinned
-  action versions were corrected but a green run is not yet demonstrated.
+* CI and Security workflows run **green on GitHub-hosted runners** (commit `d3c1c60`): `iac-scan`,
+  `lint-and-test`, `build-and-scan-image`, `secret-scan`, `smart-contract-tests`, `dast`.
+* Container scanning: all HIGH/CRITICAL findings with an available vendor fix were remediated.
+  60 HIGH/CRITICAL findings remain in Debian base-image OS packages with no published fix at the
+  time of testing, and are documented as residual risk — see `docs/EXAM-LIMITATIONS.md` §2.1.
 * No independent penetration test and no independent accessibility audit have been performed.
 
-## 22. Documentation map
+## 23. Documentation map
 
 | Document | What it answers |
 |---|---|

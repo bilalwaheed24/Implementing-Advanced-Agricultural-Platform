@@ -127,34 +127,62 @@ privileged roles.
 
 ## Part 2 — Production improvements (genuinely outstanding work)
 
-### 2.1 CI/CD has run, and is currently failing
+### 2.1 Container scanning — residual upstream OS vulnerabilities
 
-**What exists now — corrected 2026-09-13.** Earlier versions of this project's own documentation
-claimed the workflows had "never run on a hosted runner (no remote configured)". **That was
-wrong.** A remote exists and the workflows *have* executed on hosted GitHub Actions runners —
-three runs, on 2026-09-04 and 2026-09-07. All three are marked failed.
+**CI itself is no longer a limitation.** Both workflows run green on GitHub-hosted runners as of
+commit `d3c1c60` (2026-09-17):
 
-Two jobs genuinely passed on the hosted runner: **secret-scan (gitleaks)** and
-**smart-contract-tests**. The rest failed at *"Set up job"*, before running any security tool,
-because three pinned action SHAs did not resolve:
+| Workflow | Jobs | Result |
+|---|---|---|
+| CI | `iac-scan`, `lint-and-test`, `build-and-scan-image` | all pass |
+| Security | `secret-scan`, `smart-contract-tests`, `dast` (OWASP ZAP) | all pass |
 
-| Action | Problem |
-|---|---|
-| `returntocorp/semgrep-action` | Pinned to a **39-character** SHA — a git SHA is 40, so it could never resolve. The action has also not been updated since January 2024, and its successor is archived. |
-| `bridgecrewio/checkov-action` | Pinned SHA did not exist for the claimed tag |
-| `zaproxy/action-baseline` | Pinned SHA did not exist for the claimed tag |
+Getting there required four genuine fixes, recorded here because the route to green is itself
+evidence of how the pipeline was validated:
 
-**Fixed in this pass.** All eight pinned actions were verified against each action's real tag list
-via the GitHub API; the three broken pins were corrected, and Semgrep now runs from the maintained
-PyPI CLI instead of the abandoned action. The workflow YAML parses cleanly.
+1. **Three dead action pins.** `returntocorp/semgrep-action` was pinned to a **39-character** SHA
+   — a git SHA is 40, so it could never resolve; `bridgecrewio/checkov-action` and
+   `zaproxy/action-baseline` were pinned to SHAs that did not exist for their claimed tags. All
+   eight pins were re-verified against each action's real tag list through the GitHub API.
+2. **Semgrep moved to the maintained CLI.** The pinned action had not been updated since January
+   2024 and its successor is archived, so Semgrep now runs from PyPI.
+3. **SBOM action updated.** `anchore/sbom-action` v0.17.9 produced a valid CycloneDX SBOM but
+   uploaded it through GitHub's retired `v6.0-preview` artifact API; bumped to v0.24.2.
+4. **ZAP rules file format.** `zap-baseline.py` requires all three tab-separated columns and was
+   refusing to load a two-column file, exiting 3 before scanning.
 
-**What is still not proven.** The fix has **not been re-run** on a hosted runner, so a green
-pipeline remains unverified. Do not claim "CI/CD fully proven". Say: *the workflows are
-implemented and the action pins are now verified to resolve; hosted-runner execution of the
-corrected pipeline is not yet demonstrated.*
+**The actual residual risk is the container image.** Trivy scans the built image at
+CRITICAL/HIGH severity and fails the build on anything actionable.
 
-**What production would change.** A required green pipeline as a merge gate, with failures
-blocking rather than `soft_fail`/`continue-on-error`.
+*What exists now.* Of 63 CRITICAL/HIGH findings originally reported, **3 had a published vendor
+fix** (`libpcre2-8-0` → `10.42-1+deb12u1`). Those were remediated by applying Debian security
+updates in the Dockerfile's runtime stage, verified by rebuilding and rescanning: 63 → 60, with
+**0 fixable findings remaining**. The application's own Python dependencies scan clean; every
+finding is in a base-image OS package.
+
+The remaining 60 (55 HIGH, 5 CRITICAL) have **no published fix at the time of testing** —
+50 `affected`, 9 `fix_deferred`, 1 `will_not_fix`. They are concentrated in `util-linux`,
+`gzip`, `libacl1` and `zlib1g`.
+
+*Why this is acceptable for an academic demonstration.* You cannot remediate a CVE that has no
+patch. The Trivy step is therefore configured with `ignore-unfixed: true` while keeping
+`exit-code: 1`, so the gate fails on anything that *can* be acted on and stays meaningful,
+rather than being permanently red and therefore ignored. Unfixed findings remain visible in the
+scan output rather than being suppressed from the report. The precise claim is:
+
+> All HIGH/CRITICAL findings with an available vendor fix were remediated. Remaining findings are
+> upstream OS-package vulnerabilities with no published fix at the time of testing and are
+> documented as residual risk.
+
+It is also worth noting what the container's runtime posture does about this: non-root uid 10001,
+read-only root filesystem, all Linux capabilities dropped, and `no-new-privileges`. Most of the
+remaining CVEs are `mount`/`nsenter` privilege-escalation paths in `util-linux` that a capability-
+less non-root process on a read-only filesystem cannot reach.
+
+*What production would change.* Rebuild on a schedule so fixes are picked up the day they ship;
+track the unfixed set against the Debian security tracker; consider a distroless or Alpine base
+to shrink the OS package surface; and make a green pipeline a required merge gate with
+`soft_fail`/`continue-on-error` removed.
 
 ### 2.2 Terraform has never been applied
 
@@ -250,7 +278,7 @@ scaling need appeared.
 | 1.5 | Single-node ledger | Demo | Yes — cryptography is real |
 | 1.6 | Synthetic hazard sequences | Demo | Yes — responsible choice |
 | 1.7 | Published demo credentials | Demo | Yes — demo database only |
-| 2.1 | CI runs failing, fix unverified | Production | Disclose it |
+| 2.1 | Unfixed upstream OS CVEs in the base image | Production | Disclose it — all fixable ones remediated |
 | 2.2 | Terraform never applied | Production | Disclose it |
 | 2.3 | Kubernetes never applied | Production | Disclose it |
 | 2.4 | No independent pen test | Production | Disclose it |

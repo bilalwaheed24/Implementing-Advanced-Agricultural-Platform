@@ -1,10 +1,11 @@
 %% DevSecOps Pipeline — Diagram 11. Source: .github/workflows/ci.yml, security.yml.
-%% IMPLEMENTED as workflow files. The workflows HAVE executed on hosted GitHub Actions
-%% runners (three runs, 2026-09-04 and 2026-09-07). All three failed at "Set up job"
-%% because three pinned action SHAs did not resolve; those pins were corrected on
-%% 2026-09-13 but a re-run has not been triggered, so a green pipeline is still unproven.
-%% Two jobs did pass on the hosted runner: secret-scan (gitleaks) and smart-contract-tests.
-%% See EXAM-LIMITATIONS.md.
+%% IMPLEMENTED and VERIFIED GREEN on GitHub-hosted runners (commit d3c1c60, 2026-09-17).
+%% CI: iac-scan, lint-and-test, build-and-scan-image all pass.
+%% Security: secret-scan, smart-contract-tests, dast (OWASP ZAP) all pass.
+%% Getting there required four real fixes: three dead action pins, Semgrep moved to the
+%% maintained PyPI CLI, the SBOM action updated off the retired artifact API, and the ZAP
+%% rules file given its required third column. See EXAM-LIMITATIONS.md §2.1 for the
+%% residual container-scan risk.
 flowchart TB
     Dev["Developer"] --> Git["Git commit"]
     Git --> PreCommit["Pre-commit hook\nsecret scan + fast tests\nIMPLEMENTED, runs locally"]

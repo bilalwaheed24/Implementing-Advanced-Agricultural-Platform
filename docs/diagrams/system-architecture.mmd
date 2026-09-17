@@ -2,7 +2,7 @@
 %% Source: Architecture.md §2. This is a modular monolith, not microservices (ADR-001).
 flowchart TB
     subgraph Clients
-        U1["Web UI — 23 views\n(IMPLEMENTED)"]
+        U1["Web UI — 23 top-level views\n(27 authenticated routes)\n(IMPLEMENTED)"]
         U2["Public /verify.html\n(IMPLEMENTED, no auth)"]
         D1["IoT device simulator\n(SIMULATED fleet, REAL security envelope)"]
     end

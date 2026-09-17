@@ -4,6 +4,10 @@
 an already-built system adversarially rather than re-describing its design.
 **Scope:** the complete platform — backend, frontend, database, ledger, AI, IoT simulation,
 containers, CI/CD, and infrastructure-as-code.
+> **Note on figures.** Test counts quoted in this report are as of the audit it describes
+> (394 passing). The current suite is **399 passing**; the increase is regression tests added by
+> later documentation-and-demo alignment passes, not a change to any finding below.
+
 **Method:** live code review of every route handler and service function that performs an
 identifier-based lookup; dependency vulnerability scanning (`pip-audit`); secret scanning across
 162 tracked/untracked files; re-execution of the full test suite (394 tests at the time of that
@@ -229,18 +233,36 @@ SAST (Bandit, Semgrep), SCA (`pip-audit`), unit/integration tests, container bui
 (Trivy), SBOM generation (CycloneDX), IaC scanning (Checkov), and an OWASP ZAP baseline scan
 against a running instance. Every third-party action is pinned by full commit SHA, not a mutable
 tag. Both workflows declare `permissions: contents: read` explicitly rather than relying on the
-repository default. **Caveat, corrected 2026-09-13 and stated plainly:** an earlier version of this
-paragraph said the repository had no git remote and that the pipelines had never executed. Both
-claims were wrong. A remote exists and the workflows have run on hosted GitHub Actions runners
-three times (2026-09-04, 2026-09-07). Two jobs genuinely passed there — the gitleaks secret scan
-and the ledger contract tests. Every other job failed at *Set up job*, before reaching any
-security tool, because three pinned action SHAs did not resolve (one was 39 characters; a git SHA
-is 40). All eight pins were re-verified against each action's real tag list and the three broken
-ones corrected, and Semgrep now runs from the maintained PyPI CLI rather than an action last
-updated in January 2024. **What is still not established is a green pipeline run** — the fix has
-not been re-run. Correctness of the security gates therefore continues to rest on YAML validity
-and on running the equivalent checks locally (`pip-audit`, `scripts/secret_scan.py`, the full
-399-test suite), not on a green checkmark. Recorded as a residual gap, not claimed as tested.
+repository default. **Verified on hosted runners (commit `d3c1c60`, 2026-09-17).** Both
+workflows execute green on GitHub-hosted runners: CI (`iac-scan`, `lint-and-test`,
+`build-and-scan-image`) and Security (`secret-scan`, `smart-contract-tests`, `dast`). The security
+gates are therefore established by actual execution, not only by YAML validity.
+
+Reaching that state required four real fixes, recorded because they are part of the assessment
+evidence: three pinned action SHAs did not resolve (one was 39 characters, where a git SHA is 40);
+Semgrep was moved to the maintained PyPI CLI because the pinned action had been unmaintained since
+January 2024 and its successor is archived; `anchore/sbom-action` was bumped off GitHub's retired
+`v6.0-preview` artifact API; and the ZAP rules file was given its required third column, without
+which `zap-baseline.py` refused to load it. All eight action pins were re-verified against each
+action's real tag list.
+
+**DAST result.** The OWASP ZAP baseline scan reports **FAIL-NEW: 0, PASS: 65, WARN-NEW: 5** against
+a live instance. One warning was a genuine finding — a missing Cross-Origin-Embedder-Policy header
+— and was **fixed in code** (COOP/COEP/CORP headers added) rather than suppressed. The other four
+are triaged in `security/zap-rules.tsv` with a written justification each: an informational
+"this is a SPA" notice, a request header a server cannot set, deliberate `no-store` caching on
+authenticated data, and ordinary English words flagged as suspicious comments.
+
+**Container scanning — residual risk, stated plainly.** Trivy at CRITICAL/HIGH found 63 findings,
+all in base-image OS packages; the application's Python dependencies scan clean. Three had a
+published vendor fix and were remediated by applying Debian security updates in the runtime stage,
+verified by rebuild and rescan (63 → 60, 0 fixable remaining). The remaining 60 (55 HIGH, 5
+CRITICAL) have no published fix at the time of testing — 50 `affected`, 9 `fix_deferred`, 1
+`will_not_fix`. The gate runs with `ignore-unfixed: true` and `exit-code: 1`, so it still fails
+the build on anything actionable while remaining meaningful rather than permanently red; unfixed
+findings stay visible in the scan output. **All HIGH/CRITICAL findings with an available vendor fix
+were remediated. Remaining findings are upstream OS-package vulnerabilities with no published fix
+at the time of testing and are documented as residual risk** (`EXAM-LIMITATIONS.md` §2.1).
 
 ## 10. IoT security
 

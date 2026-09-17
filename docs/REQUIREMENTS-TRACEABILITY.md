@@ -46,7 +46,7 @@ an earlier internal matrix, though both were grounded in the same re-verified re
 | Requirement | Documentation | Implemented | Tested | Secure | Evidence | Status |
 |---|---|---|---|---|---|---|
 | Secure development practices for farm-management/biotech applications | `Development-rules.md` | Yes | N/A (process, not code) | Yes | This audit itself | **COMPLETE** |
-| Automated security testing for agricultural IoT and control systems | `.github/workflows/ci.yml`, `security.yml` | Yes — gitleaks, Bandit, Semgrep, pip-audit, Trivy, Checkov, ZAP, SBOM | **Executed on hosted GitHub Actions runners** (3 runs, 2026-09-04 / 2026-09-07). 2 jobs passed there — secret-scan and smart-contract-tests. The rest failed at *Set up job* on 3 unresolvable pinned action SHAs (one was 39 characters; a git SHA is 40). All 8 pins re-verified against each action's real tag list and corrected 2026-09-13; **not yet re-run** | Partially — locally-equivalent checks (pip-audit, `scripts/secret_scan.py`, the full 399-test suite) run and pass | `EXAM-LIMITATIONS.md` §2.1 | **PARTIAL** — pipeline is implemented and its action pins now resolve, but a green hosted-runner execution is not yet demonstrated |
+| Automated security testing for agricultural IoT and control systems | `.github/workflows/ci.yml`, `security.yml` | Yes — gitleaks, Bandit, Semgrep, pip-audit, Trivy, Checkov, ZAP, SBOM | **Green on GitHub-hosted runners** (commit `d3c1c60`, 2026-09-17). CI: `iac-scan`, `lint-and-test`, `build-and-scan-image`. Security: `secret-scan`, `smart-contract-tests`, `dast` | Yes — DAST reports FAIL-NEW 0 / PASS 65 against a live instance; container scan has 0 fixable HIGH/CRITICAL remaining | `SECURITY-ASSESSMENT.md` §9, `EXAM-LIMITATIONS.md` §2.1 | **COMPLETE** |
 | Vulnerability management for connected farming equipment and biotech labs | `Backend.md` §5 (`device_vulnerabilities`) | Yes — per-device CVE tracking, fleet posture dashboard | Yes — 4 tests | Yes | `services/devices.py::fleet_posture` | **COMPLETE** |
 
 ## F — Regulatory Compliance and Food Safety Automation
@@ -69,44 +69,45 @@ an earlier internal matrix, though both were grounded in the same re-verified re
 
 | Category | Total | COMPLETE | PARTIAL | MISSING | BROKEN |
 |---|---|---|---|---|---|
-| Functional (A–F, 15 requirement lines) | 15 | 14 | 1 | 0 | 0 |
+| Functional (A–F, 15 requirement lines) | 15 | 15 | 0 | 0 | 0 |
 | Cross-cutting platform (FR-X1–X7, from PRD.md, re-verified) | 7 | 7 | 0 | 0 | 0 |
 | Non-functional (NFR-1–15, from PRD.md, re-measured or re-checked) | 15 | 14 | 1 (NFR-14, accessibility — see note below) | 0 | 0 |
 | Named tools / examination-format items | 3 | 1 | 2 (documented rationale each) | 0 | 0 |
-| **Total** | **40** | **36** | **4** | **0** | **0** |
+| **Total** | **40** | **37** | **3** | **0** | **0** |
 
-### Why each of the four PARTIAL items is partial
+The Functional category reached 15/15 on 2026-09-17, when the CI/CD requirement moved from PARTIAL
+to COMPLETE: both hosted workflows now run green, which was the single condition it was missing.
 
-1. **Automated security testing in CI (category E).** The workflows exist, are valid YAML, and
-   have genuinely executed on hosted runners — two jobs passed there. They are PARTIAL, not
-   COMPLETE, because the majority of jobs never reached their security tools: they failed during
-   runner setup on three bad action pins. Those pins are now corrected and verified to resolve,
-   but until a re-run goes green on a hosted runner the pipeline's security gates remain
-   *implemented but not demonstrated end to end*. Promoting this to COMPLETE would be claiming a
-   result that has not happened.
+### Why each of the three PARTIAL items is partial
 
-2. **NFR-14 — accessibility.** Substantially improved in the 2026-09-13 pass and verified by
-   automated inspection: every form input across twelve views is programmatically labelled with a
-   `for`/`id` pair, no duplicate element ids, key/value tables use `<th scope="row">`, a skip link
-   is first in tab order and moves focus to `<main>`, the focus indicator is a visible 3px
-   outline, and there is no horizontal overflow at 390 / 768 / 1440 px. It remains PARTIAL because
-   colour-contrast ratios were not measured, screen-reader announcement quality was not assessed,
-   the chart SVGs carry an `aria-label` summary but no navigable tabular alternative, and **no
-   assistive-technology user and no independent WCAG 2.1 AA audit has tested this interface**.
-   Automated checks cannot establish conformance.
+Each states what exists, what is missing, and whether it is acceptable for an academic
+demonstration. None is a defect; each is a stated boundary.
 
-3. **Named open-source tools (Hyperledger Fabric, BLAST).** The Fabric *model* is implemented
-   in-process with real ECDSA P-256 endorsement, hash-linked blocks and Merkle roots, but this is
-   a single-node ledger, not the named platform deployed as a consortium (ADR-003, with a
-   function-by-function migration mapping). BLAST's seed-and-extend local-alignment algorithm is
-   implemented directly because the binary could not be installed (ADR-008). PARTIAL is the honest
-   status: the algorithmic and architectural principles are demonstrated; the named products are
-   not running.
+1. **NFR-14 — accessibility.** *What exists:* verified by automated inspection — every form input
+   across twelve views is programmatically labelled with a `for`/`id` pair, no duplicate element
+   ids, key/value tables use `<th scope="row">`, a skip link is first in tab order and moves focus
+   to `<main>`, the focus indicator is a visible 3px outline, and there is no horizontal overflow
+   at 390 / 768 / 1440 px. *What is missing:* colour-contrast ratios were not measured,
+   screen-reader announcement quality was not assessed, and **no assistive-technology user and no
+   independent WCAG 2.1 AA audit has tested this interface**. Automated checks cannot establish
+   conformance. *Acceptable for the demo:* yes — the mechanical accessibility work is done and
+   verified; formal conformance requires an auditor this project did not have.
 
-4. **OpenDroneMap / QGIS.** Not integrated at all. Precision-agriculture imagery is handled as
-   checksum-verified scene *metadata* with NDVI statistics, not raster processing, because no
-   physical drone or satellite imagery exists to process. This is a stated scope boundary, not a
-   silent gap — and it should not be described as "satellite imagery processing" in the viva.
+2. **Named open-source tools (Hyperledger Fabric, BLAST).** *What exists:* the Fabric model is
+   implemented in-process with real MSP identities, ECDSA P-256 endorsement, hash-linked blocks
+   and Merkle roots; BLAST's seed-and-extend local-alignment algorithm is implemented directly.
+   *What is missing:* neither named product is actually running — this is a single-node ledger,
+   not a deployed Fabric consortium, and the BLAST binary could not be installed (ADR-008).
+   *Acceptable for the demo:* yes — the architectural and algorithmic principles are what the
+   learning objective targets, and ADR-003 carries a function-by-function migration mapping. Do
+   not claim the products themselves are in use.
+
+3. **OpenDroneMap / QGIS.** *What exists:* checksum-verified satellite scene **metadata**
+   ingestion with NDVI statistics, range validation, a field-stress ranking and a low-vegetation
+   alert. *What is missing:* neither tool is integrated, and there is no raster processing at all,
+   because no physical drone or satellite imagery exists to process. *Acceptable for the demo:*
+   yes, as a stated scope boundary — but it must not be described as "satellite imagery
+   processing" in the viva.
 
 Every PARTIAL item above has a stated, specific reason and — where relevant — a migration path.
 Nothing is marked COMPLETE merely because a document says it exists; every COMPLETE row above cites
