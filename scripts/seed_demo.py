@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "backend"))
 
+from sqlalchemy import select                                             # noqa: E402
+
 from app.core.database import SessionLocal, create_all, drop_all          # noqa: E402
 from app.core.security import (device_signature, encrypt_at_rest,         # noqa: E402
                                generate_device_secret, hash_password, utcnow,
@@ -202,9 +204,203 @@ def _seed_crop_vision(db, fields, farm_org) -> int:
     return seeded
 
 
+def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now) -> dict:
+    """Seed the biotechnology and supply-chain story through the real service layer.
+
+    Without this, a clean reset leaves ten screens empty: screenings, CRISPR, review
+    queue, GMO registry, seed lots, batches, shipments, fraud, compliance and the ledger.
+    Those records used to come only from `demo_flow.py`, which is a separate step an
+    examiner-facing reset should not depend on. Nothing here is inserted directly — every
+    record goes through the same service functions the API calls, so the biosecurity gate,
+    quantity conservation, claim-conflict rejection and ledger anchoring all really run.
+    """
+    from ai.data.generate import benign_sequence, hazard_database, hazard_derived_sequence
+    from app.services import biosecurity, compliance, gmo, supplychain
+    from app.models import Product
+
+    biotech_org, farm_org, supply_org, regulator = orgs
+    researcher = users["BIOTECH_RESEARCHER"]
+    biosafety = users["BIOSAFETY_OFFICER"]
+    supply_user = users["SUPPLY_CHAIN_OPERATOR"]
+    certifier = users["CERTIFIER"]
+    reg_user = users["REGULATOR"]
+
+    def screen(name, sequence, intent, organism):
+        record = biosecurity.submit_screening(
+            db, biotech_org.id, researcher.id, researcher.role, name, sequence, intent, organism)
+        db.flush()
+        return record
+
+    # --- biosecurity: one CLEAR, one FLAG awaiting review, one BLOCK -------------
+    hazards = hazard_database()
+    clear = screen("Drought-tolerance insert DT-114", benign_sequence(1400, 17),
+                   "drought tolerance improvement", "Zea mays")
+    screen("Partial homology candidate PR-208",
+           hazard_derived_sequence(next(h for h in hazards if h["severity"] == 3)["sequence"],
+                                   0.14, 5),
+           "resistance marker research", "Zea mays")
+    blocked = screen("Unknown construct UC-993",
+                     hazard_derived_sequence(hazards[0]["sequence"], 0.05, 2),
+                     "virulence enhancement study", "Fusarium oxysporum")
+    # A blocked record is reviewed and rejected by the biosafety officer — never by the
+    # submitter. The rejection rationale is what the detail screen displays.
+    biosecurity.review_screening(
+        db, blocked, biosafety.id, biosafety.role, "REJECT",
+        "High-confidence homology to a severity-5 phytopathogen effector combined with a "
+        "stated virulence-enhancement intent. Dual-use research of concern.")
+    db.flush()
+
+    # --- CRISPR risk assessments -------------------------------------------------
+    for gene, organism, org_class, edit, intent in [
+            ("ZmDREB2A", "Zea mays", "CROP", "KNOCKOUT", "drought tolerance improvement"),
+            ("OsSWEET14", "Oryza sativa", "CROP", "BASE_EDIT", "blight resistance"),
+            ("avr effector virulence locus", "Fusarium oxysporum", "PLANT_PATHOGEN",
+             "KNOCK_IN", "virulence enhancement study")]:
+        try:
+            biosecurity.assess_crispr(db, biotech_org.id, researcher.id, researcher.role,
+                                      gene, organism, org_class, "ACGTACGTACGTACGTACGT",
+                                      "NGG", edit, intent, None)
+            db.flush()
+        except Exception as error:                                  # noqa: BLE001
+            print(f"  CRISPR seed skipped for {gene}: {error}")
+
+    # --- GMO registration (gated on the passing screening above) -----------------
+    event = gmo.register_event(
+        db, biotech_org.id, researcher.id, researcher.role, "ABS-DT114-1", "Maize",
+        "Drought tolerance", "Zea mays", "AgriGenome Biotech",
+        "Drought-tolerance transformation event for temperate maize.", clear.id)
+    db.flush()
+    for jurisdiction, status, days in [("US-USDA", "APPROVED", 900), ("US-FDA", "APPROVED", 900),
+                                       ("EU", "APPROVED", 700)]:
+        try:
+            gmo.record_approval(
+                db, event, reg_user.id, reg_user.role, jurisdiction, status,
+                f"{jurisdiction}-REF-2026-0114",
+                now - timedelta(days=60), now + timedelta(days=days), regulator.id)
+            db.flush()
+        except Exception as error:                                  # noqa: BLE001
+            print(f"  GMO approval seed skipped for {jurisdiction}: {error}")
+
+    seed_lot = gmo.create_seed_lot(
+        db, biotech_org.id, researcher.id, researcher.role, "SL-2026-0114", event.id,
+        "Maize", "GV-Hybrid-12", 4200.0, now - timedelta(days=210), 94.5)
+    db.flush()
+
+    # --- supply chain: seed lot -> batch -> custody events -> shipment -----------
+    product = db.execute(
+        select(Product).where(Product.gtin == "09501101530027")).scalar_one()
+    batch = supplychain.create_batch(
+        db, supply_org.id, supply_user.id, supply_user.role, "B-2026-0114", product.id,
+        1800.0, "kg", None, seed_lot.id, None, farms[0].id, event.id, "Iowa", "US",
+        now - timedelta(days=9))
+    db.flush()
+
+    journey = [
+        ("harvesting", "in_progress", "Green Valley North", 42.03, -93.63, 8),
+        ("transforming", "in_progress", "Continental Foods Plant A", 41.88, -93.41, 7),
+        ("packing", "in_progress", "Continental Foods Plant A", 41.88, -93.41, 6),
+        ("shipping", "in_transit", "Rotterdam Distribution Hub", 51.92, 4.48, 5),
+        ("receiving", "in_progress", "Rotterdam Distribution Hub", 51.92, 4.48, 4),
+    ]
+    for biz_step, disposition, place, lat, lon, days_ago in journey:
+        actor_org = farm_org if biz_step == "harvesting" else supply_org
+        try:
+            supplychain.record_event(
+                db, actor_org.id, supply_user.id, supply_user.role, batch, biz_step,
+                disposition, "OBJECT", None, place, lat, lon, batch.quantity, "kg", None,
+                now - timedelta(days=days_ago), {"seeded": True})
+            db.flush()
+        except Exception as error:                                  # noqa: BLE001
+            print(f"  supply-chain event seed skipped for {biz_step}: {error}")
+
+    cold_sensor = next((d for d in db.execute(
+        select(Device).where(Device.device_type == "COLD_CHAIN_SENSOR")).scalars()), None)
+    try:
+        supplychain.create_shipment(
+            db, supply_org.id, supply_user.id, supply_user.role,
+            sscc="003123450000001148", batch_id=batch.id,
+            carrier="Continental Cold Logistics", origin_name="Continental Foods Plant A",
+            origin_lat=41.88, origin_lon=-93.41,
+            destination_name="Rotterdam Distribution Hub",
+            destination_lat=51.92, destination_lon=4.48,
+            departed_at=now - timedelta(days=5), arrived_at=now - timedelta(days=4),
+            cold_chain_device_id=cold_sensor.id if cold_sensor else None)
+        db.flush()
+    except Exception as error:                                      # noqa: BLE001
+        print(f"  shipment seed skipped: {error}")
+
+    # --- certification: issue a valid specialty claim and link it ---------------
+    try:
+        cert = supplychain.issue_certification(
+            db, regulator.id, certifier.id, certifier.role, cert_code="SPC-2026-0114",
+            cert_type="SPECIALTY", standard="CODEX-GL-32", subject_org_id=supply_org.id,
+            scope="Chilled vegetables", valid_from=now - timedelta(days=40),
+            valid_to=now + timedelta(days=325))
+        db.flush()
+        supplychain.link_certification(db, cert, batch, supply_user.id, supply_user.role)
+        db.flush()
+    except Exception as error:                                      # noqa: BLE001
+        print(f"  certification seed skipped: {error}")
+
+    # --- fraud assessment and compliance report ---------------------------------
+    try:
+        supplychain.verify_batch(db, batch, supply_user.id, supply_user.role)
+        db.flush()
+    except Exception as error:                                      # noqa: BLE001
+        print(f"  batch verification seed skipped: {error}")
+
+    for jurisdiction in ("US-USDA", "EU"):
+        try:
+            compliance.evaluate_batch(db, batch, jurisdiction, reg_user.id, reg_user.role,
+                                      supply_org.id)
+            db.flush()
+        except Exception as error:                                  # noqa: BLE001
+            print(f"  compliance seed skipped for {jurisdiction}: {error}")
+
+    try:
+        compliance.environmental_impact(
+            db, event, reg_user.id, reg_user.role, regulator.id,
+            cultivation_area_ha=240.0, adjacent_wild_relatives=True,
+            pesticide_change_pct=-18.0,
+            notes="Temperate maize, drought-tolerance trait. Wild relatives recorded within "
+                  "the buffer zone, so gene-flow monitoring is required.")
+        db.flush()
+    except Exception as error:                                      # noqa: BLE001
+        print(f"  environmental impact seed skipped: {error}")
+
+    # Report what is actually in the database rather than what the loops above think they
+    # wrote: a hand-kept tally drifts the moment one call is skipped or retried.
+    from app.models import (Batch, ComplianceReport, CrisprAssessment, GMOEvent, SeedLot,
+                            SequenceScreening, Shipment, SupplyChainEvent)
+    from sqlalchemy import func
+
+    def total(model):
+        return db.execute(select(func.count()).select_from(model)).scalar_one()
+
+    return {
+        "screenings": total(SequenceScreening), "crispr": total(CrisprAssessment),
+        "gmo_events": total(GMOEvent), "seed_lots": total(SeedLot),
+        "batches": total(Batch), "supply_chain_events": total(SupplyChainEvent),
+        "shipments": total(Shipment), "compliance_reports": total(ComplianceReport),
+    }
+
+
 def reset(session) -> None:
+    import shutil
+
+    from app.core.config import get_settings
+
     drop_all()
     create_all()
+    # The ledger is a separate store. Without clearing it, `batch:B-2026-0114` and the other
+    # fixed demo codes survive the database wipe and the next seed's anchoring is rejected as
+    # duplicate-code fraud. `run_local.sh --reset` already removes this directory; doing it
+    # here means `seed_demo.py --reset` on its own is a real reset too.
+    ledger_dir = Path(get_settings().ledger_data_dir)
+    if not ledger_dir.is_absolute():
+        ledger_dir = ROOT / ledger_dir
+    if ledger_dir.exists():
+        shutil.rmtree(ledger_dir, ignore_errors=True)
 
 
 def seed(reset_first: bool) -> dict:
@@ -344,6 +540,9 @@ def seed(reset_first: bool) -> dict:
         telemetry_counts = _seed_telemetry(db, devices, device_secrets, rng, now)
         scenes = _seed_satellite(db, fields, users, farm_org, now)
         vision = _seed_crop_vision(db, fields, farm_org)
+
+        # --- biotechnology and supply chain (FR-B/C/D/F) --------------------
+        domain = _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now)
         db.commit()
 
         summary = {
@@ -356,6 +555,7 @@ def seed(reset_first: bool) -> dict:
             "telemetry_quarantined": telemetry_counts["quarantined"],
             "satellite_scenes": scenes,
             "crop_vision_analyses": vision,
+            **domain,
         }
 
     from app.core.config import get_settings

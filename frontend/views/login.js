@@ -93,13 +93,13 @@ export async function render() {
       ]),
       el('h3', { id: 'demo-accounts', text: 'Demonstration accounts' }),
       el('p', { class: 'credential-list',
-        text: 'Choose a role to fill the form, then press Sign in. Each role sees a '
-          + 'different part of the platform, so the navigation changes with the account. '
-          + `Administrator is selected by default and sees every area. Every seeded `
-          + `account uses the password ${DEMO_PASSWORD}, and these credentials exist only `
-          + 'in the seeded demo database.' }),
-      el('div', { class: 'row', role: 'group', 'aria-labelledby': 'demo-accounts' },
+        text: 'Pick a role to fill the form, then press Sign in — the navigation changes '
+          + 'with the account. Administrator is selected and sees every area.' }),
+      el('div', { class: 'role-grid', role: 'group', 'aria-labelledby': 'demo-accounts' },
         accountButtons),
+      el('p', { class: 'credential-list u-mt-8',
+        text: `All seeded accounts use the password ${DEMO_PASSWORD}. These credentials `
+          + 'exist only in the demonstration database.' }),
     ]),
   ]);
 }
