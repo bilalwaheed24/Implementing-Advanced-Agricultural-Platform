@@ -19,7 +19,7 @@ export const render = listView({
     { label: 'Quantity', numeric: true, render: (row) => `${fmtNum(row.quantity, 0)} ${row.unit}` },
     { label: 'Origin', render: (row) => row.origin_region
       ? `${row.origin_region}, ${row.origin_country}` : '—' },
-    { label: 'GMO lineage', render: (row) => row.gmo_event_id ? badge('WARNING') : '—' },
+    { label: 'GMO lineage', render: (row) => row.gmo_event_id ? badge('GMO') : '—' },
     { label: 'Anchor', render: (row) => badge(row.anchor_status) },
     { label: 'Integrity', render: (row) => badge(row.integrity_status) },
     { label: 'Verify code', render: (row) => el('a', { href: `/verify.html?code=${row.verification_code}`,

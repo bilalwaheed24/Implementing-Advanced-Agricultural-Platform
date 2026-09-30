@@ -1,4 +1,4 @@
-import { el, badge, fmtDate, fmtNum } from '/static/assets/core.js';
+import { el, badge, fmtDate, fmtNum, titleCase } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 
 export const render = listView({
@@ -9,8 +9,10 @@ export const render = listView({
   filters: [{ key: 'quality', label: 'Quality', options: ['OK', 'SUSPECT', 'QUARANTINED'] }],
   columns: [
     { label: 'Recorded', render: (row) => fmtDate(row.recorded_at) },
-    { label: 'Device', render: (row) => el('a', { href: `#/device/${row.device_id}`,
-      class: 'mono', text: row.device_id.slice(0, 8) }) },
+    { label: 'Device', render: (row) => el('a', { href: `#/device/${row.device_id}` }, [
+      el('span', { text: row.device_type ? titleCase(row.device_type) : 'Device' }),
+      el('span', { class: 'hint mono u-ml-6', text: row.device_id.slice(0, 8) }),
+    ]) },
     { label: 'Quality', render: (row) => badge(row.quality) },
     { label: 'Anomaly', numeric: true, render: (row) =>
       row.anomaly_score === null ? 'pending' : fmtNum(row.anomaly_score, 3) },

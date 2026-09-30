@@ -292,6 +292,9 @@ class TelemetryBatch(BaseModel):
 class TelemetryOut(ORMModel):
     id: str
     device_id: str
+    # The list view showed only a truncated device id, so a reader could not tell a drone
+    # from a soil sensor without decoding the channel names. Populated by the list route.
+    device_type: str | None = None
     recorded_at: datetime
     received_at: datetime
     summary: dict[str, Any]

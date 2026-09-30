@@ -8,6 +8,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request,
 from ..core.config import get_settings
 from ..core.deps import DbSession, PagingDep, client_ip, rate_limit, require_permission
 from ..core.errors import BadRequest, ValidationFailed
+from sqlalchemy import select
+
 from ..core.permissions import P
 from ..models import Device, SatelliteScene, Telemetry
 from ..repositories import get_or_404, paginate, visible
@@ -83,7 +85,20 @@ def list_telemetry(db: DbSession, paging: PagingDep,
     if quality:
         query = query.where(Telemetry.quality == quality.upper())
     rows, total = paginate(db, query, paging.page, paging.page_size)
-    return Page[TelemetryOut](items=[TelemetryOut.model_validate(r) for r in rows], total=total,
+    # One lookup for the whole page, not one per row.
+    device_types: dict[str, str] = {}
+    device_ids = {row.device_id for row in rows}
+    if device_ids:
+        device_types = {
+            device.id: device.device_type
+            for device in db.execute(
+                select(Device).where(Device.id.in_(device_ids))).scalars()}
+    items = []
+    for row in rows:
+        item = TelemetryOut.model_validate(row)
+        item.device_type = device_types.get(row.device_id)
+        items.append(item)
+    return Page[TelemetryOut](items=items, total=total,
                               page=paging.page, page_size=paging.page_size)
 
 

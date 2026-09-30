@@ -90,6 +90,10 @@ export function titleCase(value) {
 const SEVERITY_CLASS = {
   INFO: 'info', LOW: 'info', WARNING: 'warning', MEDIUM: 'warning', MODERATE: 'warning',
   HIGH: 'high', CRITICAL: 'critical', PROHIBITED: 'critical',
+  // Not a severity: a GMO lineage is a fact to disclose, not a problem. It borrows the
+  // amber treatment because it is the column a regulator scans for, and reads "GMO"
+  // rather than the meaningless "Warning" it used to show.
+  GMO: 'warning',
   VERIFIED: 'verified', COMPLIANT: 'verified', CLEAR: 'verified', ACTIVE: 'verified',
   APPROVED_AUTO: 'verified', APPROVED_BY_REVIEW: 'verified', ANCHORED: 'verified',
   MATCH: 'verified', OK: 'verified',
@@ -117,7 +121,12 @@ export function toast(message, kind = '') {
     toastStack = el('div', { class: 'toast-stack', role: 'status', 'aria-live': 'polite' });
     document.body.appendChild(toastStack);
   }
-  const node = el('div', { class: `toast ${kind}`.trim(), text: message });
+  // Dismissible: the stack sits over the bottom-right of the content, and waiting out the
+  // timer to read a table cell underneath is a poor trade.
+  const node = el('div', {
+    class: `toast ${kind}`.trim(), text: message, title: 'Click to dismiss',
+    onClick: () => node.remove(),
+  });
   toastStack.appendChild(node);
   setTimeout(() => node.remove(), kind === 'error' ? 9000 : 4500);
 }

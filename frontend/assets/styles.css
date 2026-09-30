@@ -188,7 +188,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .toast-stack { position: fixed; right: 16px; bottom: 16px; display: flex;
   flex-direction: column; gap: 8px; z-index: 50; max-width: 380px; }
-.toast { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+.toast { cursor: pointer; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
   background: var(--surface); box-shadow: 0 6px 20px rgba(0,0,0,0.18); font-size: 13px; }
 .toast.error { border-color: var(--critical); background: var(--critical-bg); color: var(--critical); }
 .toast.ok { border-color: var(--verified); background: var(--verified-bg); color: var(--verified); }
@@ -268,6 +268,7 @@ svg.chart { width: 100%; height: auto; display: block; }
 .u-fs-16 { font-size: 16px; }
 .u-fw-400 { font-weight: 400; }
 .u-mt-4 { margin-top: 4px; }
+.u-ml-6 { margin-left: 6px; }
 .u-mt-6 { margin-top: 6px; }
 .u-mt-8 { margin-top: 8px; }
 .u-mt-12 { margin-top: 12px; }

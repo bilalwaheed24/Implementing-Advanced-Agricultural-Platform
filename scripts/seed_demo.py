@@ -357,6 +357,35 @@ def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now) -> 
         except Exception as error:                                  # noqa: BLE001
             print(f"  compliance seed skipped for {jurisdiction}: {error}")
 
+    # Two further batches at earlier points in their journeys. A single row made the supply
+    # chain screens look like nothing had happened; a mix of states shows the lifecycle.
+    for code, gtin, qty, lot, gmo_event, steps, region in [
+            ("B-2026-0211", "09501101530003", 2400.0, seed_lot, event,
+             [("harvesting", "in_progress", "Green Valley South", 41.88, -93.41, 4)], "Iowa"),
+            ("B-2026-0298", "09501101530010", 950.0, None, None,
+             [("harvesting", "in_progress", "Riverbend Estate", 40.81, -96.68, 6),
+              ("transforming", "in_progress", "Continental Foods Plant A", 41.88, -93.41, 3)],
+             "Nebraska")]:
+        try:
+            other_product = db.execute(
+                select(Product).where(Product.gtin == gtin)).scalar_one()
+            extra = supplychain.create_batch(
+                db, supply_org.id, supply_user.id, supply_user.role, code, other_product.id,
+                qty, "kg", None, lot.id if lot else None, None, farms[1].id,
+                gmo_event.id if gmo_event else None, region, "US",
+                now - timedelta(days=steps[-1][5] + 2))
+            db.flush()
+            for biz_step, disposition, place, lat, lon, days_ago in steps:
+                supplychain.record_event(
+                    db, supply_org.id, supply_user.id, supply_user.role, extra, biz_step,
+                    disposition, "OBJECT", None, place, lat, lon, extra.quantity, "kg", None,
+                    now - timedelta(days=days_ago), {"seeded": True})
+                db.flush()
+            supplychain.verify_batch(db, extra, supply_user.id, supply_user.role)
+            db.flush()
+        except Exception as error:                                  # noqa: BLE001
+            print(f"  extra batch seed skipped for {code}: {error}")
+
     try:
         compliance.environmental_impact(
             db, event, reg_user.id, reg_user.role, regulator.id,
