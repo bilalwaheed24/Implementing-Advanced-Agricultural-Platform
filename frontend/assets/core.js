@@ -86,6 +86,65 @@ export function titleCase(value) {
     .join(' ');
 }
 
+/* Terms whose natural English form is not simply the title-cased enum. Everything else
+ * falls through to titleCase, so this stays short rather than becoming a dictionary. */
+const TERM_LABELS = {
+  KNOCK_IN: 'Knock-in', KNOCK_OUT: 'Knock-out', KNOCKOUT: 'Knockout',
+  BASE_EDIT: 'Base edit', PRIME_EDIT: 'Prime edit', MULTIPLEX: 'Multiplex',
+  NON_GMO: 'Non-GMO', CONTAINS_GMO: 'Contains GMO', NO_GMO_RECORDED: 'No GMO recorded',
+};
+
+/* Role codes shown to people. Sentence case, and the full job title rather than a
+ * title-cased code: ADMIN is an "Administrator", not an "Admin". */
+const ROLE_LABELS = {
+  ADMIN: 'Administrator', SECURITY_ANALYST: 'Security analyst',
+  FARM_OPERATOR: 'Farm operator', AGRONOMIST: 'Agronomist',
+  BIOTECH_RESEARCHER: 'Biotech researcher', BIOSAFETY_OFFICER: 'Biosafety officer',
+  SUPPLY_CHAIN_OPERATOR: 'Supply chain operator', CERTIFIER: 'Certifier',
+  REGULATOR: 'Regulator',
+};
+
+/* Jurisdiction codes are compound (US-USDA), which titleCase renders as "Us-usda".
+ * One label used by both the filter and the table so the two cannot disagree. */
+const JURISDICTION_LABELS = {
+  'US-USDA': 'USDA (US)', 'US-FDA': 'FDA (US)', EU: 'EU',
+  CODEX: 'Codex Alimentarius', GS1: 'GS1',
+};
+
+export function jurisdictionLabel(value) {
+  const key = String(value || '').toUpperCase();
+  return JURISDICTION_LABELS[key] || titleCase(value);
+}
+
+export function roleLabel(value) {
+  const key = String(value || '').toUpperCase();
+  return ROLE_LABELS[key] || titleCase(value);
+}
+
+/* One enum-shaped token (PLANT_PATHOGEN) rendered for a reader. Sentence case, not title
+ * case: these appear mid-sentence in generated prose, where "Plant Pathogen" reads wrong.
+ * Acronyms keep their capitals. */
+export function termLabel(value) {
+  const key = String(value || '').toUpperCase();
+  if (TERM_LABELS[key]) return TERM_LABELS[key];
+  const words = String(value || '').replace(/_/g, ' ').split(' ').filter(Boolean);
+  return words.map((word, index) => {
+    if (ACRONYMS.has(word.toUpperCase())) return word.toUpperCase();
+    const lower = word.toLowerCase();
+    return index === 0 ? lower.charAt(0).toUpperCase() + lower.slice(1) : lower;
+  }).join(' ');
+}
+
+/* Engine-generated prose embeds canonical codes mid-sentence — "Edit type KNOCK_IN
+ * carries a base weight of 0.35". The stored string is the system of record and is not
+ * rewritten; this only humanises those tokens on the way to the screen. Matches
+ * UPPER_UPPER only, so hashes, CVE ids and ordinary prose are untouched. */
+const ENUM_TOKEN = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g;
+
+export function humanizeText(value) {
+  return String(value ?? '').replace(ENUM_TOKEN, (match) => termLabel(match));
+}
+
 /* ---------------- severity ---------------- */
 const SEVERITY_CLASS = {
   INFO: 'info', LOW: 'info', WARNING: 'warning', MEDIUM: 'warning', MODERATE: 'warning',
@@ -281,9 +340,9 @@ export function table(columns, rows, options = {}) {
 export function reasonList(reasons, negativeByDefault = true) {
   const items = (reasons || []).map((reason) => {
     if (typeof reason === 'string') {
-      return el('li', { class: negativeByDefault ? '' : 'good', text: reason });
+      return el('li', { class: negativeByDefault ? '' : 'good', text: humanizeText(reason) });
     }
-    const text = reason.detail || reason.message || JSON.stringify(reason);
+    const text = humanizeText(reason.detail || reason.message || JSON.stringify(reason));
     const label = reason.rule ? `${titleCase(reason.rule)}: ${text}` : text;
     const kind = reason.rule === 'none' ? 'good' : 'bad';
     return el('li', { class: kind, text: label });

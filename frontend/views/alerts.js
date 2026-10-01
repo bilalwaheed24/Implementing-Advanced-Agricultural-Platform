@@ -1,9 +1,13 @@
-import { el, api, badge, fmtDate, titleCase, toast, can } from '/static/assets/core.js';
+import { el, api, badge, fmtDate, humanizeText, titleCase, toast,
+         can } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 
 function actionButtons(row, reload) {
+  // Permission- and state-aware exactly as before: only an open alert can be acted on,
+  // and only by a principal holding alert:write. The difference is that the current
+  // state is no longer communicated by the absence of buttons — it has its own column.
   if (!can('alert:write') || row.status !== 'OPEN') {
-    return el('span', { class: 'hint', text: titleCase(row.status) });
+    return el('span', { class: 'hint', text: '—' });
   }
   return el('div', { class: 'row' }, [
     el('button', { text: 'Acknowledge', onClick: async () => {
@@ -41,12 +45,13 @@ export const render = listView({
     { label: 'Category', render: (row) => titleCase(row.category) },
     { label: 'Title', render: (row) => el('div', {}, [
         el('strong', { text: row.title }),
-        row.detail ? el('div', { class: 'hint', text: row.detail }) : null,
+        row.detail ? el('div', { class: 'hint', text: humanizeText(row.detail) }) : null,
       ]) },
     { label: 'Reasons', render: (row) => el('span', { class: 'hint',
-        text: (row.reasons || []).slice(0, 2)
-          .map((r) => (typeof r === 'string' ? r : r.rule || '')).join('; ') }) },
-    { label: 'Status', render: (row, ctx) => actionButtons(row, ctx.reload) },
+        text: humanizeText((row.reasons || []).slice(0, 2)
+          .map((r) => (typeof r === 'string' ? r : r.rule || '')).join('; ')) }) },
+    { label: 'Status', render: (row) => badge(row.status) },
+    { label: 'Actions', render: (row, ctx) => actionButtons(row, ctx.reload) },
   ],
   emptyTitle: 'No alerts',
   emptyMessage: 'Nothing has triggered an alert. Try: python3 iot/simulator.py --mode spoof',

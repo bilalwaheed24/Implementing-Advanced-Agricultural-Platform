@@ -1,4 +1,4 @@
-import { el, api, badge, fmtDate, table, titleCase, toast, can, empty } from '/static/assets/core.js';
+import { el, api, badge, fmtDate, table, titleCase, toast, can, empty, roleLabel } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 
 async function orgsCard() {
@@ -24,9 +24,9 @@ const ROLES = ['ADMIN', 'SECURITY_ANALYST', 'FARM_OPERATOR', 'AGRONOMIST',
               'CERTIFIER', 'REGULATOR'];
 
 function roleCell(row, reload) {
-  if (!can('user:write')) return titleCase(row.role);
+  if (!can('user:write')) return roleLabel(row.role);
   return el('div', { class: 'row' }, [
-    titleCase(row.role),
+    roleLabel(row.role),
     el('button', { text: 'Change', onClick: async () => {
       const next = window.prompt(
         `New role for ${row.email} (one of: ${ROLES.join(', ')}):`, row.role);
@@ -69,7 +69,7 @@ function userActions(row, reload) {
 
 export const render = listView({
   title: 'Users and organisations',
-  subtitle: 'Privileged roles are created PENDING and require administrator approval.',
+  subtitle: 'Privileged roles are created Pending and require administrator approval.',
   endpoint: '/admin/users',
   extra: orgsCard,
   filters: [{ key: 'status', label: 'Status', options: ['PENDING', 'ACTIVE', 'SUSPENDED'] }],

@@ -1,6 +1,7 @@
 /* Application shell: hash router, role-filtered navigation, view mounting. */
 import { el, clear, session, api, can, toast, errorBox, loading,
-         unauthorizedCard } from '/static/assets/core.js';
+         unauthorizedCard,
+         roleLabel } from '/static/assets/core.js';
 
 const NAV = [
   { group: 'Overview', items: [
@@ -115,7 +116,7 @@ function sidebar(current) {
     ...groups,
     el('div', { class: 'u-push-top' }, [
       el('div', { class: 'hint', text: user?.full_name || '' }),
-      el('div', { class: 'hint mono', text: user?.role || '' }),
+      el('div', { class: 'hint', text: user?.role ? roleLabel(user.role) : '' }),
       el('button', { class: 'u-mt-8 u-full-width', text: 'Sign out',
         onClick: signOut }),
     ]),

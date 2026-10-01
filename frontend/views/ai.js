@@ -1,5 +1,5 @@
 import { el, api, badge, fmtDate, barChart, severityColour, table, empty,
-         titleCase } from '/static/assets/core.js';
+         termLabel, titleCase } from '/static/assets/core.js';
 
 export async function render() {
   const [summary, analyses, cards] = await Promise.all([
@@ -28,7 +28,25 @@ export async function render() {
       table([
         { label: 'When', render: (row) => fmtDate(row.created_at) },
         { label: 'Type', render: (row) => titleCase(row.analysis_type) },
-        { label: 'Subject', render: (row) => `${row.subject_type} ${row.subject_id.slice(0, 8)}` },
+        // The subject used to render as "Field d973dfe7", which named nothing a reader
+        // could act on. The analysis already carries the field name or device class in
+        // its evidence, so use that and keep the id as the secondary technical handle.
+        // No label is invented: if the evidence has none, the id is labelled as unknown.
+        { label: 'Subject', render: (row) => {
+          const evidence = row.evidence || {};
+          const shortId = String(row.subject_id || '').slice(0, 8);
+          const name = evidence.field
+            || (evidence.device_type ? termLabel(evidence.device_type) : null);
+          if (!name) {
+            return el('span', { class: 'hint',
+              text: `Unknown ${String(row.subject_type || 'subject').toLowerCase()} (${shortId})` });
+          }
+          return el('div', {}, [
+            el('div', { text: name }),
+            el('div', { class: 'hint mono',
+              text: `${titleCase(row.subject_type)} ID: ${shortId}` }),
+          ]);
+        } },
         { label: 'Score', numeric: true, key: 'score' },
         { label: 'Level', render: (row) => badge(row.level) },
         { label: 'Degraded', render: (row) => row.degraded ? badge('WARNING') : '—' },

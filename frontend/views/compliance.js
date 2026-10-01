@@ -1,4 +1,5 @@
-import { el, api, badge, field, fmtDate, table, empty, toast, can, reasonList, titleCase } from '/static/assets/core.js';
+import { el, api, badge, field, fmtDate, jurisdictionLabel, table, empty, toast, can,
+         reasonList, titleCase } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 
 function evaluateForm(reload) {
@@ -39,7 +40,7 @@ export function render(context) {
       + 'requirements — an engineering control, not legal advice.',
     endpoint: '/compliance/reports',
     filters: [
-      { key: 'jurisdiction', label: 'Jurisdiction',
+      { key: 'jurisdiction', label: 'Jurisdiction', optionLabel: jurisdictionLabel,
         options: ['US-USDA', 'US-FDA', 'EU', 'CODEX', 'GS1'] },
       { key: 'report_type', label: 'Type', options: ['COMPLIANCE', 'ENVIRONMENTAL_IMPACT'] },
     ],
@@ -47,7 +48,7 @@ export function render(context) {
     columns: [
       { label: 'Generated', render: (row) => fmtDate(row.created_at) },
       { label: 'Type', render: (row) => titleCase(row.report_type) },
-      { label: 'Jurisdiction', key: 'jurisdiction' },
+      { label: 'Jurisdiction', render: (row) => jurisdictionLabel(row.jurisdiction) },
       { label: 'Status', render: (row) => badge(row.status) },
       // An environmental-impact assessment records findings, not pass/fail rules, so it has
       // no `passed` count — rendering it as "—/4" read like a broken number.

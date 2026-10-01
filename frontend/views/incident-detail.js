@@ -1,4 +1,4 @@
-import { el, api, badge, field, fmtDate, toast, can, empty, titleCase } from '/static/assets/core.js';
+import { el, api, badge, field, fmtDate, toast, can, empty, titleCase, humanizeText } from '/static/assets/core.js';
 
 export async function render({ id }) {
   if (!id) return empty('No incident selected', 'Choose an incident from the list.');
@@ -9,7 +9,7 @@ export async function render({ id }) {
     el('li', {}, [
       el('strong', { text: titleCase(event.action) }),
       el('div', { class: 'when', text: fmtDate(event.created_at) }),
-      event.detail ? el('div', { class: 'hint', text: event.detail }) : null,
+      event.detail ? el('div', { class: 'hint', text: humanizeText(event.detail) }) : null,
     ])));
 
   const controls = [];
@@ -44,7 +44,7 @@ export async function render({ id }) {
       ' · opened ', fmtDate(incident.created_at)]),
     el('div', { class: 'card' }, [
       el('h2', { text: 'Summary' }),
-      el('p', { text: incident.summary || 'No summary recorded.' }),
+      el('p', { text: humanizeText(incident.summary) || 'No summary recorded.' }),
       incident.root_cause ? el('p', {}, [el('strong', { text: 'Root cause: ' }),
         incident.root_cause]) : null,
     ]),

@@ -1,5 +1,6 @@
 import { el, api, tile, badge, barChart, severityColour, empty, can, session,
-         fmtNum, titleCase } from '/static/assets/core.js';
+         fmtNum, titleCase,
+         humanizeText } from '/static/assets/core.js';
 
 export async function render() {
   const [dash, alerts] = await Promise.all([
@@ -61,7 +62,8 @@ export async function render() {
       el('ul', { class: 'reasons' }, alerts.items.map((alert) => el('li', { class: 'bad' }, [
         badge(alert.severity), ' ',
         el('strong', { text: alert.title }),
-        el('div', { class: 'hint', text: `${titleCase(alert.category)} — ${alert.detail || ''}` }),
+        el('div', { class: 'hint',
+          text: `${titleCase(alert.category)} — ${humanizeText(alert.detail || '')}` }),
       ]))),
       el('a', { href: '#/alerts', text: 'View all alerts →' }),
     ]));

@@ -1,4 +1,4 @@
-import { el, session, api, rowHeader, titleCase, toast } from '/static/assets/core.js';
+import { el, session, api, rowHeader, titleCase, toast, roleLabel } from '/static/assets/core.js';
 
 export async function render() {
   const me = await api('/auth/me');
@@ -9,7 +9,7 @@ export async function render() {
       el('table', {}, [
         el('tr', {}, [rowHeader('Name'), el('td', { text: me.full_name })]),
         el('tr', {}, [rowHeader('Email'), el('td', { class: 'mono', text: me.email })]),
-        el('tr', {}, [rowHeader('Role'), el('td', { text: titleCase(me.role) })]),
+        el('tr', {}, [rowHeader('Role'), el('td', { text: roleLabel(me.role) })]),
         el('tr', {}, [rowHeader('Organisation id'),
           el('td', { class: 'mono', text: me.org_id })]),
       ]),

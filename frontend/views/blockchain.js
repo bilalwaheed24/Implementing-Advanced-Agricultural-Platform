@@ -24,9 +24,13 @@ export async function render() {
     el('p', { class: 'subtitle' }, [
       el('span', { class: 'demo-flag', text: 'DEMO: single-node ordering' }),
       ' — cryptography (ECDSA P-256, SHA-256, Merkle proofs) is real. See ',
-      el('a', { href: 'https://en.wikipedia.org/wiki/Hyperledger', target: '_blank',
-        rel: 'noopener', text: 'docs/Blockchain-integration.md', class: 'u-hidden' }),
-      'docs/Blockchain-integration.md for the migration path to production Hyperledger Fabric.',
+      // Was a display:none anchor whose text read like a repository path but whose href
+      // pointed at Wikipedia — invisible to a user, and misleading to anything reading the
+      // DOM. It now visibly links to the project document it actually names.
+      el('a', { href: 'https://github.com/bilalwaheed24/Implementing-Advanced-Agricultural'
+        + '-Platform/blob/main/docs/Blockchain-integration.md', target: '_blank',
+        rel: 'noopener', text: 'docs/Blockchain-integration.md' }),
+      ' for the migration path to production Hyperledger Fabric.',
     ]),
     el('div', { class: 'grid cols-4' }, [
       el('div', { class: 'tile' }, [el('div', { class: 'label', text: 'Chain valid' }),

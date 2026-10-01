@@ -8,10 +8,17 @@ export const render = listView({
   endpoint: '/supply-chain/fraud-assessments',
   columns: [
     { label: 'Assessed', render: (row) => fmtDate(row.created_at) },
-    { label: 'Batch', render: (row) => el('a', { href: `#/batch/${row.batch_id}`,
-      class: 'mono', text: row.batch_id.slice(0, 8) }) },
+    // The business batch code is what a supply-chain operator recognises; the internal id
+    // stays beneath it so a record is still traceable. The link target is unchanged.
+    { label: 'Batch', render: (row) => el('a', { href: `#/batch/${row.batch_id}` }, [
+      el('div', { class: 'mono', text: row.batch_code || 'Unknown batch' }),
+      el('div', { class: 'hint mono', text: `ID: ${String(row.batch_id || '').slice(0, 8)}` }),
+    ]) },
     { label: 'Score', numeric: true, key: 'score' },
-    { label: 'Level', render: (row) => badge(row.level) },
+    // `level` holds VERIFIED / SUSPECT / FAILED — the integrity verdict, not a fraud-risk
+    // band. The heading said Level while the cell said Verified, which read as two
+    // different things. No risk level is invented; the column is named what it holds.
+    { label: 'Integrity', render: (row) => badge(row.level) },
     { label: 'Ledger', render: (row) => badge(row.ledger_status) },
     { label: 'Reasons', render: (row) => (row.reasons || []).length
       ? el('details', {}, [

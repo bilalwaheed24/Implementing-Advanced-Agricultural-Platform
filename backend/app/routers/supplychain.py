@@ -236,7 +236,16 @@ def list_fraud(db: DbSession, paging: PagingDep,
     query = visible(FraudAssessment, principal.role, principal.org_id).order_by(
         FraudAssessment.created_at.desc())
     rows, total = paginate(db, query, paging.page, paging.page_size)
-    items = [{"id": r.id, "batch_id": r.batch_id, "score": r.score, "level": r.level,
+    # The list showed only the batch's internal id, which is not the identifier anyone in
+    # the supply chain uses. Resolve the business codes for the page in one query.
+    batch_codes: dict[str, str] = {}
+    batch_ids = {r.batch_id for r in rows}
+    if batch_ids:
+        batch_codes = {
+            batch.id: batch.batch_code
+            for batch in db.execute(select(Batch).where(Batch.id.in_(batch_ids))).scalars()}
+    items = [{"id": r.id, "batch_id": r.batch_id,
+              "batch_code": batch_codes.get(r.batch_id), "score": r.score, "level": r.level,
               "ledger_status": r.ledger_status, "reasons": r.reasons,
               "model_version": r.model_version, "created_at": r.created_at} for r in rows]
     return Page[dict](items=items, total=total, page=paging.page, page_size=paging.page_size)

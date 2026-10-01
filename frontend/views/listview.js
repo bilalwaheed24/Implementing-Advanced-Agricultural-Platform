@@ -28,7 +28,7 @@ export function listView({ title, subtitle, endpoint, columns, filters = [], act
       }, [
         el('option', { value: '', text: filter.allLabel || 'All' }),
         ...filter.options.map((option) => el('option', {
-          value: option, text: titleCase(option),
+          value: option, text: (filter.optionLabel || titleCase)(option),
           selected: state.filters[filter.key] === option ? 'selected' : null,
         })),
       ]),

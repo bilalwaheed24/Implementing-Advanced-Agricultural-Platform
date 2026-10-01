@@ -1,4 +1,4 @@
-import { el, api, badge, fmtDate, toast, can } from '/static/assets/core.js';
+import { el, api, badge, fmtDate, toast, can, humanizeText } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 
 export const render = listView({
@@ -13,7 +13,8 @@ export const render = listView({
     { label: 'Title', render: (row) => el('a', { href: `#/incident/${row.id}`, text: row.title }) },
     { label: 'Severity', render: (row) => badge(row.severity) },
     { label: 'Status', render: (row) => badge(row.status) },
-    { label: 'Summary', render: (row) => el('span', { class: 'hint', text: row.summary }) },
+    { label: 'Summary', render: (row) => el('span', { class: 'hint',
+      text: humanizeText(row.summary) }) },
   ],
   emptyTitle: 'No incidents',
   emptyMessage: 'A HIGH or CRITICAL alert opens an incident automatically.',
