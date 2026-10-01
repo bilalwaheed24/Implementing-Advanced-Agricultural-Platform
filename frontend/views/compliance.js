@@ -49,8 +49,16 @@ export function render(context) {
       { label: 'Type', render: (row) => titleCase(row.report_type) },
       { label: 'Jurisdiction', key: 'jurisdiction' },
       { label: 'Status', render: (row) => badge(row.status) },
-      { label: 'Pass rate', numeric: true, render: (row) =>
-        `${row.summary?.passed ?? '—'}/${row.summary?.rules_evaluated ?? '—'}` },
+      // An environmental-impact assessment records findings, not pass/fail rules, so it has
+      // no `passed` count — rendering it as "—/4" read like a broken number.
+      { label: 'Pass rate', numeric: true, render: (row) => {
+        const total = row.summary?.rules_evaluated;
+        if (total === undefined || total === null) return '—';
+        const passed = row.summary?.passed;
+        return passed === undefined || passed === null
+          ? `${total} finding${total === 1 ? '' : 's'}`
+          : `${passed}/${total}`;
+      } },
       { label: 'Anchor', render: (row) => badge(row.anchor_status) },
       { label: 'Detail', render: (row) => el('details', {}, [
         el('summary', { class: 'hint', text: 'Rule results' }),
