@@ -4,7 +4,8 @@ from __future__ import annotations
 import pytest
 
 from app.core.permissions import (APPROVAL_REQUIRED_ROLES, CROSS_TENANT_ROLES, P,
-                                  ROLE_PERMISSIONS, Role, has_permission, is_write_permission)
+                                  REGULATED_SPECIALIST_PERMISSIONS, ROLE_PERMISSIONS, Role,
+                                  has_permission, is_write_permission)
 
 # Routes that are public by design (Security.md §3).
 PUBLIC_PATHS = {"/health", "/health/live", "/health/ready", "/metrics", "/", "/verify.html",
@@ -20,8 +21,19 @@ class TestRolePermissionMatrix:
         for role in Role:
             assert ROLE_PERMISSIONS[role], f"{role} has no permissions"
 
-    def test_admin_has_every_permission(self):
-        assert ROLE_PERMISSIONS[Role.ADMIN] == frozenset(set(P))
+    def test_admin_holds_everything_except_the_regulated_specialist_acts(self):
+        """ADMIN is platform administration, not regulated authority: it must not be able to
+        clear a biosecurity screening, grant a GMO approval, issue a certification or edit the
+        hazard database, or the separation of duties in this table means nothing (audit P2)."""
+        assert ROLE_PERMISSIONS[Role.ADMIN] == frozenset(
+            set(P) - REGULATED_SPECIALIST_PERMISSIONS)
+        for forbidden in REGULATED_SPECIALIST_PERMISSIONS:
+            assert forbidden not in ROLE_PERMISSIONS[Role.ADMIN], forbidden
+
+    def test_admin_keeps_the_permissions_administration_actually_needs(self):
+        for needed in (P.USER_READ, P.USER_WRITE, P.ORG_WRITE, P.DEVICE_CONTAIN,
+                       P.AUDIT_READ, P.AUDIT_ANCHOR, P.CERT_REVOKE):
+            assert needed in ROLE_PERMISSIONS[Role.ADMIN], needed
 
     def test_regulator_cannot_mutate_operational_data(self):
         """A regulator holds exactly two non-read permissions, and neither one touches
@@ -48,13 +60,21 @@ class TestRolePermissionMatrix:
         assert has_permission("BIOTECH_RESEARCHER", P.BIOSECURITY_SUBMIT)
         assert not has_permission("BIOTECH_RESEARCHER", P.BIOSECURITY_REVIEW)
 
-    def test_only_certifier_and_admin_may_issue_certifications(self):
+    def test_only_a_certifier_may_issue_certifications(self):
         allowed = {role for role in Role if has_permission(role.value, P.CERT_ISSUE)}
-        assert allowed == {Role.CERTIFIER, Role.ADMIN}
+        assert allowed == {Role.CERTIFIER}
 
-    def test_only_biosafety_and_admin_may_review_biosecurity(self):
+    def test_only_a_biosafety_officer_may_review_biosecurity(self):
         allowed = {role for role in Role if has_permission(role.value, P.BIOSECURITY_REVIEW)}
-        assert allowed == {Role.BIOSAFETY_OFFICER, Role.ADMIN}
+        assert allowed == {Role.BIOSAFETY_OFFICER}
+
+    def test_only_a_regulator_may_grant_a_gmo_approval(self):
+        allowed = {role for role in Role if has_permission(role.value, P.GMO_APPROVE)}
+        assert allowed == {Role.REGULATOR}
+
+    def test_only_a_biosafety_officer_may_curate_the_hazard_database(self):
+        allowed = {role for role in Role if has_permission(role.value, P.HAZARD_WRITE)}
+        assert allowed == {Role.BIOSAFETY_OFFICER}
 
     def test_unknown_role_has_nothing(self):
         assert not has_permission("SUPERUSER", P.FARM_READ)

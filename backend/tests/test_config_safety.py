@@ -33,7 +33,8 @@ def clean_config(monkeypatch, tmp_path):
     applied *before* the reload. So REPO_ROOT is patched *after* reloading, once the
     fresh module object exists to patch.
     """
-    for var in ("JWT_SECRET", "ENCRYPTION_KEY", "DATABASE_URL", "ENV"):
+    for var in ("JWT_SECRET", "ENCRYPTION_KEY", "DATABASE_URL", "ENV", "AI_SERVICE_URL",
+                "LEDGER_SERVICE_URL", "SERVICE_TOKEN"):
         monkeypatch.delenv(var, raising=False)
     module = importlib.reload(importlib.import_module("app.core.config"))
     monkeypatch.setattr(module, "REPO_ROOT", tmp_path, raising=False)
@@ -86,6 +87,40 @@ class TestProductionRefusesAnAbsentSecret:
         settings = clean_config.get_settings()
         assert settings.is_production
         assert len(settings.encryption_key) == 32
+
+
+class TestSplitServiceConfiguration:
+    """ADR-016: the api's calls to the ai and ledger containers."""
+
+    def _production(self, monkeypatch) -> None:
+        monkeypatch.setenv("ENV", "production")
+        monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@host/db")
+        monkeypatch.setenv("JWT_SECRET", secrets.token_urlsafe(48))
+        monkeypatch.setenv("ENCRYPTION_KEY", base64.b64encode(secrets.token_bytes(32)).decode())
+        monkeypatch.setenv("LEDGER_SERVICE_URL", "http://ledger:8200")
+
+    def test_missing_service_token_refuses_to_start(self, clean_config, monkeypatch):
+        self._production(monkeypatch)
+        with pytest.raises(clean_config.ConfigurationError, match="SERVICE_TOKEN"):
+            clean_config.get_settings()
+
+    def test_short_service_token_refuses_to_start(self, clean_config, monkeypatch):
+        self._production(monkeypatch)
+        monkeypatch.setenv("SERVICE_TOKEN", "too-short")
+        with pytest.raises(clean_config.ConfigurationError, match="SERVICE_TOKEN"):
+            clean_config.get_settings()
+
+    def test_strong_service_token_starts(self, clean_config, monkeypatch):
+        self._production(monkeypatch)
+        monkeypatch.setenv("SERVICE_TOKEN", secrets.token_urlsafe(48))
+        assert clean_config.get_settings().ledger_service_url == "http://ledger:8200"
+
+    @pytest.mark.parametrize("url", ["file:///etc/passwd", "ftp://ledger:8200", "ledger:8200"])
+    def test_non_http_service_url_refuses_to_start(self, clean_config, monkeypatch, url):
+        monkeypatch.setenv("ENV", "development")
+        monkeypatch.setenv("AI_SERVICE_URL", url)
+        with pytest.raises(clean_config.ConfigurationError, match="AI_SERVICE_URL"):
+            clean_config.get_settings()
 
 
 class TestDevelopmentConvenience:
