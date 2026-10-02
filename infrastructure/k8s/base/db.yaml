@@ -1,0 +1,70 @@
+# PostgreSQL (ADR-017). In AWS this is RDS (infrastructure/terraform); this StatefulSet is
+# for self-contained clusters such as the local k3d one.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db
+  namespace: absp
+  labels: { app: db, app.kubernetes.io/part-of: absp }
+spec:
+  serviceName: db
+  replicas: 1
+  selector:
+    matchLabels: { app: db }
+  template:
+    metadata:
+      labels: { app: db, app.kubernetes.io/part-of: absp }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70            # postgres user in the alpine image
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+          ports: [{ containerPort: 5432 }]
+          env:
+            - { name: POSTGRES_DB, value: absp }
+            - { name: POSTGRES_USER, value: absp }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: absp-secrets, key: POSTGRES_PASSWORD } }
+            # Subdirectory, because the volume root holds lost+found on most provisioners.
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
+          readinessProbe:
+            exec: { command: [pg_isready, -U, absp, -d, absp] }
+            periodSeconds: 10
+          livenessProbe:
+            exec: { command: [pg_isready, -U, absp, -d, absp] }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          volumeMounts:
+            - { name: pgdata, mountPath: /var/lib/postgresql/data }
+            - { name: run, mountPath: /var/run/postgresql }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: run, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+  volumeClaimTemplates:
+    - metadata: { name: pgdata }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  namespace: absp
+spec:
+  selector: { app: db }
+  ports: [{ port: 5432, targetPort: 5432 }]
