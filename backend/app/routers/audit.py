@@ -8,8 +8,9 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from ..core.deps import DbSession, PagingDep, rate_limit, require_permission
+from ..core.errors import NotFound
 from ..core.permissions import P
-from ..models import AuditLog
+from ..models import AuditLog, Organization
 from ..repositories import paginate
 from ..schemas import AuditLogOut, Page
 from ..services import audit as service
@@ -53,8 +54,13 @@ def verify(db: DbSession,
 
 @router.post("/anchor", summary="Anchor the current audit chain head to the ledger")
 def anchor(db: DbSession,
-           principal: Annotated[object, Depends(require_permission(P.AUDIT_READ))]) -> dict:
-    result = service.anchor_head(db)
+           principal: Annotated[object, Depends(require_permission(P.AUDIT_ANCHOR))]) -> dict:
+    """The ledger identity is taken from the caller's own organisation, so the transaction is
+    attributed to whoever actually submitted it (audit P1)."""
+    organization = db.get(Organization, principal.org_id)
+    if organization is None:
+        raise NotFound("Organisation not found")
+    result = service.anchor_head(db, organization.msp_id)
     db.commit()
     return result
 

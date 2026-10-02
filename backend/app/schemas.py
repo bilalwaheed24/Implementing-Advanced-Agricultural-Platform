@@ -33,11 +33,14 @@ class Page(BaseModel, Generic[T]):
 # Auth and identity
 # --------------------------------------------------------------------------- #
 class RegisterRequest(BaseModel):
+    """Self-registration. `requested_role` is advisory only — the server always creates the
+    account PENDING with the least-privileged role, and an administrator grants the real one
+    on approval. Anything else would let an anonymous caller join an arbitrary organisation."""
     email: str = Field(min_length=5, max_length=255)
     full_name: str = Field(min_length=2, max_length=200)
     password: str = Field(min_length=12, max_length=128)
-    role: str = Field(default="FARM_OPERATOR")
     org_id: str = Field(min_length=1, max_length=36)
+    requested_role: str | None = Field(default=None, max_length=40)
 
     @field_validator("email")
     @classmethod
@@ -430,6 +433,7 @@ class ScreeningOut(ORMModel):
     hazard_classes: list[Any]
     status: str
     durc_flag: bool
+    submitted_by: str              # lets the UI hide review controls from the submitter
     reviewed_by: str | None = None
     reviewed_at: datetime | None = None
     review_rationale: str | None = None
@@ -487,6 +491,7 @@ class CrisprOut(ORMModel):
     durc_flag: bool
     reasons: list[Any]
     status: str
+    submitted_by: str              # lets the UI hide review controls from the submitter
     reviewed_by: str | None = None
     review_rationale: str | None = None
     created_at: datetime

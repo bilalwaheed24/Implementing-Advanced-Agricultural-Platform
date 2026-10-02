@@ -1,5 +1,15 @@
-import { el, api, badge, field, fmtNum, fmtDay, toast } from '/static/assets/core.js';
+import { el, api, badge, can, field, fmtNum, fmtDay, toast } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
+
+// Readable labels rather than the field names ("area ha").
+const FIELD_LABELS = {
+  name: 'Farm name',
+  region: 'Region',
+  country: 'Country (ISO 2-letter)',
+  latitude: 'Latitude',
+  longitude: 'Longitude',
+  area_ha: 'Area (hectares)',
+};
 
 function createFarmForm(reload) {
   const fields = {
@@ -13,7 +23,7 @@ function createFarmForm(reload) {
   const message = el('div', { class: 'error-text', role: 'alert' });
   const form = el('form', { class: 'u-hidden' }, [
     el('div', { class: 'grid cols-3' }, Object.entries(fields).map(([key, input]) =>
-      field(key.replace(/_/g, ' '), input))),
+      field(FIELD_LABELS[key] || key.replace(/_/g, ' '), input))),
     message,
     el('button', { class: 'primary', type: 'submit', text: 'Create farm' }),
   ]);
@@ -56,7 +66,9 @@ export const render = listView({
     { label: 'Fields', render: (row) => el('a', {
       href: `#/farms?farm_id=${row.id}`, text: 'View fields' }) },
   ],
-  actions: ({ reload }) => createFarmForm(reload),
+  // Evaluated per render, and gated on the permission the endpoint actually requires, so
+  // read-only roles are not offered a button that can only ever return 403.
+  actions: ({ reload }) => (can('farm:write') ? createFarmForm(reload) : null),
   emptyTitle: 'No farms registered',
   emptyMessage: 'Register a farm to start attaching fields, crops and devices to it.',
 });

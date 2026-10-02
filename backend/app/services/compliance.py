@@ -11,7 +11,7 @@ from typing import Any, Callable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..core.errors import NotFound, ValidationFailed
+from ..core.errors import NotFound, PermissionDenied, ValidationFailed
 from ..core.security import ensure_aware as _aware, content_hash, utcnow
 from ..models import (Batch, ComplianceReport, GMOApproval, GMOEvent, Organization, Product,
                       SequenceScreening, SupplyChainEvent)
@@ -295,12 +295,29 @@ def evaluate_batch(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
     return report
 
 
+# Identities the compliance_anchor.AnchorReport chaincode function accepts
+# (ledger/contracts.py SUBMIT_RIGHTS). Kept in one place so the application and the
+# chaincode cannot drift apart silently.
+ANCHOR_RIGHTS = frozenset({"RegulatorMSP", "SupplyMSP"})
+
+
 def _reporting_msp(db: Session, org_id: str) -> str:
-    """Only RegulatorMSP and SupplyMSP may anchor reports; fall back to SupplyMSP."""
+    """The organisation's own ledger identity, or a clear failure.
+
+    This used to fall back to "SupplyMSP" whenever the caller's organisation was not already a
+    regulator or supplier, so a Farm or Biotech organisation anchored its report under another
+    organisation's identity — the ledger then attributed the transaction to a party that never
+    submitted it (audit P2). Anchoring under a borrowed identity is worse than not anchoring, so
+    this now fails closed and the caller is told why.
+    """
     organization = db.get(Organization, org_id)
-    if organization and organization.msp_id in {"RegulatorMSP", "SupplyMSP"}:
-        return organization.msp_id
-    return "SupplyMSP"
+    if organization is None:
+        raise NotFound("Organisation not found")
+    if organization.msp_id not in ANCHOR_RIGHTS:
+        raise PermissionDenied(
+            f"{organization.name} ({organization.msp_id}) is not permitted to anchor compliance "
+            f"reports on the ledger. Permitted identities: {', '.join(sorted(ANCHOR_RIGHTS))}.")
+    return organization.msp_id
 
 
 # --------------------------------------------------------------------------- #

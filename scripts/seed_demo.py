@@ -175,17 +175,15 @@ def _seed_crop_vision(db, fields, farm_org) -> int:
     import numpy as np
 
     from ai.data.generate import leaf_patch
-    from ai.vision import IMAGE_SIZE, classify
-    from app.core.config import get_settings
     from app.models import AIAnalysis
+    from app.services import ai_client
 
-    settings = get_settings()
-    model_dir = str(settings.repo_root / "ai" / "models")
     rng = np.random.default_rng(2026)
     seeded = 0
     for index, label in enumerate(["HEALTHY", "LEAF_BLIGHT", "RUST", "NUTRIENT_DEFICIENCY"]):
         try:
-            result = classify(leaf_patch(label, IMAGE_SIZE, rng), model_dir=model_dir)
+            size = ai_client.meta()["image_size"]
+            result = ai_client.classify_image(leaf_patch(label, size, rng).ravel().tolist(), size)
         except Exception as error:                                  # noqa: BLE001
             print(f"  crop-vision seed skipped for {label}: {error}")
             continue
@@ -415,9 +413,7 @@ def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now) -> 
 
 
 def reset(session) -> None:
-    import shutil
-
-    from app.core.config import get_settings
+    from app.services import ledger_client
 
     drop_all()
     create_all()
@@ -425,11 +421,8 @@ def reset(session) -> None:
     # fixed demo codes survive the database wipe and the next seed's anchoring is rejected as
     # duplicate-code fraud. `run_local.sh --reset` already removes this directory; doing it
     # here means `seed_demo.py --reset` on its own is a real reset too.
-    ledger_dir = Path(get_settings().ledger_data_dir)
-    if not ledger_dir.is_absolute():
-        ledger_dir = ROOT / ledger_dir
-    if ledger_dir.exists():
-        shutil.rmtree(ledger_dir, ignore_errors=True)
+    # In the split stack (ADR-016) this asks the ledger container to reset itself.
+    ledger_client.reset_store()
 
 
 def seed(reset_first: bool) -> dict:

@@ -1,0 +1,65 @@
+# Ledger node (ADR-016). Exactly one replica: it is the sole writer of the chain, and the
+# ordering is single-node by design (ADR-003). Never scale it.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ledger
+  namespace: absp
+  labels: { app: ledger, app.kubernetes.io/part-of: absp }
+spec:
+  serviceName: ledger
+  replicas: 1
+  selector:
+    matchLabels: { app: ledger }
+  template:
+    metadata:
+      labels: { app: ledger, app.kubernetes.io/part-of: absp }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: ledger
+          image: absp-ledger:1.0.0
+          ports: [{ containerPort: 8200 }]
+          env:
+            - name: SERVICE_TOKEN
+              valueFrom: { secretKeyRef: { name: absp-secrets, key: SERVICE_TOKEN } }
+            - { name: LEDGER_ALLOW_RESET, value: "false" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits: { cpu: "500m", memory: "512Mi" }
+          readinessProbe:
+            httpGet: { path: /health, port: 8200 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 8200 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          volumeMounts:
+            - { name: chain, mountPath: /data/ledger }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+  volumeClaimTemplates:
+    - metadata: { name: chain }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 1Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger
+  namespace: absp
+spec:
+  selector: { app: ledger }
+  ports: [{ port: 8200, targetPort: 8200 }]

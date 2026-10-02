@@ -1,0 +1,14 @@
+# Base (production-shaped): kubectl apply -k infrastructure/k8s/base
+# The Secret is not part of it — create absp-secrets first (see secret.example.yaml).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - config.yaml
+  - networkpolicy.yaml
+  - db.yaml
+  - ledger.yaml
+  - ai.yaml
+  - api.yaml
+  - db-init-job.yaml
+  - frontend.yaml

@@ -67,14 +67,21 @@ export function listView({ title, subtitle, endpoint, columns, filters = [], act
     if (subtitle) head.push(el('p', { class: 'subtitle', text: subtitle }));
     const toolbar = [];
     if (filterControls.length) toolbar.push(...filterControls);
-    if (actions) toolbar.push(actions({ reload: load }));
+    // Somewhere above the table for a form to put a one-time notice the operator must read
+    // (a freshly issued device secret, say) rather than a toast that disappears.
+    const notices = el('div', {});
+    // `actions` is invoked here, on every render, so a control is gated on the permissions
+    // the session holds now rather than those it held when the module was first imported.
+    if (actions) toolbar.push(actions({ reload: load, host: notices }));
+    const controls = toolbar.filter(Boolean);
 
     return el('div', {}, [
       ...head,
       extra ? await extra() : null,
+      notices,
       el('div', { class: 'card' }, [
-        toolbar.length ? el('div', { class: 'row u-toolbar' },
-          toolbar) : null,
+        controls.length ? el('div', { class: 'row u-toolbar' },
+          controls) : null,
         body,
       ]),
     ]);

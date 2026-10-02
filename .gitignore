@@ -63,3 +63,7 @@ junit*.xml
 *.bak
 *.orig
 *.tmp
+.terraform/
+
+# Transient terraform state-lock marker
+*.tfstate.lock.info

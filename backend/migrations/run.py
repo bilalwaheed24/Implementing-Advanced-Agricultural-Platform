@@ -36,7 +36,7 @@ def _discover() -> list[tuple[str, Path]]:
 def _applied(connection) -> set[str]:
     connection.execute(text(
         "CREATE TABLE IF NOT EXISTS schema_version ("
-        " version VARCHAR(20) PRIMARY KEY,"
+        " version VARCHAR(100) PRIMARY KEY,"
         " applied_at TIMESTAMP NOT NULL)"))
     rows = connection.execute(text("SELECT version FROM schema_version")).fetchall()
     return {row[0] for row in rows}
@@ -75,12 +75,22 @@ def run(status_only: bool = False) -> int:
         for version, path in pending:
             print(f"Applying {version} ...")
             for statement in _statements(path.read_text()):
+                # PostgreSQL aborts the whole transaction on a failed statement, so each
+                # one runs in a savepoint there. (pysqlite's SAVEPOINT handling is not
+                # reliable, and SQLite does not need it.)
+                nested = connection.dialect.name != "sqlite"
                 try:
-                    connection.execute(text(statement))
+                    if nested:
+                        with connection.begin_nested():
+                            connection.execute(text(statement))
+                    else:
+                        connection.execute(text(statement))
                 except Exception as error:                      # noqa: BLE001
                     # A column added by create_all() on a fresh database is not an
-                    # error: record the version and move on.
-                    if "duplicate column" in str(error).lower():
+                    # error: record the version and move on. SQLite says "duplicate
+                    # column"; PostgreSQL says "column ... already exists".
+                    message = str(error).lower()
+                    if "duplicate column" in message or "already exists" in message:
                         print(f"  already present, recording {version}")
                         break
                     raise

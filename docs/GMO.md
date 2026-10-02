@@ -44,7 +44,7 @@ batch records the stages it actually passed through. A gap in the chain is a fir
 | Product | GS1 GTIN-14 | `09501101530003` | Check digit validated |
 | Shipment | GS1 SSCC | `003123450000000017` | Logistic unit |
 | Location | GS1 GLN | `9501101530003` | Where events occur |
-| Verification code | 128-bit opaque, base32 | `K7QF-2M9X-…` | Public QR target, unguessable |
+| Verification code | 100-bit opaque, base32 | `K7QF-2M9X-…` | Public QR target, unguessable |
 
 ## 3. Biosecurity gate before registration (FR-C1)
 

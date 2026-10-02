@@ -10,7 +10,7 @@ from ..core.config import get_settings
 from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.security import content_hash, decrypt_at_rest, encrypt_at_rest, sha256_hex, utcnow
 from ..models import CrisprAssessment, HazardSequence, ScreeningHit, SequenceScreening
-from . import audit, notifications
+from . import ai_client, audit, notifications
 
 # Screening lifecycle
 STATUS_APPROVED_AUTO = "APPROVED_AUTO"
@@ -25,25 +25,21 @@ DURC_INTENT_MARKERS = ("virulence", "host range", "host-range", "pathogenicity",
                        "gene drive", "resistance to control")
 
 
-def _hazard_records(db: Session) -> list:
-    from ai.sequence_screening import HazardRecord
-
-    return [HazardRecord(id=h.id, agent_name=h.agent_name, hazard_class=h.hazard_class,
-                         severity=h.severity, sequence=h.sequence)
+def _hazard_records(db: Session) -> list[dict[str, Any]]:
+    return [{"id": h.id, "agent_name": h.agent_name, "hazard_class": h.hazard_class,
+             "severity": h.severity, "sequence": h.sequence}
             for h in db.execute(select(HazardSequence)).scalars()]
 
 
 def submit_screening(db: Session, org_id: str, actor_id: str, actor_role: str, name: str,
                      sequence: str, intent: str, organism: str | None) -> SequenceScreening:
-    from ai.sequence_screening import ENGINE_VERSION, SequenceError, normalize, screen
-
     settings = get_settings()
     try:
-        result = screen(sequence, _hazard_records(db), settings.max_sequence_length)
-    except SequenceError as exc:
+        result = ai_client.screen(sequence, _hazard_records(db), settings.max_sequence_length)
+    except ai_client.AIInputError as exc:
         raise ValidationFailed(str(exc)) from exc
 
-    cleaned = normalize(sequence)
+    cleaned = result.normalized
     durc = _durc_flag(intent, result.hazard_classes)
 
     if result.verdict == "BLOCK":
@@ -58,7 +54,7 @@ def submit_screening(db: Session, org_id: str, actor_id: str, actor_role: str, n
         sequence_enc="", sequence_hash=sha256_hex(cleaned), sequence_length=len(cleaned),
         verdict=result.verdict, max_identity=result.max_identity,
         hazard_classes=result.hazard_classes, reasons=result.reasons, status=status,
-        durc_flag=durc, engine_version=ENGINE_VERSION)
+        durc_flag=durc, engine_version=result.engine_version)
     db.add(record)
     db.flush()
     record.sequence_enc = encrypt_at_rest(cleaned, record.id)
@@ -102,11 +98,24 @@ def get_hits(db: Session, screening_id: str) -> list[ScreeningHit]:
         .order_by(ScreeningHit.score.desc())).scalars())
 
 
+def _reject_self_review(submitted_by: str | None, actor_id: str, what: str) -> None:
+    """Four-eyes principle. A biosafety officer holds both submit and review rights, so without
+    this check one person could submit a sequence that screens BLOCK and then clear it alone —
+    and because `APPROVED_BY_REVIEW` is a passing status, that laundered record would satisfy
+    the GMO registration gate in `services/gmo.py`. The reviewer must be a second person."""
+    if submitted_by and submitted_by == actor_id:
+        raise Conflict(
+            f"You submitted this {what}, so you cannot review your own submission. "
+            "An independent biosafety officer must take the decision.")
+
+
 def review_screening(db: Session, screening: SequenceScreening, actor_id: str, actor_role: str,
                      decision: str, rationale: str) -> SequenceScreening:
-    """Only a biosafety officer can release a BLOCKED record (Security.md §14)."""
+    """Only a biosafety officer can release a BLOCKED record (Security.md §14), and never the
+    officer who submitted it."""
     if screening.status in PASSING_STATUSES or screening.status == STATUS_REJECTED:
         raise Conflict(f"Screening has already been resolved as {screening.status}")
+    _reject_self_review(screening.submitted_by, actor_id, "screening")
     screening.status = STATUS_APPROVED_REVIEW if decision == "APPROVE" else STATUS_REJECTED
     screening.reviewed_by = actor_id
     screening.reviewed_at = utcnow()
@@ -137,21 +146,18 @@ def review_queue(db: Session) -> list[SequenceScreening]:
 def assess_crispr(db: Session, org_id: str, actor_id: str, actor_role: str, target_gene: str,
                   organism: str, organism_class: str, guide_rna: str, pam: str, edit_type: str,
                   intent: str, reference_sequence: str | None) -> CrisprAssessment:
-    from ai.crispr_risk import CrisprInputError, assess
-
     reference = ""
     if reference_sequence:
-        from ai.sequence_screening import SequenceError, validate
-
         try:
-            reference = validate(reference_sequence, get_settings().max_sequence_length)
-        except SequenceError as exc:
+            reference = ai_client.validate_sequence(reference_sequence,
+                                                    get_settings().max_sequence_length)
+        except ai_client.AIInputError as exc:
             raise ValidationFailed(f"Reference sequence: {exc}") from exc
 
     try:
-        result = assess(target_gene, organism, organism_class, guide_rna, pam, edit_type,
-                        intent, reference)
-    except CrisprInputError as exc:
+        result = ai_client.assess_crispr(target_gene, organism, organism_class, guide_rna, pam,
+                                         edit_type, intent, reference)
+    except ai_client.AIInputError as exc:
         raise ValidationFailed(str(exc)) from exc
 
     status = ("PENDING_REVIEW" if result.risk_level in {"HIGH", "PROHIBITED"} or result.durc_flag
@@ -183,6 +189,7 @@ def review_crispr(db: Session, assessment: CrisprAssessment, actor_id: str, acto
                   decision: str, rationale: str) -> CrisprAssessment:
     if assessment.status in {"APPROVED_AUTO", "APPROVED_BY_REVIEW", "REJECTED"}:
         raise Conflict(f"Assessment has already been resolved as {assessment.status}")
+    _reject_self_review(assessment.submitted_by, actor_id, "gene-edit assessment")
     assessment.status = "APPROVED_BY_REVIEW" if decision == "APPROVE" else "REJECTED"
     assessment.reviewed_by = actor_id
     assessment.reviewed_at = utcnow()
@@ -201,11 +208,9 @@ def review_crispr(db: Session, assessment: CrisprAssessment, actor_id: str, acto
 # --------------------------------------------------------------------------- #
 def add_hazard(db: Session, actor_id: str, actor_role: str, agent_name: str, hazard_class: str,
                severity: int, description: str, sequence: str) -> HazardSequence:
-    from ai.sequence_screening import SequenceError, validate
-
     try:
-        cleaned = validate(sequence, get_settings().max_sequence_length)
-    except SequenceError as exc:
+        cleaned = ai_client.validate_sequence(sequence, get_settings().max_sequence_length)
+    except ai_client.AIInputError as exc:
         raise ValidationFailed(str(exc)) from exc
     allowed = {"PLANT_PATHOGEN", "TOXIN", "ANTIBIOTIC_RESISTANCE", "VIRULENCE_FACTOR",
                "DUAL_USE_MARKER"}

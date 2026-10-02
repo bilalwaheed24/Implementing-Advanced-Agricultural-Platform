@@ -1,0 +1,72 @@
+# Web UI + reverse proxy (ADR-016): the only component exposed outside the cluster.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: absp
+  labels: { app: frontend, app.kubernetes.io/part-of: absp }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: frontend }
+  template:
+    metadata:
+      labels: { app: frontend, app.kubernetes.io/part-of: absp }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101           # nginx user in nginx-unprivileged
+        runAsGroup: 101
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: frontend
+          image: absp-frontend:1.0.0
+          ports: [{ containerPort: 8080 }]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: "50m", memory: "32Mi" }
+            limits: { cpu: "500m", memory: "128Mi" }
+          readinessProbe:
+            httpGet: { path: /, port: 8080 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: 8080 }
+            periodSeconds: 20
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: absp
+spec:
+  selector: { app: frontend }
+  ports: [{ port: 8080, targetPort: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frontend
+  namespace: absp
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [absp.example.org]
+      secretName: absp-tls
+  rules:
+    - host: absp.example.org
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: frontend, port: { number: 8080 } }

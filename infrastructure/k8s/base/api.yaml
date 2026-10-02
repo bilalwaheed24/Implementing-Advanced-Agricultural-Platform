@@ -1,0 +1,88 @@
+# REST API (ADR-016). Stateless: state lives in db and ledger, so it scales horizontally.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: absp
+  labels: { app: api, app.kubernetes.io/part-of: absp }
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels: { app: api }
+  template:
+    metadata:
+      labels: { app: api, app.kubernetes.io/part-of: absp, absp/backend-client: "true" }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: api
+          image: absp-api:1.0.0
+          ports: [{ containerPort: 8000 }]
+          envFrom:
+            - configMapRef: { name: absp-config }
+            - secretRef: { name: absp-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { cpu: "1", memory: "512Mi" }
+          startupProbe:          # waits out schema creation and an unready db
+            httpGet: { path: /health/live, port: 8000 }
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            httpGet: { path: /health/ready, port: 8000 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health/live, port: 8000 }
+            periodSeconds: 15
+          volumeMounts:
+            - { name: data, mountPath: /app/data }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: data, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: absp
+spec:
+  selector: { app: api }
+  ports: [{ port: 8000, targetPort: 8000 }]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+  namespace: absp
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: api }
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+  namespace: absp
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: api }

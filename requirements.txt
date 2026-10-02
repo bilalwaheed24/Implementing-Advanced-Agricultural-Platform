@@ -1,5 +1,7 @@
 # Runtime dependencies — versions are those verified present in the target
 # environment.  Policy: no NEW dependency may be added (see Development-rules.md §10).
+# This is the full set (tests, run_local.sh). Each container installs only its own
+# subset from requirements/{api,ai,ledger}.txt (ADR-016).
 fastapi==0.138.0
 uvicorn==0.49.0
 pydantic==2.12.5
@@ -11,6 +13,8 @@ numpy==2.4.4
 scikit-learn==1.9.0
 tensorflow==2.21.0
 python-multipart==0.0.32
+# PostgreSQL driver for the split stack's `db` container — the one sanctioned addition (ADR-017).
+psycopg[binary]==3.3.6
 
 # Test / development
 pytest==9.1.1

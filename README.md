@@ -66,12 +66,14 @@ agri-biotech-security-platform/
 ├── security/           Disclosure policy and OWASP ZAP rules
 ├── docs/               Engineering documentation and 13 Mermaid diagrams (see §22)
 ├── .github/workflows/  CI and security pipelines
-├── docker-compose.yml, Dockerfile
+├── docker/             One Dockerfile per service (api, ai, ledger, frontend) + nginx config
+├── requirements/       Per-image dependency subsets (requirements.txt is the full set)
+├── docker-compose.yml  Five-service stack: frontend, api, ai, ledger, db (ADR-016)
 └── .env.example
 ```
 
 `backend/` contains `app/` (16 routers, 11 service modules, 34-table model layer),
-`migrations/` (forward-only SQL runner, ADR-014) and `tests/` (399 tests, 99 of them security).
+`migrations/` (forward-only SQL runner, ADR-014) and `tests/` (413 tests, 99 of them security).
 
 ## 5. Prerequisites
 
@@ -133,26 +135,23 @@ Every variable is documented with a safe placeholder in `.env.example`. Notable 
 | Variable | Purpose |
 |---|---|
 | `JWT_SECRET`, `ENCRYPTION_KEY` | Required in production; the app refuses to start with a default in `ENV=production` |
-| `DATABASE_URL` | `sqlite:///./absp.db` for the demo, `postgresql+psycopg://...` in production |
+| `DATABASE_URL` | `sqlite:///./absp.db` for `run_local.sh`, `postgresql+psycopg://...` in the compose stack and production |
+| `AI_SERVICE_URL`, `LEDGER_SERVICE_URL`, `SERVICE_TOKEN` | Empty = ai and ledger run in-process. Set (compose does) = call the `ai` / `ledger` containers with the shared token (ADR-016) |
 | `TELEMETRY_INLINE_SCORING` | `true` gives an immediate anomaly verdict per message; `false` defers scoring to a background task for ~6x throughput — see PRD.md NFR-2 |
 | `DEMO_MODE` | Labels the deployment as a demonstration in API responses |
 
 ## 9. Database
 
-SQLite by default (zero setup). To run against PostgreSQL:
+`run_local.sh` uses SQLite (zero setup). The Docker stack uses PostgreSQL in its own `db`
+container: the api creates the schema, applies migrations and seeds on first start (§16). The
+driver is `psycopg` 3, the one dependency added under Development-rules §10 (ADR-017).
 
-```bash
-docker compose --profile postgres up -d postgres
-# set DATABASE_URL=postgresql+psycopg://absp:<password>@127.0.0.1:5432/absp in .env
-python3 scripts/seed_demo.py --reset
-```
-
-The same ORM models and migrations run unmodified against either engine (ADR-002).
+The same ORM models and migrations run against either engine (ADR-002).
 
 ## 10. Blockchain
 
-A permissioned ledger starts automatically with the API — no container, no network access.
-It implements the Hyperledger Fabric transaction model (MSP identities, ECDSA P-256 endorsement,
+In the Docker stack the ledger runs as its own `ledger` container and is the only writer of the
+chain; under `run_local.sh` and the tests it runs in-process with the API (ADR-016). It implements the Hyperledger Fabric transaction model (MSP identities, ECDSA P-256 endorsement,
 hash-linked blocks, Merkle proofs, chaincode-style contracts) as an in-process package. This is
 explicitly a **single-node ordering** demonstration; the migration path to a production Fabric
 network is documented function-by-function in `docs/Blockchain-integration.md` §17.
@@ -227,14 +226,55 @@ baseline scan — see `.github/workflows/ci.yml` and `security.yml`.
 
 ## 16. Docker
 
+Five containers, one per component (ADR-016):
+
+| Service | Image | Role | Reachable from |
+|---|---|---|---|
+| `frontend` | `absp-frontend` (nginx) | Serves the UI, proxies everything else to the api | host, `127.0.0.1:8080` |
+| `api` | `absp-api` | FastAPI backend: auth, business logic, persistence | frontend only |
+| `ai` | `absp-ai` | Model inference (screening, CRISPR, anomaly, fraud, crop vision) | api only, service token |
+| `ledger` | `absp-ledger` | Permissioned ledger node, sole writer of the chain | api only, service token |
+| `db` | `postgres:16-alpine` | PostgreSQL | api only |
+
 ```bash
-docker compose up --build              # API only, SQLite, single command
-docker compose --profile postgres up   # add PostgreSQL
-docker compose --profile simulator up  # also run the IoT simulator against the API
+docker compose up -d --build                 # whole stack; open http://127.0.0.1:8080
+docker compose --profile simulator up        # also run the IoT simulator against the api
+docker compose logs -f api                   # follow one service
 ```
 
-The image is a non-root, read-only-root-filesystem, multi-stage build with a health check
-(`docs/Security.md` §15).
+`.env` must define `JWT_SECRET`, `ENCRYPTION_KEY`, `POSTGRES_PASSWORD` and `SERVICE_TOKEN`
+(see `.env.example`). The first start seeds the same demonstration dataset as `run_local.sh`.
+Every image is non-root with a read-only root filesystem, no capabilities and a health check
+(`docs/Security.md` §15); `ai`, `ledger` and `db` sit on an internal-only network.
+
+### Kubernetes
+
+The same five services run on Kubernetes from `infrastructure/k8s/`: `base/` is the
+production-shaped set (default-deny NetworkPolicies, non-root read-only pods, HPA, Ingress) and
+`local/` adapts it for a local k3d cluster.
+
+```bash
+./scripts/k8s_up.sh      # creates a k3d cluster, loads the images, deploys; http://127.0.0.1:8080
+./scripts/k8s_down.sh    # deletes the cluster
+kubectl --context k3d-absp -n absp get pods
+```
+
+The scripts never change your current kubectl context. Secrets are created from `.env` and
+never written to disk.
+
+### Terraform (local)
+
+`infrastructure/terraform-local/` deploys the same five containers, two networks and three
+volumes to this machine's Docker with the `kreuzwerker/docker` provider. The AWS configuration in
+`infrastructure/terraform/` is separate and untouched.
+
+```bash
+./scripts/tf_local_up.sh      # terraform init + apply; http://127.0.0.1:8080
+./scripts/tf_local_down.sh    # terraform destroy (containers, networks and data volumes)
+```
+
+Secrets are passed from `.env` as `TF_VAR_*` and never written to a tfvars file; the local
+state file holds them and is gitignored.
 
 ## 17. CI/CD
 

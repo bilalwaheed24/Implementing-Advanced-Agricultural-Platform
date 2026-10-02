@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query
 
 from ..core.deps import DbSession, rate_limit, require_permission
 from ..core.errors import NotFound, ValidationFailed
-from ..core.permissions import P
+from ..core.permissions import P, has_permission
 from ..core.security import content_hash
 from ..models import Batch, Certification, ComplianceReport, GMOEvent, Product, SupplyChainEvent
 from ..schemas import VerifyRecordRequest
@@ -18,7 +18,14 @@ router = APIRouter(prefix="/blockchain", tags=["Blockchain"], dependencies=[Depe
 
 @router.get("/stats", summary="Ledger height, transactions and participants")
 def stats(principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_READ))]) -> dict:
-    return {**ledger_client.stats(),
+    """Height and transaction count are proof-of-activity and safe for every role. The
+    participant list names every organisation on the channel, so it is withheld from roles
+    without BLOCKCHAIN_EXPLORE."""
+    payload = dict(ledger_client.stats())
+    if not has_permission(principal.role, P.BLOCKCHAIN_EXPLORE):
+        payload.pop("organizations", None)
+        payload.pop("by_function", None)
+    return {**payload,
             "marking": "DEMO/SIMULATION: single-node ordering. Cryptography is real "
                        "(ECDSA P-256, SHA-256, Merkle trees)."}
 
@@ -30,16 +37,15 @@ def verify_chain(principal: Annotated[object, Depends(require_permission(P.BLOCK
 
 
 @router.get("/blocks", summary="Recent blocks")
-def blocks(principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_READ))],
+def blocks(principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_EXPLORE))],
            limit: int = Query(default=20, ge=1, le=100)) -> dict:
-    ledger = ledger_client.get_ledger()
-    return {"height": ledger.height, "blocks": ledger.recent_blocks(limit)}
+    return ledger_client.recent_blocks(limit)
 
 
 @router.get("/blocks/{number}", summary="Get one block")
 def get_block(number: int,
-              principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_READ))]) -> dict:
-    block = ledger_client.get_ledger().get_block(number)
+              principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_EXPLORE))]) -> dict:
+    block = ledger_client.get_block(number)
     if block is None:
         raise NotFound("Block not found")
     return block
@@ -47,9 +53,9 @@ def get_block(number: int,
 
 @router.get("/transactions/{tx_id}", summary="Get one transaction")
 def get_transaction(tx_id: str,
-                    principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_READ))]
+                    principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_EXPLORE))]
                     ) -> dict:
-    record = ledger_client.get_ledger().get_transaction(tx_id)
+    record = ledger_client.get_transaction(tx_id)
     if record is None:
         raise NotFound("Transaction not found")
     return record
@@ -58,7 +64,7 @@ def get_transaction(tx_id: str,
 @router.get("/transactions/{tx_id}/proof", summary="Merkle inclusion proof for a transaction")
 def proof(tx_id: str,
           principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_READ))]) -> dict:
-    result = ledger_client.get_ledger().proof(tx_id)
+    result = ledger_client.proof(tx_id)
     if result is None:
         raise NotFound("Transaction not found")
     return result
@@ -66,7 +72,7 @@ def proof(tx_id: str,
 
 @router.get("/state/{key:path}", summary="Read a world-state key")
 def state(key: str,
-          principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_READ))]) -> dict:
+          principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_EXPLORE))]) -> dict:
     value = ledger_client.query(key)
     if value is None:
         raise NotFound("State key not found")
@@ -143,10 +149,4 @@ def verify_record(payload: VerifyRecordRequest, db: DbSession,
 
 @router.get("/contracts", summary="Deployed chaincode functions and endorsement policies")
 def contracts(principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_READ))]) -> dict:
-    from ledger.contracts import CONTRACTS, ENDORSEMENT_POLICIES, SUBMIT_RIGHTS
-
-    return {
-        "contracts": {name: sorted(functions) for name, functions in CONTRACTS.items()},
-        "endorsement_policies": ENDORSEMENT_POLICIES,
-        "submit_rights": {k: sorted(v) for k, v in SUBMIT_RIGHTS.items()},
-    }
+    return ledger_client.contracts()

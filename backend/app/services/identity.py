@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..core.config import get_settings
 from ..core.errors import AccountLocked, AuthError, Conflict, NotFound, ValidationFailed
 from ..core.logging_conf import security_event
-from ..core.permissions import APPROVAL_REQUIRED_ROLES, Role
+from ..core.permissions import SELF_REGISTRATION_ROLE, Role
 from ..core.security import (create_access_token, create_refresh_token, decode_token,
                              ensure_aware, hash_password, new_id, utcnow,
                              validate_password_strength, verify_password)
@@ -19,13 +19,18 @@ from ..models import Organization, RefreshToken, User
 from . import audit, notifications
 
 
-def register(db: Session, email: str, full_name: str, password: str, role: str,
-             org_id: str, ip: str | None = None) -> User:
+def register(db: Session, email: str, full_name: str, password: str,
+             org_id: str, ip: str | None = None, requested_role: str | None = None) -> User:
+    """Public self-registration. Deliberately grants nothing.
+
+    The caller is anonymous, so neither the role nor the organisation may be taken on trust:
+    organisation ids are discoverable, and honouring a client-supplied role would let anyone
+    mint an active member of someone else's tenant. The account is therefore always created
+    PENDING with `SELF_REGISTRATION_ROLE`, which blocks login (`authenticate`) and request
+    authorisation (`deps.get_current_principal` requires ACTIVE). An administrator approving
+    the account is the point at which role and organisation are actually granted.
+    """
     settings = get_settings()
-    try:
-        role_enum = Role(role.upper())
-    except ValueError as exc:
-        raise ValidationFailed(f"Unknown role {role}") from exc
 
     if db.execute(select(User).where(User.email == email)).scalar_one_or_none():
         # Do not reveal which addresses are registered.
@@ -39,14 +44,19 @@ def register(db: Session, email: str, full_name: str, password: str, role: str,
         raise ValidationFailed("Unknown or inactive organisation")
 
     validate_password_strength(password)
-    status = "PENDING" if role_enum in APPROVAL_REQUIRED_ROLES else "ACTIVE"
     user = User(email=email, full_name=full_name, password_hash=hash_password(password),
-                role=role_enum.value, org_id=org_id, status=status)
+                role=SELF_REGISTRATION_ROLE.value, org_id=org_id, status="PENDING")
     db.add(user)
     db.flush()
-    audit.record(db, "user.register", actor_id=user.id, actor_role=user.role, org_id=org_id,
-                 entity_type="User", entity_id=user.id, ip=ip,
-                 detail={"role": user.role, "status": status})
+    if requested_role:
+        security_event("self-registration requested a role; ignored pending approval",
+                       requested_role=requested_role[:40], user_id=user.id, ip=ip)
+    audit.record(db, "user.register", actor_id=user.id, actor_role=user.role,
+                 org_id=org_id, entity_type="User", entity_id=user.id, ip=ip,
+                 detail={"role": user.role, "status": "PENDING",
+                         "requested_org_id": org_id,
+                         "requested_role": (requested_role or "")[:40],
+                         "note": "self-registration grants no access until approved"})
     _ = settings
     return user
 

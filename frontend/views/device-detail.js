@@ -30,6 +30,30 @@ export async function render({ id }) {
       window.prompt('New device secret (shown once — copy it now):', result.device_secret);
     } }));
   }
+  // Only the lifecycle moves the server actually permits from the current state are offered
+  // (devices.LIFECYCLE): ACTIVE <-> SUSPENDED, and no route back out of RETIRED.
+  if (can('device:contain') && device.status === 'ACTIVE') {
+    actions.push(el('button', { text: 'Suspend', onClick: async () => {
+      if (!confirmDialog('Suspend this device? It stops reporting until it is resumed. Use '
+        + 'quarantine instead if you suspect the device is compromised.')) return;
+      try {
+        if (await containmentAction(id, 'suspend',
+          'Reason for suspension (written to the audit trail):')) {
+          toast('Device suspended', 'ok');
+          window.location.reload();
+        }
+      } catch (error) { toast(error.message, 'error'); }
+    } }));
+  }
+  if (can('device:write') && device.status === 'SUSPENDED') {
+    actions.push(el('button', { class: 'primary', text: 'Resume', onClick: async () => {
+      try {
+        await api(`/devices/${id}/activate`, { method: 'POST' });
+        toast('Device resumed', 'ok');
+        window.location.reload();
+      } catch (error) { toast(error.message, 'error'); }
+    } }));
+  }
   if (can('device:contain') && ['ACTIVE', 'SUSPENDED'].includes(device.status)) {
     actions.push(el('button', { class: 'danger', text: 'Quarantine', onClick: async () => {
       if (!confirmDialog('Quarantine this device? Its credential will be revoked immediately '

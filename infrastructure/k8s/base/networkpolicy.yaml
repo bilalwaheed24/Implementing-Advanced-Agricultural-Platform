@@ -1,0 +1,91 @@
+# Default-deny with one explicit allow per hop (Security.md §15, ADR-016):
+#
+#   outside → frontend:8080 → api:8000 → ai:8100 | ledger:8200 | db:5432
+#
+# "Backend clients" (label absp/backend-client=true) are the api pods and the seed Job.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny, namespace: absp }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-dns, namespace: absp }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector: { matchLabels: { k8s-app: kube-dns } }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: frontend, namespace: absp }
+spec:
+  podSelector: { matchLabels: { app: frontend } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{ port: 8080, protocol: TCP }]          # from anywhere: the public entry point
+  egress:
+    - to: [{ podSelector: { matchLabels: { app: api } } }]
+      ports: [{ port: 8000, protocol: TCP }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: api, namespace: absp }
+spec:
+  podSelector: { matchLabels: { app: api } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app: frontend } } }]
+      ports: [{ port: 8000, protocol: TCP }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: backend-clients, namespace: absp }
+spec:
+  podSelector: { matchLabels: { absp/backend-client: "true" } }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app: ai } } }]
+      ports: [{ port: 8100, protocol: TCP }]
+    - to: [{ podSelector: { matchLabels: { app: ledger } } }]
+      ports: [{ port: 8200, protocol: TCP }]
+    - to: [{ podSelector: { matchLabels: { app: db } } }]
+      ports: [{ port: 5432, protocol: TCP }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: ai, namespace: absp }
+spec:
+  podSelector: { matchLabels: { app: ai } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { absp/backend-client: "true" } } }]
+      ports: [{ port: 8100, protocol: TCP }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: ledger, namespace: absp }
+spec:
+  podSelector: { matchLabels: { app: ledger } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { absp/backend-client: "true" } } }]
+      ports: [{ port: 8200, protocol: TCP }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: db, namespace: absp }
+spec:
+  podSelector: { matchLabels: { app: db } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { absp/backend-client: "true" } } }]
+      ports: [{ port: 5432, protocol: TCP }]

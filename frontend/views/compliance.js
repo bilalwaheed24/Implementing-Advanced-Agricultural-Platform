@@ -44,7 +44,7 @@ export function render(context) {
         options: ['US-USDA', 'US-FDA', 'EU', 'CODEX', 'GS1'] },
       { key: 'report_type', label: 'Type', options: ['COMPLIANCE', 'ENVIRONMENTAL_IMPACT'] },
     ],
-    actions: can('compliance:run') ? ({ reload }) => evaluateForm(reload) : null,
+    actions: ({ reload }) => (can('compliance:run') ? evaluateForm(reload) : null),
     columns: [
       { label: 'Generated', render: (row) => fmtDate(row.created_at) },
       { label: 'Type', render: (row) => titleCase(row.report_type) },
