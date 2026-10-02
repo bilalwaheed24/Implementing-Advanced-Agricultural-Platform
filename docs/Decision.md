@@ -8,6 +8,10 @@ No major architectural choice in this project was made silently; every ADR below
 
 ## ADR-001 — Modular monolith rather than microservices
 
+> **Status: superseded by ADR-016** for the container deployment. The module boundaries below
+> still hold inside the code; ADR-016 runs `ai` and `ledger` as their own services along
+> exactly the seam this record anticipated.
+
 **Decision.** Build one deployable backend composed of clearly bounded modules (identity, farm,
 device, telemetry, ai, biosecurity, gmo, supplychain, compliance, ledger, audit) rather than
 separate services.
@@ -389,3 +393,88 @@ available only to the four platform-wide oversight roles (`ADMIN`, `REGULATOR`,
 once, in `core/permissions.py`: it was originally restated in three modules, and the copies drifted
 so that a security analyst could not see other tenants' device alerts at all. A test asserts that
 every mutating route has an authorisation dependency.
+
+---
+
+## ADR-016 — One container per component: frontend, api, ai, ledger, db
+
+**Decision.** The compose stack runs five services — `frontend` (nginx), `api` (FastAPI),
+`ai` (model inference), `ledger` (permissioned ledger node) and `db` (PostgreSQL) — instead of
+one container that held all of them. Supersedes ADR-001 for deployment.
+
+**Context.** ADR-001 chose a single deployable for a one-machine offline demo. The stakeholder
+requirement is now that each component is visible and operable as its own container. ADR-001
+already drew the seam so that `ai` and `ledger` could be extracted "without changing their
+callers' contracts".
+
+**Options.** (a) Keep one container. (b) Split along the existing seams, keeping the in-process
+path for tests and `run_local.sh`. (c) Full microservices, one per capability module (11+).
+
+**Chosen.** (b).
+
+**Reason.** The split costs little because the backend already reached the ledger through a single
+client (`ledger_client.py`); `ai_client.py` now does the same for inference. Each client has two
+modes — HTTP when `AI_SERVICE_URL` / `LEDGER_SERVICE_URL` is set, in-process otherwise — and the
+in-process mode calls the *same handler functions* the services expose, so both modes return the
+same shapes and the 384 existing tests keep exercising the real code. (c) would add service
+discovery, distributed transactions and inter-service auth across eleven services for no benefit
+at this scale.
+
+**Security consequences.**
+- Only `frontend` is published (127.0.0.1:8080). `api`, `ai`, `ledger` and `db` are reachable only
+  on compose networks; `ai`, `ledger` and `db` sit on an `internal: true` network with no route
+  out of the host.
+- `ai` and `ledger` require a shared `SERVICE_TOKEN` (`X-Service-Token`, constant-time compare);
+  production refuses to start with service URLs set and a token shorter than 32 characters.
+- nginx overwrites (never appends) `X-Forwarded-For`, because the api trusts it for rate limiting
+  and audit IPs. It sets the same security headers on static files that the api sets on its
+  responses (CSP, COOP/COEP/CORP, `X-Frame-Options`, `no-store`), so the ZAP baseline is unchanged.
+- The `ledger` container is the only writer of the chain (`absp_ledger` volume). Its demo reset
+  endpoint is disabled unless `LEDGER_ALLOW_RESET=true`.
+- Every image is non-root with a read-only root filesystem, `no-new-privileges` and no
+  capabilities; the `api` image no longer ships TensorFlow, which removes most of its CVE surface.
+
+**Trade-offs.** A network hop on every inference and anchoring call. Failure modes are new but
+handled: the ledger client keeps its retry and circuit breaker (an outage leaves records
+`PENDING`, never lost); an unreachable `ai` service returns a 503 problem response with no internal
+topology in the body; telemetry is stored unscored if inline scoring is unavailable. Four images to
+build and scan instead of one (CI runs them as a matrix).
+
+**Consequences.** Dockerfiles live in `docker/`; each image installs only its own
+`requirements/{api,ai,ledger}.txt`. The api's start script (`scripts/start_api.py`) creates the
+schema, applies migrations and seeds the demo data through the ai and ledger services.
+`infrastructure/k8s/` still describes the single-container layout and needs the same split before
+it is used.
+
+---
+
+## ADR-017 — PostgreSQL driver: psycopg 3 (the one sanctioned new dependency)
+
+**Decision.** Add `psycopg[binary]==3.3.6` so the `api` container uses the `db` container.
+
+**Context.** Development-rules.md §10 forbids new runtime dependencies without an ADR. ADR-002
+always named PostgreSQL as the production engine, but no driver was installed, so the documented
+`docker compose --profile postgres` path could not actually connect. ADR-016 makes PostgreSQL the
+default database of the container stack.
+
+**Alternatives rejected.** *SQLite on a shared volume*: not a separate database service, and
+SQLite over a shared volume is unsafe for concurrent writers. *psycopg2*: in maintenance mode;
+psycopg 3 is its successor and SQLAlchemy 2.0's recommended PostgreSQL dialect
+(`postgresql+psycopg`). *pg8000 (pure Python)*: slower, and less exercised with SQLAlchemy 2.0.
+*asyncpg*: async-only, and the application uses synchronous SQLAlchemy sessions.
+
+**Licence check.** LGPL-3.0-only (from the wheel's `License-Expression`). Used unmodified as a
+separately installed library, which LGPL permits from an MIT-licensed application.
+
+**Maintenance check.** Actively maintained (3.3.x line, regular releases); the reference
+PostgreSQL adapter for Python.
+
+**Scan result.** `pip-audit -r requirements/api.txt` (pip-audit 2.7.3, 2026-10-02): no known
+vulnerabilities. Pinned exactly in `requirements.txt` and `requirements/api.txt`; also covered by
+the CI pip-audit step and the per-image Trivy scan.
+
+**Consequences.** Two latent SQLite-only defects surfaced the first time the schema ran on
+PostgreSQL and are fixed: `schema_version.version` was `VARCHAR(20)` while the first migration is
+named `0001_screening_reasons` (22 characters; SQLite ignores the length), and the migration runner
+did not survive PostgreSQL aborting the transaction on an "already exists" column (each statement
+now runs in a savepoint on non-SQLite engines).
