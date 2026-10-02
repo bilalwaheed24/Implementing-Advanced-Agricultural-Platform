@@ -16,6 +16,7 @@ const NAV = [
   { group: 'Intelligence', items: [
     { path: '#/ai', label: 'AI Insights', permission: 'ai:read' },
     { path: '#/alerts', label: 'Alerts', permission: 'alert:read' },
+    { path: '#/notifications', label: 'Notifications' },
     { path: '#/incidents', label: 'Incidents', permission: 'incident:read' },
   ] },
   { group: 'Biosecurity', items: [
@@ -35,7 +36,10 @@ const NAV = [
     { path: '#/fraud', label: 'Fraud Assessments', permission: 'supply:read' },
   ] },
   { group: 'Trust', items: [
-    { path: '#/blockchain', label: 'Blockchain', permission: 'blockchain:read' },
+    // blockchain:explore, not blockchain:read — the explorer shows raw transaction payloads
+    // from every organisation, so it is an oversight view. Every role keeps blockchain:read
+    // for the scoped proof checks on their own records.
+    { path: '#/blockchain', label: 'Blockchain', permission: 'blockchain:explore' },
     { path: '#/compliance', label: 'Compliance', permission: 'compliance:read' },
     { path: '#/audit', label: 'Audit Trail', permission: 'audit:read' },
   ] },
@@ -55,6 +59,7 @@ const ROUTES = {
   '#/satellite': () => import('/static/views/satellite.js'),
   '#/ai': () => import('/static/views/ai.js'),
   '#/alerts': () => import('/static/views/alerts.js'),
+  '#/notifications': () => import('/static/views/notifications.js'),
   '#/incidents': () => import('/static/views/incidents.js'),
   '#/incident': () => import('/static/views/incident-detail.js'),
   '#/screenings': () => import('/static/views/screenings.js'),
@@ -124,8 +129,9 @@ function sidebar(current) {
 }
 
 function topbar(title) {
-  const badgeNode = el('span', { class: 'badge neutral', id: 'unread-badge',
-    text: 'Notifications' });
+  // The count is the obvious thing to click when you want to read what it is counting.
+  const badgeNode = el('a', { href: '#/notifications', class: 'badge neutral',
+    id: 'unread-badge', text: 'Notifications' });
   return el('header', { class: 'topbar' }, [
     el('strong', { text: title }),
     el('div', { class: 'spacer' }),

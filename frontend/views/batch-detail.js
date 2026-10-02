@@ -1,5 +1,89 @@
 import { el, api, badge, fmtDate, fmtNum, table, empty, toast, can, reasonList,
          rowHeader, titleCase } from '/static/assets/core.js';
+import { createPanel, choiceSelect, dateInput, todayIso, atNoon }
+  from '/static/views/formkit.js';
+
+/* EPCIS business step -> the batch state it moves the batch into. Mirrors
+ * `supplychain.BIZ_STEP_TO_STATE` on the server. */
+const STEP_TO_STATE = {
+  commissioning: 'CREATED', harvesting: 'HARVESTED', transforming: 'PROCESSED',
+  packing: 'PACKAGED', shipping: 'IN_TRANSIT', receiving: 'RECEIVED',
+  storing: 'STORED', retail_selling: 'RETAILED', recalling: 'RECALLED',
+};
+
+/* The legal transitions, mirroring `supplychain.BATCH_TRANSITIONS`. The server is the
+ * authority and refuses an illegal move with 422 whether or not the ledger is reachable;
+ * this only keeps the operator from being offered a step that cannot succeed. */
+const BATCH_TRANSITIONS = {
+  CREATED: ['HARVESTED', 'PROCESSED', 'IN_TRANSIT', 'RECALLED'],
+  HARVESTED: ['PROCESSED', 'IN_TRANSIT', 'STORED', 'RECALLED'],
+  PROCESSED: ['PACKAGED', 'IN_TRANSIT', 'STORED', 'RECALLED'],
+  PACKAGED: ['IN_TRANSIT', 'STORED', 'RECALLED'],
+  IN_TRANSIT: ['RECEIVED', 'STORED', 'RECALLED'],
+  RECEIVED: ['PROCESSED', 'PACKAGED', 'IN_TRANSIT', 'STORED', 'RETAILED', 'RECALLED'],
+  STORED: ['IN_TRANSIT', 'PROCESSED', 'PACKAGED', 'RETAILED', 'RECALLED'],
+  RETAILED: ['CONSUMED', 'RECALLED'],
+  CONSUMED: [],
+  RECALLED: [],
+};
+
+const DISPOSITIONS = [
+  ['in_progress', 'In progress'],
+  ['in_transit', 'In transit'],
+  ['in_storage', 'In storage'],
+  ['sellable_accessible', 'Sellable'],
+  ['recalled', 'Recalled'],
+];
+
+function recordEventPanel(batch, reload) {
+  const reachable = BATCH_TRANSITIONS[batch.state] || [];
+  const steps = Object.entries(STEP_TO_STATE)
+    .filter(([, state]) => reachable.includes(state))
+    .map(([step, state]) => [step, `${titleCase(step)} → ${titleCase(state)}`]);
+
+  if (!steps.length) {
+    return el('p', { class: 'hint',
+      text: `This batch is ${titleCase(batch.state)}, which is a final state. No further `
+        + 'custody event can be recorded.' });
+  }
+
+  const step = choiceSelect(steps);
+  const disposition = choiceSelect(DISPOSITIONS);
+  const locationName = el('input', { maxlength: '200', placeholder: 'e.g. Ames Processing' });
+  const locationGln = el('input', { maxlength: '13', placeholder: 'optional GLN (13 digits)' });
+  const quantity = el('input', { type: 'number', step: 'any', min: '0',
+    value: String(batch.quantity) });
+  const unit = el('input', { maxlength: '12', value: batch.unit });
+  const occurred = dateInput(todayIso(), { required: 'required' });
+
+  return createPanel({
+    toggleLabel: 'Record a custody event',
+    submitLabel: 'Record event',
+    hint: `This batch is ${titleCase(batch.state)}. Only the steps it can legally move to are `
+      + 'listed. Quantity may fall but never rise — the server enforces conservation.',
+    controls: [
+      ['Business step', step],
+      ['Disposition', disposition],
+      ['Location name', locationName],
+      ['Location GLN', locationGln],
+      ['Quantity', quantity],
+      ['Unit', unit],
+      ['Occurred on', occurred],
+    ],
+    submit: async () => {
+      await api('/supply-chain/events', { method: 'POST', body: {
+        batch_id: batch.id, biz_step: step.value, disposition: disposition.value,
+        location_name: locationName.value || null,
+        location_gln: locationGln.value || null,
+        quantity: quantity.value === '' ? null : Number(quantity.value),
+        unit: unit.value || null,
+        occurred_at: atNoon(occurred.value),
+      } });
+      return `Event recorded — batch is now ${titleCase(STEP_TO_STATE[step.value])}`;
+    },
+    onDone: reload,
+  });
+}
 
 export async function render({ id }) {
   if (!id) return empty('No batch selected', 'Choose a batch from the list.');
@@ -95,7 +179,11 @@ export async function render({ id }) {
           el('h2', { text: 'Certifications' }),
           certifications,
         ]),
-        can('supply:read') ? el('div', { class: 'card' }, [
+        can('supply:write') ? el('div', { class: 'card' }, [
+          el('h2', { text: 'Chain of custody' }),
+          recordEventPanel(batch, () => window.location.reload()),
+        ]) : null,
+        can('supply:verify') ? el('div', { class: 'card' }, [
           el('h2', { text: 'Supply-chain integrity and fraud scoring' }),
           el('p', { class: 'hint', text: 'Runs deterministic fraud rules plus an anomaly '
             + 'model, and cross-checks every anchored record against the ledger.' }),

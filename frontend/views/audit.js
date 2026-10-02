@@ -13,17 +13,45 @@ async function verifyCard() {
       ]),
       !result.valid ? el('p', { class: 'error-text',
         text: `First divergence: ${JSON.stringify(result.first_divergence)}` }) : null,
-      can('audit:read') ? el('div', { class: 'row u-mt-8' }, [
-        el('button', { text: 'Anchor current head to the ledger', onClick: async () => {
-          try {
-            const receipt = await api('/audit/anchor', { method: 'POST' });
-            toast(receipt.ok ? `Anchored in block ${receipt.block_number}` : 'Anchoring pending',
-              receipt.ok ? 'ok' : 'error');
-          } catch (error) { toast(error.message, 'error'); }
-        } }),
-        el('a', { href: '/api/v1/audit/export', target: '_blank', rel: 'noopener',
-          text: 'Export audit trail (JSON) →' }),
-      ]) : null,
+      el('div', { class: 'row u-mt-8' }, [
+        // Anchoring writes to the ledger and needs audit:anchor; exporting is a read and
+        // stays available to every role that may read the trail.
+        can('audit:anchor') ? el('button', {
+          text: 'Anchor current head to the ledger', onClick: async () => {
+            try {
+              const receipt = await api('/audit/anchor', { method: 'POST' });
+              toast(receipt.ok ? `Anchored in block ${receipt.block_number}` : 'Anchoring pending',
+                receipt.ok ? 'ok' : 'error');
+            } catch (error) { toast(error.message, 'error'); }
+          } }) : null,
+        el('button', { class: 'secondary', text: 'Export audit trail (JSON)',
+          onClick: async (event) => {
+            // A plain <a href> cannot carry the Authorization header, so the link always
+            // returned 401. Fetch through the API client and hand the browser a blob instead.
+            const button = event.currentTarget;
+            button.disabled = true;
+            const original = button.textContent;
+            button.textContent = 'Preparing export…';
+            try {
+              const data = await api('/audit/export?limit=500');
+              const url = URL.createObjectURL(
+                new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+              const link = document.createElement('a');
+              link.href = url;
+              link.download = `absp-audit-trail-${new Date().toISOString().slice(0, 10)}.json`;
+              document.body.appendChild(link);
+              link.click();
+              link.remove();
+              URL.revokeObjectURL(url);
+              toast('Audit trail exported', 'ok');
+            } catch (error) {
+              toast(error.message, 'error');
+            } finally {
+              button.disabled = false;
+              button.textContent = original;
+            }
+          } }),
+      ]),
     ]);
   } catch (error) {
     return el('div', { class: 'card' }, [el('p', { class: 'error-text', text: error.message })]);
