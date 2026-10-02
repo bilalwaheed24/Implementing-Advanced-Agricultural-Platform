@@ -168,3 +168,9 @@ class TestVerificationCode:
         sample = codes.pop()
         assert len(sample.replace("-", "")) == 20
         assert all(part.isalnum() for part in sample.split("-"))
+
+    def test_the_entropy_matches_what_the_documentation_claims(self):
+        """The docs claimed 128 bits while the code emitted 20 base32 characters, which is
+        100 (audit P3). This pins the two together so the claim cannot drift again."""
+        emitted = len(verification_code().replace("-", ""))
+        assert emitted * 5 == 100, f"{emitted} base32 chars is {emitted * 5} bits"

@@ -21,7 +21,7 @@ Security is treated as a design input, not a release gate. This document is writ
 
 | ID | Boundary | Threat | STRIDE | Control |
 |---|---|---|---|---|
-| T-01 | TB-1 public | Consumer endpoint enumerated to harvest the batch graph | I, D | Opaque 128-bit verification codes, rate limiting, non-sensitive projection only |
+| T-01 | TB-1 public | Consumer endpoint enumerated to harvest the batch graph | I, D | Opaque 100-bit verification codes, rate limiting, non-sensitive projection only |
 | T-02 | TB-2 user | Credential stuffing / brute force | S | bcrypt cost 12, lockout after 5 failures, timing-neutral failure path |
 | T-03 | TB-2 user | JWT forgery or `alg:none` downgrade | S, E | Explicit algorithm allow-list on decode, signature+exp+iss+aud verified, no default secret in production (an *absent* `JWT_SECRET` is preserved as empty through settings construction so the production startup check catches it, rather than being silently backfilled with a random value — see `SECURITY-ASSESSMENT.md`) |
 | T-04 | TB-2 user | Stolen refresh token reuse | S | Rotation with reuse detection; denylist by `jti`; family invalidation |
@@ -113,6 +113,24 @@ loopback only, documented as such.
 using a key from the environment, with a per-record nonce and the record id as associated data;
 database-level encryption (RDS KMS) in production; ledger blocks are hashed and signed, not
 encrypted (integrity, not confidentiality, is their purpose).
+
+### What is deliberately *not* encrypted at the column level
+
+Stated explicitly so the claim above is not read more widely than it holds. Each of these
+relies on database-level encryption and the access controls in §3-4 rather than column
+encryption, and each is a considered trade-off rather than an oversight:
+
+| Data | Why it is stored in the clear |
+|---|---|
+| CRISPR `guide_rna`, `pam`, off-target coordinates | They are the inputs the risk scorer and the reviewer both read on every assessment and review. Encrypting them would put a decrypt on the hot path of the dual-use check and remove the ability to query them, for data that is synthetic in this build. Revisit before any real sequence is held. |
+| Farm and shipment latitude/longitude | They are queried geospatially (proximity, route and cold-chain joins), which column encryption would prevent. The public verification projection never returns exact coordinates — only region and country. |
+
+*Browser token storage:* the access and refresh tokens are held in `localStorage`. The
+stronger arrangement is a refresh token in an `HttpOnly; Secure; SameSite` cookie with a
+short-lived in-memory access token; that is a cross-cutting change to the auth flow, the
+refresh path and every fetch, and it is recorded here as post-exam hardening rather than
+attempted late. The present risk is bounded by the CSP (no inline script, no third-party
+script origins) and short access-token lifetimes.
 
 ## 10. Secrets management
 

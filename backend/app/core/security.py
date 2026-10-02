@@ -250,7 +250,14 @@ _B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
 
 def verification_code() -> str:
-    """Unguessable public code for consumer verification (128 bits, grouped base32)."""
+    """Unguessable public code for consumer verification.
+
+    16 random bytes are base32-encoded to 26 characters, of which the first 20 are emitted as
+    five groups of four — so the code carries 100 bits of entropy, not the full 128 that were
+    generated. 100 bits is far beyond brute-force reach and the shorter code is the one a
+    consumer has to read off a label, but the number is stated accurately here because the
+    documentation previously claimed 128 (audit P3).
+    """
     raw = secrets.token_bytes(16)
     encoded = base64.b32encode(raw).decode().rstrip("=")
     return "-".join(encoded[i:i + 4] for i in range(0, 20, 4))

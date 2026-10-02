@@ -286,7 +286,7 @@ class TestPublicEndpointExposure:
         assert client.get(f"/api/v1/verify/{code}").status_code in (404, 422)
 
     def test_verification_codes_are_unguessable(self):
-        """128 bits of entropy: enumeration is not a feasible attack."""
+        """100 bits of emitted entropy: enumeration is not a feasible attack."""
         from app.core.security import verification_code
 
         codes = {verification_code() for _ in range(500)}
