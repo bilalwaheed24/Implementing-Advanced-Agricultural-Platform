@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.security import content_hash, utcnow
 from ..models import Batch, GMOApproval, GMOEvent, Organization, SeedLot, SequenceScreening
+from ..repositories import get_or_404
 from . import audit, biosecurity, ledger_client, notifications
 
 
@@ -29,6 +30,52 @@ def event_content(event: GMOEvent) -> dict[str, Any]:
             "description": event.description}
 
 
+# Legal transitions for a jurisdictional approval. A withdrawn or rejected decision must be
+# re-submitted through the regulator's own process rather than flipped back to APPROVED.
+APPROVAL_TRANSITIONS: dict[str, frozenset[str]] = {
+    "NOT_SUBMITTED": frozenset({"PENDING", "APPROVED", "REJECTED"}),
+    "PENDING": frozenset({"APPROVED", "REJECTED"}),
+    "APPROVED": frozenset({"REJECTED"}),        # withdrawal of a granted approval
+    "REJECTED": frozenset({"PENDING"}),         # resubmission, not a direct flip to APPROVED
+}
+
+# Approval states that permit a GMO event to be taken forward into seed lots and batches.
+APPROVED_STATUSES = frozenset({"APPROVED"})
+
+
+def require_registerable_event(db: Session, gmo_event_id: str, actor_role: str,
+                               org_id: str | None) -> GMOEvent:
+    """Resolve a client-supplied GMO event id within the caller's visibility.
+
+    `db.get()` here would let a caller attach another tenant's GMO event — and therefore its
+    trait, donor organism and developer — to their own seed lot or batch (audit P1).
+    """
+    return get_or_404(db, GMOEvent, gmo_event_id, actor_role, org_id, name="GMO event")
+
+
+def require_approved_event(db: Session, gmo_event_id: str, actor_role: str,
+                           org_id: str | None) -> GMOEvent:
+    """As above, and additionally require a live jurisdictional approval.
+
+    Registering an event only proves it passed biosecurity screening. Propagating it into
+    planting material is a separate regulated step, so a seed lot must descend from an event a
+    regulator has actually approved somewhere (audit P1, §15).
+    """
+    event = require_registerable_event(db, gmo_event_id, actor_role, org_id)
+    approvals = list(db.execute(
+        select(GMOApproval).where(GMOApproval.gmo_event_id == event.id)).scalars())
+    if not approvals:
+        raise ValidationFailed(
+            f"GMO event {event.event_code} has no jurisdictional approval on record. A seed lot "
+            f"may only be produced from an approved event.")
+    if not any(a.status in APPROVED_STATUSES for a in approvals):
+        states = sorted({a.status for a in approvals})
+        raise ValidationFailed(
+            f"GMO event {event.event_code} is not approved in any jurisdiction "
+            f"(recorded states: {', '.join(states)}).")
+    return event
+
+
 def register_event(db: Session, org_id: str, actor_id: str, actor_role: str, event_code: str,
                    crop_type: str, trait: str, donor_organism: str, developer: str,
                    description: str, screening_id: str) -> GMOEvent:
@@ -36,11 +83,12 @@ def register_event(db: Session, org_id: str, actor_id: str, actor_role: str, eve
     if db.execute(select(GMOEvent).where(GMOEvent.event_code == event_code)).scalar_one_or_none():
         raise Conflict(f"GMO event {event_code} is already registered")
 
-    screening = db.get(SequenceScreening, screening_id)
-    if screening is None:
-        raise ValidationFailed("A biosecurity screening is required before registration")
+    # Scoped so a foreign screening id is a plain 404 rather than a message confirming that
+    # it exists and belongs to someone else (audit P2, existence oracle).
+    screening = get_or_404(db, SequenceScreening, screening_id, actor_role, org_id,
+                           name="Screening")
     if screening.org_id != org_id:
-        raise ValidationFailed("The screening belongs to another organisation")
+        raise NotFound("Screening not found")
     if screening.status not in biosecurity.PASSING_STATUSES:
         raise ValidationFailed(
             f"Screening {screening_id} is in state {screening.status}. A GMO event may only be "
@@ -104,7 +152,17 @@ def record_approval(db: Session, event: GMOEvent, actor_id: str, actor_role: str
     existing = db.execute(select(GMOApproval).where(
         GMOApproval.gmo_event_id == event.id,
         GMOApproval.jurisdiction == jurisdiction)).scalar_one_or_none()
+    previous_status = None
     if existing:
+        previous_status = existing.status
+        # A regulatory decision must not be silently rewritten (audit P2, §24). Only the
+        # transitions a regulator can legitimately make are allowed, and the prior value is
+        # recorded in the audit trail below.
+        allowed = APPROVAL_TRANSITIONS.get(existing.status, frozenset())
+        if status != existing.status and status not in allowed:
+            raise Conflict(
+                f"Approval for {jurisdiction} is {existing.status}; it cannot move to {status}. "
+                f"Allowed: {', '.join(sorted(allowed)) or 'no further change'}.")
         existing.status = status
         existing.reference = reference
         existing.approved_at = approved_at
@@ -129,6 +187,7 @@ def record_approval(db: Session, event: GMOEvent, actor_id: str, actor_role: str
     audit.record(db, "gmo.record_approval", actor_id=actor_id, actor_role=actor_role,
                  org_id=event.org_id, entity_type="GMOEvent", entity_id=event.id,
                  detail={"jurisdiction": jurisdiction, "status": status,
+                         "previous_status": previous_status,
                          "anchored": bool(receipt.get("ok"))})
     return approval
 
@@ -140,9 +199,7 @@ def create_seed_lot(db: Session, org_id: str, actor_id: str, actor_role: str, lo
         raise Conflict(f"Seed lot {lot_code} already exists")
     event = None
     if gmo_event_id:
-        event = db.get(GMOEvent, gmo_event_id)
-        if event is None:
-            raise NotFound("GMO event not found")
+        event = require_approved_event(db, gmo_event_id, actor_role, org_id)
 
     lot = SeedLot(org_id=org_id, lot_code=lot_code, gmo_event_id=gmo_event_id,
                   crop_type=crop_type, variety=variety, quantity_kg=quantity_kg,

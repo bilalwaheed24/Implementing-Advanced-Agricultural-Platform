@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..core.permissions import CROSS_TENANT_ROLES, Role
 from ..core.security import utcnow
+from ..core.errors import Conflict
 from ..models import Alert, Incident, IncidentEvent, Notification, User
 
 # Which roles are notified for each alert category.
@@ -82,7 +83,29 @@ def fan_out(db: Session, category: str, severity: str, title: str, body: str,
     return sent
 
 
+# Alert lifecycle. Previously both transitions were applied unconditionally, so resolve
+# followed by acknowledge moved a RESOLVED alert back to ACKNOWLEDGED — a silent reopen that
+# left resolved_at set (audit P2). OPEN -> RESOLVED is permitted: a responder who has already
+# dealt with the cause should not have to acknowledge first.
+ALERT_TRANSITIONS: dict[str, frozenset[str]] = {
+    "OPEN": frozenset({"ACKNOWLEDGED", "RESOLVED"}),
+    "ACKNOWLEDGED": frozenset({"RESOLVED"}),
+    "RESOLVED": frozenset(),            # terminal
+}
+
+
+def _require_alert_transition(alert: Alert, target: str) -> None:
+    allowed = ALERT_TRANSITIONS.get(alert.status, frozenset())
+    if target == alert.status:
+        raise Conflict(f"Alert is already {alert.status}")
+    if target not in allowed:
+        raise Conflict(
+            f"Alert is {alert.status}; it cannot move to {target}. "
+            f"Allowed from here: {', '.join(sorted(allowed)) or 'nothing, this is final'}.")
+
+
 def acknowledge(db: Session, alert: Alert, actor_id: str) -> Alert:
+    _require_alert_transition(alert, "ACKNOWLEDGED")
     alert.status = "ACKNOWLEDGED"
     alert.acknowledged_by = actor_id
     alert.acknowledged_at = utcnow()
@@ -91,6 +114,7 @@ def acknowledge(db: Session, alert: Alert, actor_id: str) -> Alert:
 
 
 def resolve(db: Session, alert: Alert) -> Alert:
+    _require_alert_transition(alert, "RESOLVED")
     alert.status = "RESOLVED"
     alert.resolved_at = utcnow()
     db.flush()

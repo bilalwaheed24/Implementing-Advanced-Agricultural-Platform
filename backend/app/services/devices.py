@@ -164,12 +164,21 @@ def update_health(db: Session, device: Device, readings: dict[str, Any]) -> None
     db.flush()
 
 
-def sweep_silent_devices(db: Session, missed_intervals: int = 3) -> list[Device]:
-    """Raise an alert for every active device that has missed several reporting intervals."""
+def sweep_silent_devices(db: Session, missed_intervals: int = 3,
+                         org_id: str | None = None) -> list[Device]:
+    """Raise an alert for every active device that has missed several reporting intervals.
+
+    `org_id` restricts the sweep to one organisation. A tenant-triggered sweep must pass it:
+    unscoped, a farm operator's request both disclosed other tenants' device ids and created
+    alert and notification rows inside those organisations (audit P1). The scheduled
+    platform-wide task calls this with org_id=None deliberately.
+    """
     now = utcnow()
     silent: list[Device] = []
-    for device in db.execute(select(Device).where(Device.status == "ACTIVE",
-                                                  Device.deleted_at.is_(None))).scalars():
+    query = select(Device).where(Device.status == "ACTIVE", Device.deleted_at.is_(None))
+    if org_id is not None:
+        query = query.where(Device.org_id == org_id)
+    for device in db.execute(query).scalars():
         if device.last_seen_at is None:
             continue
         last_seen = ensure_aware(device.last_seen_at)

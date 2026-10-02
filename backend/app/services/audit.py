@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..core.logging_conf import app_log, audit_log, correlation_id, log_event
 from ..core.security import canonical_json, sha256_hex
+from ..core.errors import ValidationFailed
 from ..models import AuditLog
 
 GENESIS_HASH = "0" * 64
@@ -89,10 +90,18 @@ def head(db: Session) -> tuple[int, str]:
     return (last.seq, last.entry_hash) if last else (0, GENESIS_HASH)
 
 
-def anchor_head(db: Session, submitter_msp: str = "RegulatorMSP") -> dict[str, Any]:
-    """Anchor the current audit chain head to the ledger."""
+def anchor_head(db: Session, submitter_msp: str) -> dict[str, Any]:
+    """Anchor the current audit chain head to the ledger.
+
+    `submitter_msp` is required and must be derived from the authenticated principal's
+    organisation. It previously defaulted to "RegulatorMSP", which meant any holder of
+    audit:read — a biosafety officer in a Biotech organisation, for instance — produced a
+    ledger transaction signed as the regulator (audit P1).
+    """
     from . import ledger_client
 
+    if not submitter_msp:
+        raise ValidationFailed("No ledger identity is mapped to this organisation")
     seq, head_hash = head(db)
     if seq == 0:
         return {"ok": False, "detail": "Audit chain is empty"}

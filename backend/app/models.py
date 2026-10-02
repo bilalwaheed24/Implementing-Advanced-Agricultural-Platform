@@ -671,5 +671,5 @@ class AuditLog(Base):
 
 class SchemaVersion(Base):
     __tablename__ = "schema_version"
-    version: Mapped[str] = mapped_column(String(20), primary_key=True)
+    version: Mapped[str] = mapped_column(String(100), primary_key=True)
     applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

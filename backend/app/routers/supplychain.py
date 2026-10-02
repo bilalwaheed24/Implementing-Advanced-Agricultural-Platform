@@ -9,8 +9,8 @@ from sqlalchemy import select
 from ..core.deps import DbSession, PagingDep, rate_limit, require_permission
 from ..core.errors import NotFound
 from ..core.permissions import P
-from ..models import (Batch, Certification, CertificationLink, FraudAssessment, Product,
-                      Shipment, SupplyChainEvent)
+from ..models import (Batch, Certification, CertificationLink, FraudAssessment, Organization,
+                      Product, Shipment, SupplyChainEvent)
 from ..repositories import get_or_404, paginate, visible
 from ..schemas import (BatchCreate, BatchOut, CertificationCreate, CertificationLinkCreate,
                        CertificationOut, Page, ProductCreate, ProductOut, RevokeRequest,
@@ -82,7 +82,7 @@ def custody(batch_id: str, db: DbSession,
             principal: Annotated[object, Depends(require_permission(P.SUPPLY_READ))]) -> dict:
     batch = get_or_404(db, Batch, batch_id, principal.role, principal.org_id, name="Batch")
     events = service.chain_of_custody(db, batch)
-    lineage = service.lineage(db, batch)
+    lineage = service.lineage(db, batch, principal.role, principal.org_id)
     return {
         "batch": BatchOut.model_validate(batch).model_dump(),
         "events": [SupplyChainEventOut.model_validate(e).model_dump() for e in events],
@@ -95,7 +95,7 @@ def custody(batch_id: str, db: DbSession,
 @router.post("/batches/{batch_id}/verify", response_model=VerificationResult,
              summary="Verify supply-chain integrity and score for fraud")
 def verify_batch(batch_id: str, db: DbSession,
-                 principal: Annotated[object, Depends(require_permission(P.SUPPLY_READ))]
+                 principal: Annotated[object, Depends(require_permission(P.SUPPLY_VERIFY))]
                  ) -> VerificationResult:
     batch = get_or_404(db, Batch, batch_id, principal.role, principal.org_id, name="Batch")
     result = service.verify_batch(db, batch, principal.id, principal.role)
@@ -181,6 +181,22 @@ def issue_certification(payload: CertificationCreate, db: DbSession,
         payload.valid_to)
     db.commit()
     return CertificationOut.model_validate(certification)
+
+
+@router.get("/certifications/eligible-subjects",
+            summary="Organisations this certifier may certify")
+def eligible_subjects(db: DbSession,
+                      principal: Annotated[object, Depends(require_permission(P.CERT_ISSUE))]
+                      ) -> list[dict]:
+    """A certifier must name a subject organisation, but the global organisation directory is
+    restricted (audit P1), so this gives the issuer exactly the list it needs: active
+    organisations other than its own, with business-readable labels and no MSP identity."""
+    rows = db.execute(
+        select(Organization).where(Organization.is_active.is_(True),
+                                   Organization.id != principal.org_id)
+        .order_by(Organization.name.asc())).scalars()
+    return [{"id": org.id, "name": org.name, "org_type": org.org_type,
+             "country": org.country} for org in rows]
 
 
 @router.get("/certifications", response_model=Page[CertificationOut],
