@@ -23,21 +23,40 @@ const ROLES = ['ADMIN', 'SECURITY_ANALYST', 'FARM_OPERATOR', 'AGRONOMIST',
               'BIOTECH_RESEARCHER', 'BIOSAFETY_OFFICER', 'SUPPLY_CHAIN_OPERATOR',
               'CERTIFIER', 'REGULATOR'];
 
+function roleName(role) {
+  return String(role).toLowerCase().split('_')
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+}
+
+
 function roleCell(row, reload) {
   if (!can('user:write')) return roleLabel(row.role);
   return el('div', { class: 'row' }, [
     roleLabel(row.role),
-    el('button', { text: 'Change', onClick: async () => {
-      const next = window.prompt(
-        `New role for ${row.email} (one of: ${ROLES.join(', ')}):`, row.role);
-      if (!next || next.trim().toUpperCase() === row.role) return;
+    // A select, not a free-text prompt: a typo previously reached the API as an invalid role.
+    el('select', { 'aria-label': `Role for ${row.email}`, onChange: async (event) => {
+      const select = event.currentTarget;
+      const next = select.value;
+      if (!next || next === row.role) return;
+      if (!window.confirm(
+        `Change the role of ${row.email} from ${roleName(row.role)} to ${roleName(next)}?\n\n`
+        + 'They will be signed out and must sign in again.')) {
+        select.value = row.role;
+        return;
+      }
+      select.disabled = true;
       try {
-        await api(`/admin/users/${row.id}`, { method: 'PATCH',
-                                              body: { role: next.trim().toUpperCase() } });
+        await api(`/admin/users/${row.id}`, { method: 'PATCH', body: { role: next } });
         toast('Role updated — the user will need to sign in again', 'ok');
         reload();
-      } catch (error) { toast(error.message, 'error'); }
-    } }),
+      } catch (error) {
+        toast(error.message, 'error');
+        select.value = row.role;
+      } finally {
+        select.disabled = false;
+      }
+    } }, ROLES.map((role) => el('option', {
+      value: role, text: roleName(role), selected: role === row.role ? '' : null }))),
   ]);
 }
 

@@ -3,41 +3,106 @@ from __future__ import annotations
 
 import pytest
 
+from app.core.permissions import SELF_REGISTRATION_ROLE
+
 from .conftest import PASSWORD, unique
 
 
 class TestRegistration:
-    def test_ordinary_role_is_active_immediately(self, client, orgs):
+    """Self-registration must grant nothing. Anyone can discover an organisation id, so an
+    anonymous caller must never end up as an active member of a tenant (audit P0-1)."""
+
+    def test_self_registration_is_always_pending(self, client, orgs):
         email = f"{unique('newop').lower()}@test.absp"
         response = client.post("/api/v1/auth/register", json={
             "email": email, "full_name": "New Operator", "password": "Str0ng-Passw0rd!x",
-            "role": "FARM_OPERATOR", "org_id": orgs["FARM"].id})
+            "org_id": orgs["FARM"].id})
         assert response.status_code == 201, response.text
-        assert response.json()["status"] == "ACTIVE"
-
-    def test_privileged_role_requires_approval(self, client, orgs):
-        email = f"{unique('newcert').lower()}@test.absp"
-        response = client.post("/api/v1/auth/register", json={
-            "email": email, "full_name": "New Certifier", "password": "Str0ng-Passw0rd!x",
-            "role": "CERTIFIER", "org_id": orgs["REGULATOR"].id})
-        assert response.status_code == 201
         assert response.json()["status"] == "PENDING"
+
+    def test_pending_self_registration_cannot_log_in(self, client, orgs):
+        email = f"{unique('pend').lower()}@test.absp"
+        client.post("/api/v1/auth/register", json={
+            "email": email, "full_name": "Pending User", "password": "Str0ng-Passw0rd!x",
+            "org_id": orgs["FARM"].id})
         login = client.post("/api/v1/auth/login",
                             json={"email": email, "password": "Str0ng-Passw0rd!x"})
         assert login.status_code == 401
         assert "approval" in login.json()["detail"].lower()
 
+    @pytest.mark.parametrize("wanted", ["ADMIN", "REGULATOR", "CERTIFIER", "SECURITY_ANALYST",
+                                        "FARM_OPERATOR", "SUPPLY_CHAIN_OPERATOR"])
+    def test_requested_role_is_never_granted(self, client, orgs, wanted):
+        """A client-supplied role is advisory only; the server assigns least privilege."""
+        email = f"{unique('role').lower()}@test.absp"
+        response = client.post("/api/v1/auth/register", json={
+            "email": email, "full_name": "Role Grabber", "password": "Str0ng-Passw0rd!x",
+            "org_id": orgs["FARM"].id, "requested_role": wanted})
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["status"] == "PENDING"
+        assert body["role"] == SELF_REGISTRATION_ROLE.value
+        assert body["role"] != wanted or wanted == SELF_REGISTRATION_ROLE.value
+
+    def test_pending_user_cannot_reach_protected_resources(self, client, orgs, db):
+        """Even if a token were somehow obtained, PENDING fails the request dependency."""
+        from app.models import User
+        from app.core.security import create_access_token
+
+        email = f"{unique('inert').lower()}@test.absp"
+        client.post("/api/v1/auth/register", json={
+            "email": email, "full_name": "Inert User", "password": "Str0ng-Passw0rd!x",
+            "org_id": orgs["FARM"].id})
+        user = db.query(User).filter(User.email == email).one()
+        token, _ = create_access_token(user.id, user.role, user.org_id)
+        for path in ("/api/v1/farms", "/api/v1/supply-chain/batches", "/api/v1/devices"):
+            response = client.get(path, headers={"Authorization": f"Bearer {token}"})
+            assert response.status_code == 401, f"{path} -> {response.status_code}"
+
+    def test_approved_user_is_scoped_to_its_own_organisation(self, client, orgs, auth):
+        """After approval the account works, and only inside the organisation it joined."""
+        from app.models import User
+
+        email = f"{unique('appr').lower()}@test.absp"
+        created = client.post("/api/v1/auth/register", json={
+            "email": email, "full_name": "Approved User", "password": "Str0ng-Passw0rd!x",
+            "org_id": orgs["FARM"].id}).json()
+        approve = client.post(f"/api/v1/admin/users/{created['id']}/approve",
+                              headers=auth("ADMIN"))
+        assert approve.status_code == 200, approve.text
+        assert approve.json()["status"] == "ACTIVE"
+        login = client.post("/api/v1/auth/login",
+                            json={"email": email, "password": "Str0ng-Passw0rd!x"})
+        assert login.status_code == 200
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        me = client.get("/api/v1/auth/me", headers=headers).json()
+        assert me["org_id"] == orgs["FARM"].id
+        assert me["role"] == SELF_REGISTRATION_ROLE.value
+
+    def test_suspended_user_cannot_log_in(self, client, orgs, auth):
+        from app.models import User
+
+        email = f"{unique('susp').lower()}@test.absp"
+        created = client.post("/api/v1/auth/register", json={
+            "email": email, "full_name": "Suspended User", "password": "Str0ng-Passw0rd!x",
+            "org_id": orgs["FARM"].id}).json()
+        client.post(f"/api/v1/admin/users/{created['id']}/approve", headers=auth("ADMIN"))
+        client.post(f"/api/v1/admin/users/{created['id']}/suspend",
+                    headers=auth("ADMIN"), json={"reason": "audit regression test"})
+        login = client.post("/api/v1/auth/login",
+                            json={"email": email, "password": "Str0ng-Passw0rd!x"})
+        assert login.status_code == 401
+
     def test_weak_password_rejected(self, client, orgs):
         response = client.post("/api/v1/auth/register", json={
             "email": f"{unique('weak').lower()}@test.absp", "full_name": "Weak User",
-            "password": "password1234", "role": "FARM_OPERATOR", "org_id": orgs["FARM"].id})
+            "password": "password1234", "org_id": orgs["FARM"].id})
         assert response.status_code == 422
 
     def test_duplicate_email_does_not_confirm_existence(self, client, orgs, users):
         response = client.post("/api/v1/auth/register", json={
             "email": "farm_operator@test.absp", "full_name": "Impostor",
-            "password": "Str0ng-Passw0rd!x", "role": "FARM_OPERATOR",
-            "org_id": orgs["FARM"].id})
+            "password": "Str0ng-Passw0rd!x", "org_id": orgs["FARM"].id})
         assert response.status_code == 409
         assert "farm_operator@test.absp" not in response.text
         assert "already" not in response.json()["detail"].lower()
@@ -45,7 +110,7 @@ class TestRegistration:
     def test_unknown_organisation_rejected(self, client):
         response = client.post("/api/v1/auth/register", json={
             "email": f"{unique('x').lower()}@test.absp", "full_name": "No Org",
-            "password": "Str0ng-Passw0rd!x", "role": "FARM_OPERATOR",
+            "password": "Str0ng-Passw0rd!x",
             "org_id": "00000000-0000-0000-0000-000000000000"})
         assert response.status_code == 422
 
@@ -53,13 +118,7 @@ class TestRegistration:
     def test_invalid_email_rejected(self, client, orgs, email):
         response = client.post("/api/v1/auth/register", json={
             "email": email, "full_name": "Bad Email", "password": "Str0ng-Passw0rd!x",
-            "role": "FARM_OPERATOR", "org_id": orgs["FARM"].id})
-        assert response.status_code == 422
-
-    def test_unknown_role_rejected(self, client, orgs):
-        response = client.post("/api/v1/auth/register", json={
-            "email": f"{unique('y').lower()}@test.absp", "full_name": "Bad Role",
-            "password": "Str0ng-Passw0rd!x", "role": "SUPERUSER", "org_id": orgs["FARM"].id})
+            "org_id": orgs["FARM"].id})
         assert response.status_code == 422
 
 

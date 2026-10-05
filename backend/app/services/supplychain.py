@@ -14,15 +14,62 @@ from sqlalchemy.orm import Session
 from ..core.config import get_settings
 from ..core.errors import Conflict, NotFound, PermissionDenied, ValidationFailed
 from ..core.security import ensure_aware as _aware, content_hash, utcnow, verification_code
-from ..models import (Batch, Certification, CertificationLink, FraudAssessment, Organization,
-                      Product, Shipment, SupplyChainEvent)
-from . import audit, gmo as gmo_service, ledger_client, notifications, telemetry as telemetry_service
+from ..repositories import get_or_404, visible
+from ..models import (Batch, Certification, CertificationLink, Crop, Farm, FraudAssessment,
+                      GMOEvent, Organization, Product, SeedLot, Shipment, SupplyChainEvent)
+from . import ai_client, audit, gmo as gmo_service, ledger_client, notifications, telemetry as telemetry_service
 
 BIZ_STEP_TO_STATE = {
     "commissioning": "CREATED", "harvesting": "HARVESTED", "transforming": "PROCESSED",
     "packing": "PACKAGED", "shipping": "IN_TRANSIT", "receiving": "RECEIVED",
     "storing": "STORED", "retail_selling": "RETAILED", "recalling": "RECALLED",
 }
+
+# Legal batch state transitions, enforced here as well as in the chaincode.
+#
+# The chaincode is the authority on-chain, but relying on it alone left a gap: the DB only
+# refused a transition when the ledger came back REJECTED, and `ledger_client.submit` returns
+# PENDING — not REJECTED — when the circuit breaker is open or the retries are exhausted. In
+# that degraded state an illegal transition was still written to the database (audit P1).
+# `tests/test_supplychain_e2e.py` asserts this table is identical to
+# `ledger.contracts.BATCH_TRANSITIONS`, so the two cannot drift apart.
+BATCH_TRANSITIONS: dict[str, frozenset[str]] = {
+    "CREATED": frozenset({"HARVESTED", "PROCESSED", "IN_TRANSIT", "RECALLED"}),
+    "HARVESTED": frozenset({"PROCESSED", "IN_TRANSIT", "STORED", "RECALLED"}),
+    "PROCESSED": frozenset({"PACKAGED", "IN_TRANSIT", "STORED", "RECALLED"}),
+    "PACKAGED": frozenset({"IN_TRANSIT", "STORED", "RECALLED"}),
+    "IN_TRANSIT": frozenset({"RECEIVED", "STORED", "RECALLED"}),
+    "RECEIVED": frozenset({"PROCESSED", "PACKAGED", "IN_TRANSIT", "STORED", "RETAILED",
+                           "RECALLED"}),
+    "STORED": frozenset({"IN_TRANSIT", "PROCESSED", "PACKAGED", "RETAILED", "RECALLED"}),
+    "RETAILED": frozenset({"CONSUMED", "RECALLED"}),
+    "CONSUMED": frozenset(),
+    "RECALLED": frozenset(),
+}
+
+
+def require_batch_transition(current: str, target: str) -> None:
+    """Reject an illegal batch state change before anything is written or submitted."""
+    if target == current:
+        return
+    allowed = BATCH_TRANSITIONS.get(current, frozenset())
+    if target not in allowed:
+        raise ValidationFailed(
+            f"Illegal transition {current} -> {target}; allowed: "
+            f"{', '.join(sorted(allowed)) or 'none, this state is final'}")
+
+
+def _require_exists(db: Session, model: type, entity_id: str, name: str) -> Any:
+    """Referential-integrity check for a cross-organisation provenance reference.
+
+    Deliberately not org-scoped: see the rules in `create_batch`. It stops a client planting a
+    dangling or soft-deleted id, which is what would otherwise produce orphan lineage, and
+    reveals nothing beyond whether the identifier resolves.
+    """
+    row = db.get(model, entity_id)
+    if row is None or getattr(row, "deleted_at", None) is not None:
+        raise NotFound(f"{name} not found")
+    return row
 
 
 def _msp_for(db: Session, org_id: str) -> str:
@@ -74,18 +121,35 @@ def create_batch(db: Session, org_id: str, actor_id: str, actor_role: str, batch
                  origin_country: str | None, harvested_at: datetime | None) -> Batch:
     if db.execute(select(Batch).where(Batch.batch_code == batch_code)).scalar_one_or_none():
         raise Conflict(f"Batch {batch_code} already exists")
-    product = db.get(Product, product_id)
-    if product is None or product.deleted_at is not None:
-        raise NotFound("Product not found")
+    # Every id below arrives from the request body, so each is resolved rather than trusted.
+    # Two different rules apply, because a supply chain legitimately spans organisations:
+    #
+    #   * Custody-bearing references are scoped to the caller. A batch's own product and its
+    #     parent batch are read back out through the batch and lineage views, so accepting a
+    #     foreign id there discloses another tenant's record (audit P1). get_or_404 returns 404,
+    #     not 403, so a foreign id is indistinguishable from a nonexistent one.
+    #
+    #   * Provenance references crossing organisations are checked for existence only. A
+    #     processor's batch genuinely points at the grower's farm and the developer's GMO event
+    #     — that is what traceability means — and requiring same-org ownership there would make
+    #     the food chain unrepresentable. Only the identifier is stored; the referenced record's
+    #     contents stay protected by the scoped read paths on /farms and /gmo/events.
+    product = get_or_404(db, Product, product_id, actor_role, org_id, name="Product")
 
     parent = None
     if parent_batch_id:
-        parent = db.get(Batch, parent_batch_id)
-        if parent is None:
-            raise NotFound("Parent batch not found")
+        parent = get_or_404(db, Batch, parent_batch_id, actor_role, org_id, name="Parent batch")
         if quantity > parent.quantity + 1e-9:
             raise ValidationFailed(
                 f"Quantity {quantity} exceeds the parent batch quantity {parent.quantity}")
+    if seed_lot_id:
+        _require_exists(db, SeedLot, seed_lot_id, "Seed lot")
+    if crop_id:
+        _require_exists(db, Crop, crop_id, "Crop")
+    if farm_id:
+        _require_exists(db, Farm, farm_id, "Farm")
+    if gmo_event_id:
+        _require_exists(db, GMOEvent, gmo_event_id, "GMO event")
 
     batch = Batch(org_id=org_id, batch_code=batch_code, verification_code=verification_code(),
                   product_id=product_id, parent_batch_id=parent_batch_id, seed_lot_id=seed_lot_id,
@@ -133,6 +197,11 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
         raise ValidationFailed(
             f"Event quantity {quantity} exceeds the batch quantity {batch.quantity} "
             f"(quantity conservation)")
+    # Checked here, not only by the chaincode, so a degraded ledger cannot let an illegal
+    # transition reach the database (see BATCH_TRANSITIONS above).
+    target_state = BIZ_STEP_TO_STATE.get(biz_step)
+    if target_state:
+        require_batch_transition(batch.state, target_state)
 
     event = SupplyChainEvent(
         batch_id=batch.id, org_id=org_id, event_type=event_type, biz_step=biz_step,
@@ -198,11 +267,27 @@ def chain_of_custody(db: Session, batch: Batch) -> list[SupplyChainEvent]:
         .order_by(SupplyChainEvent.occurred_at.asc())).scalars())
 
 
-def lineage(db: Session, batch: Batch, max_depth: int = 12) -> list[Batch]:
+def lineage(db: Session, batch: Batch, role: str | None = None, org_id: str | None = None,
+            max_depth: int = 12) -> list[Batch]:
+    """Walk the parent chain inside the caller's visibility only.
+
+    Batches created before the ownership checks in `create_batch` may still carry a foreign
+    parent_batch_id, so the walk stops at the first ancestor the caller may not see rather than
+    disclosing its code, state and quantity (audit P1). Called without an explicit scope — as
+    the compliance rules do — it scopes to the batch's own organisation, which is the right
+    boundary for a report about that batch.
+    """
+    scope_role = role or ""          # not a known Role, so visible() falls back to org scoping
+    scope_org = org_id if org_id is not None else batch.org_id
     chain, current, depth = [], batch, 0
-    while current and depth < max_depth:
+    seen: set[str] = set()
+    while current and depth < max_depth and current.id not in seen:
         chain.append(current)
-        current = db.get(Batch, current.parent_batch_id) if current.parent_batch_id else None
+        seen.add(current.id)
+        if not current.parent_batch_id:
+            break
+        query = visible(Batch, scope_role, scope_org).where(Batch.id == current.parent_batch_id)
+        current = db.execute(query).scalar_one_or_none()
         depth += 1
     return chain
 
@@ -213,9 +298,8 @@ def lineage(db: Session, batch: Batch, max_depth: int = 12) -> list[Batch]:
 def create_shipment(db: Session, org_id: str, actor_id: str, actor_role: str, **kwargs) -> Shipment:
     if db.execute(select(Shipment).where(Shipment.sscc == kwargs["sscc"])).scalar_one_or_none():
         raise Conflict(f"Shipment {kwargs['sscc']} already exists")
-    batch = db.get(Batch, kwargs["batch_id"])
-    if batch is None:
-        raise NotFound("Batch not found")
+    # A shipment must reference a batch the caller actually holds (audit P1).
+    batch = get_or_404(db, Batch, kwargs["batch_id"], actor_role, org_id, name="Batch")
     arrived = _aware(kwargs.get("arrived_at"))
     departed = _aware(kwargs["departed_at"])
     if arrived and arrived < departed:
@@ -248,6 +332,13 @@ def issue_certification(db: Session, issuer_org_id: str, actor_id: str, actor_ro
     if db.execute(select(Certification).where(
             Certification.cert_code == cert_code)).scalar_one_or_none():
         raise Conflict(f"Certification {cert_code} already exists")
+    # Four-eyes at organisation level (audit P0-3). A certification is an independent
+    # attestation about somebody else; an ORGANIC or NON_GMO claim a body issues to itself
+    # carries no assurance, and it reaches the public verification page as if it did.
+    if issuer_org_id == subject_org_id:
+        raise ValidationFailed(
+            "An organisation cannot certify itself. The subject of a certification must be a "
+            "different organisation from the issuer.")
     issuer = db.get(Organization, issuer_org_id)
     if issuer is None:
         raise NotFound("Issuing organisation not found")
@@ -278,6 +369,13 @@ def issue_certification(db: Session, issuer_org_id: str, actor_id: str, actor_ro
          "subject": subject_org_id, "valid_from": valid_from.isoformat(),
          "valid_to": valid_to.isoformat(), "content_hash": digest},
         _msp_for(db, issuer_org_id))
+    if receipt.get("status") == "REJECTED":
+        # The chaincode restricts certification.Issue to RegulatorMSP. Recording the rejection
+        # as an anchor_status left an ACTIVE certification in the database that the ledger had
+        # refused, so the two diverged silently and the record still read as issued (audit P2).
+        raise ValidationFailed(
+            f"The ledger refused to anchor this certification: "
+            f"{receipt.get('detail', 'rejected by the certification contract')}")
     gmo_service._apply_receipt(db, certification, receipt, "Certification")
 
     audit.record(db, "cert.issue", actor_id=actor_id, actor_role=actor_role, org_id=issuer_org_id,
@@ -385,8 +483,6 @@ def authenticate_certifications(db: Session, batch: Batch,
 # --------------------------------------------------------------------------- #
 def verify_batch(db: Session, batch: Batch, actor_id: str | None = None,
                  actor_role: str | None = None) -> dict[str, Any]:
-    from ai.fraud import evaluate
-
     settings = get_settings()
     product = db.get(Product, batch.product_id)
     events = chain_of_custody(db, batch)
@@ -446,9 +542,9 @@ def verify_batch(db: Session, batch: Batch, actor_id: str | None = None,
         "duplicate_batch_code": bool(duplicate),
     }
 
-    verdict = evaluate(context, model_dir=str(settings.repo_root / "ai" / "models"),
-                       suspect_threshold=settings.fraud_suspect_threshold,
-                       fail_threshold=settings.fraud_fail_threshold)
+    verdict = ai_client.evaluate_fraud(context,
+                                       suspect_threshold=settings.fraud_suspect_threshold,
+                                       fail_threshold=settings.fraud_fail_threshold)
 
     integrity = {"VERIFIED": "VERIFIED", "SUSPECT": "SUSPECT", "FAILED": "FAILED"}[verdict["level"]]
     batch.integrity_status = integrity

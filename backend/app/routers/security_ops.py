@@ -107,7 +107,9 @@ def evaluate_principal(db: DbSession,
 def sweep(db: DbSession,
           principal: Annotated[object, Depends(require_permission(P.ALERT_WRITE))],
           hours: int = Query(default=24, ge=1, le=168)) -> dict:
-    findings = service.sweep_data_theft(db, hours)
+    # Oversight roles sweep the platform; a tenant role sweeps only its own organisation.
+    scope = None if principal.is_cross_tenant else principal.org_id
+    findings = service.sweep_data_theft(db, hours, org_id=scope)
     db.commit()
     return {"findings": findings, "count": len(findings), "window_hours": hours}
 

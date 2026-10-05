@@ -20,7 +20,7 @@ from ..core.security import (canonical_json, content_hash, decrypt_at_rest, encr
                              ensure_aware as _aware, nonce_cache, sha256_hex,
                              timestamp_within_window, utcnow, verify_device_signature)
 from ..models import AIAnalysis, Device, SatelliteScene, Telemetry
-from . import audit, devices as device_service, notifications
+from . import ai_client, audit, devices as device_service, notifications
 
 
 
@@ -31,8 +31,6 @@ def verify_and_ingest(db: Session, device_id: str, timestamp_header: str, nonce:
                       allow_backfill: bool = False, ip: str | None = None,
                       score_inline: bool | None = None) -> Telemetry:
     """Full ingestion path. Order of checks matters: identity, freshness, replay, then content."""
-    from ai.anomaly import score as anomaly_score, validate_readings
-
     settings = get_settings()
 
     # 1. device identity and status
@@ -72,7 +70,7 @@ def verify_and_ingest(db: Session, device_id: str, timestamp_header: str, nonce:
         raise Conflict("Message sequence number is not monotonic")
 
     # 5. schema and physical-range validation
-    problems = validate_readings(device.device_type, readings)
+    problems = ai_client.validate_readings(device.device_type, readings)
     quality = "OK"
     if problems:
         quality = "QUARANTINED"
@@ -103,7 +101,13 @@ def verify_and_ingest(db: Session, device_id: str, timestamp_header: str, nonce:
         return record
 
     previous = _previous_readings(db, device.id, record.id)
-    _score_and_persist(db, device, record, readings, previous, settings, problems)
+    try:
+        _score_and_persist(db, device, record, readings, previous, settings, problems)
+    except ai_client.service_http.ServiceUnavailable:
+        # The reading is already validated and stored; losing the AI service must not
+        # lose the message (NFR-5). It stays unscored (anomaly_score NULL) for a rescore.
+        security_event("inline anomaly scoring unavailable; reading stored unscored",
+                       device_id=device.id, telemetry_id=record.id)
     db.flush()
     return record
 
@@ -112,13 +116,10 @@ def _score_and_persist(db: Session, device: Device, record: Telemetry,
                        readings: dict[str, Any], previous: dict[str, Any] | None,
                        settings, problems: list[str] | None = None) -> dict[str, Any]:
     """Score a reading, store the analysis, and alert if it crosses the threshold."""
-    from ai.anomaly import score as anomaly_score
-
     problems = problems or []
-    verdict = anomaly_score(device.device_type, readings, previous,
-                            seconds_since_previous=None,
-                            hour=_aware(record.recorded_at).hour,
-                            model_dir=str(settings.repo_root / "ai" / "models"))
+    verdict = ai_client.anomaly_score(device.device_type, readings, previous,
+                                      seconds_since_previous=None,
+                                      hour=_aware(record.recorded_at).hour)
     if problems:
         verdict = {**verdict, "score": max(verdict["score"], 0.9), "level": "CRITICAL",
                    "reasons": problems[:6] + verdict["reasons"][:2]}

@@ -1,70 +1,107 @@
-# Local development / demonstration stack. `docker compose up` and the platform is ready.
-# Production deployment uses infrastructure/terraform/ (PostgreSQL/RDS) instead of the
-# postgres service below being wired to the API by default — see README.md.
+# ABSP demo stack — one container per component (ADR-016).
+#
+#   browser → frontend :8080 → api → ai | ledger | db
+#
+#   docker compose up -d --build      # then open http://127.0.0.1:8080
+#
+# .env must set: JWT_SECRET, ENCRYPTION_KEY, POSTGRES_PASSWORD, SERVICE_TOKEN
+
+x-hardened: &hardened
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: unless-stopped
+
+x-db-url: &db-url postgresql+psycopg://absp:${POSTGRES_PASSWORD:?}@db:5432/absp
+
 services:
+  frontend:
+    <<: *hardened
+    build: { context: ., dockerfile: docker/frontend.Dockerfile }
+    image: absp-frontend:local
+    ports: ["127.0.0.1:8080:8080"]          # the only published port
+    depends_on:
+      api: { condition: service_healthy }
+    networks: [edge]
+
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *hardened
+    build: { context: ., dockerfile: docker/api.Dockerfile }
     image: absp-api:local
-    ports:
-      - "127.0.0.1:8000:8000"
+    command: ["--seed"]                      # seeds demo data on first start
     environment:
       ENV: development
       DEMO_MODE: "true"
-      DATABASE_URL: sqlite:////app/data/absp.db
-      LEDGER_DATA_DIR: /app/data/ledger
+      DATABASE_URL: *db-url
+      AI_SERVICE_URL: http://ai:8100
+      LEDGER_SERVICE_URL: http://ledger:8200
+      SERVICE_TOKEN: ${SERVICE_TOKEN:?}
+      JWT_SECRET: ${JWT_SECRET:?}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?}
+      CORS_ORIGINS: http://127.0.0.1:8080,http://localhost:8080
       DATA_DIR: /app/data
-      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}
-      CORS_ORIGINS: http://127.0.0.1:8000
-    volumes:
-      - absp_data:/app/data
-    healthcheck:
-      test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    restart: unless-stopped
+    volumes: [absp_data:/app/data]
+    depends_on:
+      db: { condition: service_healthy }
+      ai: { condition: service_healthy }
+      ledger: { condition: service_healthy }
+    networks: [edge, backend]
 
-  # Documented production path (ADR-002): the application also runs unmodified against
-  # PostgreSQL. Disabled by default so `docker compose up` needs no extra configuration.
-  postgres:
-    image: postgres:16-alpine
-    profiles: ["postgres"]
+  ai:
+    <<: *hardened
+    build: { context: ., dockerfile: docker/ai.Dockerfile }
+    image: absp-ai:local
+    environment:
+      SERVICE_TOKEN: ${SERVICE_TOKEN:?}
+    networks: [backend]
+
+  ledger:
+    <<: *hardened
+    build: { context: ., dockerfile: docker/ledger.Dockerfile }
+    image: absp-ledger:local
+    environment:
+      SERVICE_TOKEN: ${SERVICE_TOKEN:?}
+      LEDGER_ALLOW_RESET: "true"             # demo only: lets seed_demo.py --reset wipe the chain
+    volumes: [absp_ledger:/data/ledger]
+    networks: [backend]
+
+  db:
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
     environment:
       POSTGRES_DB: absp
       POSTGRES_USER: absp
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-    volumes:
-      - absp_pgdata:/var/lib/postgresql/data
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    volumes: [absp_pgdata:/var/lib/postgresql/data]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U absp"]
+      test: ["CMD-SHELL", "pg_isready -U absp -d absp"]
       interval: 10s
-      timeout: 5s
       retries: 5
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    networks: [backend]
 
+  # Optional: docker compose --profile simulator up
   iot-simulator:
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: absp-api:local
-    profiles: ["simulator"]
+    profiles: [simulator]
+    entrypoint: ["python3", "iot/simulator.py", "--api-url", "http://api:8000",
+                 "--mode", "normal", "--count", "60", "--delay", "1"]
+    environment:
+      ENV: development
+      DATABASE_URL: *db-url                  # reads the seeded device list
+      DATA_DIR: /app/data
+    volumes: [absp_data:/app/data]
     depends_on:
-      api:
-        condition: service_healthy
-    entrypoint: ["python3", "iot/simulator.py", "--api-url", "http://api:8000", "--mode", "normal", "--count", "60", "--delay", "1"]
-    volumes:
-      - absp_data:/app/data
+      api: { condition: service_healthy }
+    networks: [edge, backend]
+
+networks:
+  edge:                                      # frontend ↔ api
+  backend:                                   # api ↔ ai / ledger / db, no outside access
+    internal: true
 
 volumes:
   absp_data:
+  absp_ledger:
   absp_pgdata:

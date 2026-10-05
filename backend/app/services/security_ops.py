@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..core.errors import Conflict, ValidationFailed
 from ..core.security import ensure_aware as _aware, utcnow
 from ..models import AccessRecord, Alert, Device, Incident, IncidentEvent
 from . import audit, notifications
@@ -115,13 +116,22 @@ def evaluate_principal(db: Session, principal_id: str, org_id: str | None) -> di
 
 
 
-def sweep_data_theft(db: Session, hours: int = 24) -> list[dict[str, Any]]:
-    """Score every principal active in the window and raise alerts above threshold."""
+def sweep_data_theft(db: Session, hours: int = 24,
+                     org_id: str | None = None) -> list[dict[str, Any]]:
+    """Score principals active in the window and raise alerts above threshold.
+
+    `org_id` restricts the sweep to one organisation. A tenant-triggered sweep must pass it:
+    the results carry principal ids, scores and signal detail, and without scoping a farm
+    operator received that for users of other tenants (audit P1). The scheduled platform-wide
+    task calls this with org_id=None deliberately.
+    """
     since = utcnow() - timedelta(hours=hours)
+    query = (select(AccessRecord.principal_id, AccessRecord.org_id)
+             .where(AccessRecord.created_at >= since))
+    if org_id is not None:
+        query = query.where(AccessRecord.org_id == org_id)
     principals = db.execute(
-        select(AccessRecord.principal_id, AccessRecord.org_id)
-        .where(AccessRecord.created_at >= since)
-        .group_by(AccessRecord.principal_id, AccessRecord.org_id)).all()
+        query.group_by(AccessRecord.principal_id, AccessRecord.org_id)).all()
 
     findings: list[dict[str, Any]] = []
     for principal_id, org_id in principals:
@@ -145,20 +155,38 @@ def sweep_data_theft(db: Session, hours: int = 24) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # Incident response
 # --------------------------------------------------------------------------- #
+# Incident lifecycle. Membership of the set used to be the only check, so CLOSED -> OPEN was
+# accepted and closed_at was never cleared (audit P2). Reopening is still possible — security
+# work genuinely reopens — but only from RESOLVED, and never from CLOSED.
+INCIDENT_STATES = frozenset({"OPEN", "TRIAGED", "CONTAINED", "RESOLVED", "CLOSED"})
+INCIDENT_TRANSITIONS: dict[str, frozenset[str]] = {
+    "OPEN": frozenset({"TRIAGED", "CONTAINED", "RESOLVED"}),
+    "TRIAGED": frozenset({"CONTAINED", "RESOLVED"}),
+    "CONTAINED": frozenset({"RESOLVED"}),
+    "RESOLVED": frozenset({"CLOSED", "OPEN"}),      # reopen on new evidence
+    "CLOSED": frozenset(),                          # terminal
+}
+
+
 def update_incident(db: Session, incident: Incident, actor_id: str, actor_role: str,
                     status: str | None, root_cause: str | None,
                     note: str | None) -> Incident:
     changes: dict[str, Any] = {}
     if status:
-        allowed = {"OPEN", "TRIAGED", "CONTAINED", "RESOLVED", "CLOSED"}
-        if status not in allowed:
-            from ..core.errors import ValidationFailed
-
-            raise ValidationFailed(f"status must be one of {sorted(allowed)}")
+        if status not in INCIDENT_STATES:
+            raise ValidationFailed(f"status must be one of {sorted(INCIDENT_STATES)}")
+        if status != incident.status:
+            allowed = INCIDENT_TRANSITIONS.get(incident.status, frozenset())
+            if status not in allowed:
+                raise Conflict(
+                    f"Incident is {incident.status}; it cannot move to {status}. "
+                    f"Allowed from here: "
+                    f"{', '.join(sorted(allowed)) or 'nothing, this is final'}.")
         changes["status"] = {"from": incident.status, "to": status}
         incident.status = status
-        if status in {"RESOLVED", "CLOSED"}:
-            incident.closed_at = utcnow()
+        # closed_at tracks the close, so reopening must clear it rather than leave a
+        # resolved timestamp on an open incident (audit P2).
+        incident.closed_at = utcnow() if status in {"RESOLVED", "CLOSED"} else None
     if root_cause:
         incident.root_cause = root_cause
         changes["root_cause"] = True

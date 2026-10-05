@@ -1,6 +1,15 @@
 import { el, api, field, toast, can, fmtNum } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 
+// Readable labels rather than the field names ("storage temp min c").
+const FIELD_LABELS = {
+  gtin: 'GTIN',
+  name: 'Product name',
+  category: 'Category',
+  storage_temp_min_c: 'Minimum storage temperature (°C)',
+  storage_temp_max_c: 'Maximum storage temperature (°C)',
+};
+
 function createForm(reload) {
   const fields = {
     gtin: el('input', { required: 'required', minlength: '8', maxlength: '14',
@@ -15,7 +24,7 @@ function createForm(reload) {
   const message = el('div', { class: 'error-text', role: 'alert' });
   const form = el('form', { class: 'u-hidden' }, [
     el('div', { class: 'grid cols-3' }, Object.entries(fields).map(([key, input]) =>
-      field(key.replace(/_/g, ' '), input))),
+      field(FIELD_LABELS[key] || key.replace(/_/g, ' '), input))),
     el('div', { class: 'row' }, [
       el('label', { class: 'row u-fw-400' }, [organic, ' Organic claim']),
       el('label', { class: 'row u-fw-400' }, [nonGmo, ' Non-GMO claim']),
@@ -50,7 +59,7 @@ export const render = listView({
   title: 'Products',
   subtitle: 'Trade items identified by GS1 GTIN.',
   endpoint: '/supply-chain/products',
-  actions: can('supply:write') ? ({ reload }) => createForm(reload) : null,
+  actions: ({ reload }) => (can('supply:write') ? createForm(reload) : null),
   columns: [
     { label: 'GTIN', render: (row) => el('span', { class: 'mono', text: row.gtin }) },
     { label: 'Name', key: 'name' },

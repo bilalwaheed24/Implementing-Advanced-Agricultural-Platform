@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request, status
 
 from ..core.config import get_settings
-from ..core.deps import DbSession, PagingDep, client_ip, rate_limit, require_permission
+from ..core.deps import device_rate_limit, DbSession, PagingDep, client_ip, rate_limit, require_permission
 from ..core.errors import BadRequest, ValidationFailed
 from sqlalchemy import select
 
@@ -21,6 +21,7 @@ router = APIRouter(prefix="/telemetry", tags=["Telemetry"])
 
 
 @router.post("/ingest", status_code=status.HTTP_202_ACCEPTED,
+             dependencies=[Depends(device_rate_limit)],
              summary="Ingest one signed telemetry message from a device")
 def ingest(payload: TelemetryIngest, request: Request, db: DbSession,
            background: BackgroundTasks,
@@ -45,6 +46,7 @@ def ingest(payload: TelemetryIngest, request: Request, db: DbSession,
 
 
 @router.post("/batch", status_code=status.HTTP_202_ACCEPTED,
+             dependencies=[Depends(device_rate_limit)],
              summary="Ingest a gateway batch; each message is individually signed")
 def ingest_batch(payload: TelemetryBatch, request: Request, db: DbSession) -> dict:
     """Partial acceptance is reported per message. Backfill widens the freshness window

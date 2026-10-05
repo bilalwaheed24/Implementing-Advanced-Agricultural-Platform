@@ -56,9 +56,14 @@ def suspend_user(user_id: str, db: DbSession,
 def list_organizations(db: DbSession, paging: PagingDep,
                        principal: Annotated[object, Depends(require_permission(P.ORG_READ))]
                        ) -> Page[OrganizationOut]:
+    """Every role holds `org:read`, so this must not be a global directory: the organisation
+    id is the one piece of information self-registration and the relation selectors key on.
+    Oversight roles see the whole platform; everyone else sees only their own organisation."""
     from sqlalchemy import select
 
     query = select(Organization).order_by(Organization.name.asc())
+    if not principal.is_cross_tenant:
+        query = query.where(Organization.id == principal.org_id)
     rows, total = paginate(db, query, paging.page, paging.page_size)
     return Page[OrganizationOut](items=[OrganizationOut.model_validate(r) for r in rows],
                                  total=total, page=paging.page, page_size=paging.page_size)
@@ -81,7 +86,7 @@ def create_organization(payload: OrganizationCreate, db: DbSession,
     db.flush()
     # Ensure the organisation has a ledger signing identity.
     try:
-        ledger_client.get_ledger().msp.ensure(organization.msp_id, organization.name)
+        ledger_client.ensure_identity(organization.msp_id, organization.name)
     except Exception:                                    # noqa: BLE001 - non-fatal
         pass
     audit.record(db, "org.create", actor_id=principal.id, actor_role=principal.role,

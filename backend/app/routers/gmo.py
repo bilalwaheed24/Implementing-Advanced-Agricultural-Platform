@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
 
 from ..core.deps import DbSession, PagingDep, rate_limit, require_permission
 from ..core.permissions import P
@@ -33,11 +34,22 @@ def register_event(payload: GMOEventCreate, db: DbSession,
 @router.get("/events", response_model=Page[GMOEventOut], summary="List GMO events")
 def list_events(db: DbSession, paging: PagingDep,
                 principal: Annotated[object, Depends(require_permission(P.GMO_READ))],
-                crop_type: str | None = Query(default=None)) -> Page[GMOEventOut]:
+                crop_type: str | None = Query(default=None),
+                approved_only: bool = Query(
+                    default=False,
+                    description="Only events holding a live jurisdictional approval, which is "
+                                "the precondition for producing a seed lot.")
+                ) -> Page[GMOEventOut]:
     query = visible(GMOEvent, principal.role, principal.org_id).order_by(
         GMOEvent.created_at.desc())
     if crop_type:
         query = query.where(GMOEvent.crop_type == crop_type)
+    if approved_only:
+        # The same rule gmo_service.require_approved_event applies on write, so the seed-lot
+        # selector cannot offer an event the API would then refuse.
+        query = query.where(GMOEvent.id.in_(
+            select(GMOApproval.gmo_event_id).where(
+                GMOApproval.status.in_(service.APPROVED_STATUSES))))
     rows, total = paginate(db, query, paging.page, paging.page_size)
     return Page[GMOEventOut](items=[GMOEventOut.model_validate(r) for r in rows], total=total,
                              page=paging.page, page_size=paging.page_size)

@@ -1,0 +1,58 @@
+# AI inference service (ADR-016). Stateless; models are baked into the image at build time.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai
+  namespace: absp
+  labels: { app: ai, app.kubernetes.io/part-of: absp }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: ai }
+  template:
+    metadata:
+      labels: { app: ai, app.kubernetes.io/part-of: absp }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: ai
+          image: absp-ai:1.0.0
+          ports: [{ containerPort: 8100 }]
+          env:
+            - name: SERVICE_TOKEN
+              valueFrom: { secretKeyRef: { name: absp-secrets, key: SERVICE_TOKEN } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "2", memory: "2Gi" }
+          startupProbe:          # TensorFlow import is slow on a cold start
+            httpGet: { path: /health, port: 8100 }
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            httpGet: { path: /health, port: 8100 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 8100 }
+            periodSeconds: 20
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai
+  namespace: absp
+spec:
+  selector: { app: ai }
+  ports: [{ port: 8100, targetPort: 8100 }]

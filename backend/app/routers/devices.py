@@ -7,7 +7,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy import select
 
 from ..core.deps import DbSession, PagingDep, rate_limit, require_permission
-from ..core.errors import NotFound
+from ..core.errors import PermissionDenied, NotFound
 from ..core.permissions import P
 from ..models import Device, DeviceVulnerability
 from ..repositories import get_or_404, paginate, visible
@@ -152,7 +152,18 @@ def retire(device_id: str, payload: DeviceAction, db: DbSession,
 @router.post("/{device_id}/rotate-secret", summary="Issue a new device secret and revoke the old")
 def rotate_secret(device_id: str, db: DbSession,
                   principal: Annotated[object, Depends(require_permission(P.DEVICE_WRITE))]) -> dict:
+    """Restricted to the device's own organisation.
+
+    get_or_404 lets a cross-tenant oversight role reach any device, which is right for
+    containment but wrong for credential issuance: it handed an administrator the plaintext
+    secret of another tenant's device and invalidated the working one (audit P2). Containment
+    (quarantine/suspend/retire) is unchanged and remains available platform-wide.
+    """
     device = get_or_404(db, Device, device_id, principal.role, principal.org_id, name="Device")
+    if device.org_id != principal.org_id:
+        raise PermissionDenied(
+            "A device secret may only be issued by the organisation that owns the device. "
+            "Use quarantine or retire if you need to contain it.")
     secret = device_service.rotate_secret(db, device, principal.id, principal.role)
     db.commit()
     return {"device_id": device.id, "device_secret": secret,
@@ -162,6 +173,9 @@ def rotate_secret(device_id: str, db: DbSession,
 @router.post("/sweep/health", summary="Raise alerts for devices that have stopped reporting")
 def sweep_health(db: DbSession,
                  principal: Annotated[object, Depends(require_permission(P.DEVICE_WRITE))]) -> dict:
-    silent = device_service.sweep_silent_devices(db)
+    # Oversight roles sweep the platform; a tenant role sweeps only its own organisation, so
+    # the request cannot raise alerts inside another tenant.
+    scope = None if principal.is_cross_tenant else principal.org_id
+    silent = device_service.sweep_silent_devices(db, org_id=scope)
     db.commit()
     return {"silent_devices": [d.id for d in silent], "count": len(silent)}

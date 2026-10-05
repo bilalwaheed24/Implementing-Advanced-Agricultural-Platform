@@ -93,6 +93,72 @@ class TestScreeningWorkflow:
                              headers=auth("BIOSAFETY_OFFICER"), json=payload)
         assert second.status_code == 409
 
+    def test_submitter_cannot_review_their_own_screening(self, client, auth, hazards):
+        """Four-eyes principle (audit P0-2). A biosafety officer holds both submit and review
+        rights; submitting a BLOCK and clearing it alone would launder it past the GMO gate,
+        because APPROVED_BY_REVIEW is a passing status."""
+        hazard = hazard_database()[0]
+        own = client.post("/api/v1/biosecurity/screenings",
+                          headers=auth("BIOSAFETY_OFFICER"),
+                          json={"name": unique("self-review"),
+                                "sequence": hazard_derived_sequence(hazard["sequence"], 0.05, 2),
+                                "intent": "virulence enhancement",
+                                "organism": "Fusarium oxysporum"})
+        assert own.status_code == 201, own.text
+        assert own.json()["status"] == "BLOCKED"
+
+        response = client.post(
+            f"/api/v1/biosecurity/screenings/{own.json()['id']}/review",
+            headers=auth("BIOSAFETY_OFFICER"),
+            json={"decision": "APPROVE",
+                  "rationale": "Attempting to clear my own submission, which must be refused."})
+        assert response.status_code == 409, response.text
+        assert "own submission" in response.json()["detail"].lower()
+
+        # and the record must be untouched, so it still cannot anchor a GMO event
+        after = client.get(f"/api/v1/biosecurity/screenings/{own.json()['id']}",
+                           headers=auth("BIOSAFETY_OFFICER")).json()
+        assert after["status"] == "BLOCKED"
+        assert after["reviewed_by"] is None
+
+    def test_an_independent_officer_may_review_the_same_screening(
+            self, client, auth, second_officer_auth, hazards):
+        hazard = hazard_database()[0]
+        own = client.post("/api/v1/biosecurity/screenings",
+                          headers=auth("BIOSAFETY_OFFICER"),
+                          json={"name": unique("four-eyes"),
+                                "sequence": hazard_derived_sequence(hazard["sequence"], 0.05, 2),
+                                "intent": "virulence enhancement",
+                                "organism": "Fusarium oxysporum"})
+        assert own.status_code == 201
+        response = client.post(
+            f"/api/v1/biosecurity/screenings/{own.json()['id']}/review",
+            headers=second_officer_auth,
+            json={"decision": "REJECT",
+                  "rationale": "Independent officer reviewing a colleague's submission."})
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "REJECTED"
+        assert response.json()["reviewed_by"] != response.json()["submitted_by"]
+
+    def test_submitter_cannot_review_their_own_crispr_assessment(self, client, auth):
+        # A DURC-flagged proposal lands in PENDING_REVIEW; a benign one is auto-approved and
+        # would be rejected by the already-resolved guard before four-eyes is reached.
+        created = client.post("/api/v1/biosecurity/crispr", headers=auth("BIOSAFETY_OFFICER"),
+                              json={"target_gene": "avr virulence effector",
+                                    "organism": "Fusarium oxysporum",
+                                    "organism_class": "PLANT_PATHOGEN",
+                                    "guide_rna": "ACGTACGTACGTACGTACGT", "pam": "NGG",
+                                    "edit_type": "KNOCK_IN",
+                                    "intent": "enhance virulence and host range"})
+        assert created.status_code == 201, created.text
+        assert created.json()["status"] == "PENDING_REVIEW"
+        response = client.post(
+            f"/api/v1/biosecurity/crispr/{created.json()['id']}/review",
+            headers=auth("BIOSAFETY_OFFICER"),
+            json={"decision": "APPROVE", "rationale": "Self-review attempt, must be refused."})
+        assert response.status_code == 409
+        assert "own submission" in response.json()["detail"].lower()
+
     def test_review_requires_a_substantive_rationale(self, client, auth, blocked_screening):
         response = client.post(
             f"/api/v1/biosecurity/screenings/{blocked_screening['id']}/review",

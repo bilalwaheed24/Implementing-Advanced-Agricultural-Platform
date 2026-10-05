@@ -75,32 +75,37 @@ jobs:
   build-and-scan-image:
     needs: lint-and-test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      # One image per compose service (ADR-016). db is the upstream postgres image.
+      matrix:
+        service: [api, ai, ledger, frontend]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Build image
-        run: docker build -t absp-api:ci .
+        run: docker build -f docker/${{ matrix.service }}.Dockerfile -t absp-${{ matrix.service }}:ci .
 
       - name: Generate SBOM (CycloneDX)
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
-          image: absp-api:ci
+          image: absp-${{ matrix.service }}:ci
           format: cyclonedx-json
-          output-file: sbom.cdx.json
+          output-file: sbom-${{ matrix.service }}.cdx.json
 
       - name: Upload SBOM
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sbom
-          path: sbom.cdx.json
+          name: sbom-${{ matrix.service }}
+          path: sbom-${{ matrix.service }}.cdx.json
 
       - name: Container scan — Trivy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: absp-api:ci
+          image-ref: absp-${{ matrix.service }}:ci
           format: table
           severity: CRITICAL,HIGH
           # Fail only on findings that can actually be acted on. The Debian base image

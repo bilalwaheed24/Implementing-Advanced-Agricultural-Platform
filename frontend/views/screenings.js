@@ -70,7 +70,7 @@ export const render = listView({
     { key: 'status', label: 'Status', options: ['APPROVED_AUTO', 'PENDING_REVIEW', 'BLOCKED',
       'APPROVED_BY_REVIEW', 'REJECTED'] },
   ],
-  actions: can('biosecurity:submit') ? ({ reload }) => submitForm(reload) : null,
+  actions: ({ reload }) => (can('biosecurity:submit') ? submitForm(reload) : null),
   columns: [
     { label: 'Submitted', render: (row) => fmtDate(row.created_at) },
     { label: 'Name', render: (row) => el('a', { href: `#/screening/${row.id}`, text: row.name }) },

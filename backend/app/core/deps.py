@@ -23,6 +23,8 @@ api_limiter = TokenBucketLimiter(_settings.rate_limit_per_minute, _settings.rate
 public_limiter = TokenBucketLimiter(_settings.public_rate_limit_per_minute,
                                     _settings.public_rate_limit_per_minute)
 auth_limiter = TokenBucketLimiter(10, 10)
+device_limiter = TokenBucketLimiter(_settings.device_rate_limit_per_minute,
+                                    _settings.device_rate_limit_per_minute)
 
 
 @dataclass
@@ -42,10 +44,22 @@ class Principal:
 
 
 def client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()[:64]
-    return request.client.host if request.client else "unknown"
+    """The caller's address, honouring X-Forwarded-For only from a trusted proxy.
+
+    Any client can set X-Forwarded-For. Trusting it unconditionally meant an attacker could
+    rotate the header per request and receive a fresh rate-limit bucket each time, defeating
+    both the public limiter and the authentication limiter (audit P2). The header is now read
+    only when the immediate peer is a configured trusted proxy (TRUSTED_PROXY_IPS); otherwise
+    the real peer address is used.
+    """
+    peer = request.client.host if request.client else "unknown"
+    trusted = get_settings().trusted_proxy_ips
+    if trusted and peer in trusted:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            # Left-most entry is the originating client, as appended by the first proxy.
+            return forwarded.split(",")[0].strip()[:64]
+    return peer
 
 
 def get_current_principal(
@@ -111,6 +125,24 @@ def public_rate_limit(request: Request) -> None:
     allowed, retry_after = public_limiter.allow(f"ip:{client_ip(request)}")
     if not allowed:
         security_event("public rate limit exceeded", ip=client_ip(request), path=request.url.path)
+        raise RateLimited(f"Rate limit exceeded. Retry in {retry_after} seconds",
+                          retry_after=retry_after)
+
+
+def device_rate_limit(request: Request) -> None:
+    """Rate limit for the HMAC-authenticated ingestion routes.
+
+    These carry no user token, so `rate_limit` (keyed per user) cannot apply, and they were
+    previously the only unthrottled write path on the API — leaving signature guessing and
+    batch flooding unbounded (audit P2). Keyed on the device id when the caller supplies one,
+    so one noisy device cannot starve the rest of a site, and on the peer address otherwise.
+    """
+    device_id = request.headers.get("x-device-id") or ""
+    key = f"device:{device_id[:64]}" if device_id else f"ip:{client_ip(request)}"
+    allowed, retry_after = device_limiter.allow(key)
+    if not allowed:
+        security_event("device ingestion rate limit exceeded", ip=client_ip(request),
+                       path=request.url.path, device_id=device_id[:64] or None)
         raise RateLimited(f"Rate limit exceeded. Retry in {retry_after} seconds",
                           retry_after=retry_after)
 

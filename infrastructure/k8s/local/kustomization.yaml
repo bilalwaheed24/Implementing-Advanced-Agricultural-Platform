@@ -1,0 +1,43 @@
+# Local demo on k3d (scripts/k8s_up.sh): demo mode and data, locally built images, the UI on a
+# NodePort that k3d maps to http://127.0.0.1:8080, and no Ingress (no TLS controller).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+images:
+  - { name: absp-api, newTag: local }
+  - { name: absp-ai, newTag: local }
+  - { name: absp-ledger, newTag: local }
+  - { name: absp-frontend, newTag: local }
+patches:
+  - target: { kind: ConfigMap, name: absp-config }
+    patch: |-
+      - { op: replace, path: /data/ENV, value: development }
+      - { op: replace, path: /data/DEMO_MODE, value: "true" }
+      - { op: replace, path: /data/CORS_ORIGINS, value: "http://127.0.0.1:8080,http://localhost:8080" }
+  - target: { kind: Service, name: frontend }
+    patch: |-
+      - { op: add, path: /spec/type, value: NodePort }
+      - { op: add, path: /spec/ports/0/nodePort, value: 30080 }
+  - target: { kind: Ingress, name: frontend }
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata: { name: frontend, namespace: absp }
+  # Demo data: the db-init Job also seeds the DEMO/SIMULATION dataset.
+  - target: { kind: Job, name: db-init }
+    patch: |-
+      - { op: replace, path: /spec/template/spec/containers/0/args, value: ["--seed", "--no-serve"] }
+  # Single-node demo cluster: one replica each is enough.
+  - target: { kind: Deployment, name: "api|frontend" }
+    patch: |-
+      - { op: replace, path: /spec/replicas, value: 1 }
+  - target: { kind: HorizontalPodAutoscaler, name: api }
+    patch: |-
+      - { op: replace, path: /spec/minReplicas, value: 1 }
+  - target: { kind: StatefulSet, name: ledger }
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/1/value
+        value: "true"

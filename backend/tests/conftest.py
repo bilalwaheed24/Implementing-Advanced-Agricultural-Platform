@@ -119,6 +119,26 @@ def users(db, orgs) -> dict[str, User]:
 
 
 @pytest.fixture(scope="session")
+def second_officer(db, orgs) -> User:
+    """A second biosafety officer in the same organisation. Four-eyes review needs two
+    independent officers, so one fixture user per role is not enough to test it."""
+    email = "biosafety2@test.absp"
+    user = db.query(User).filter(User.email == email).one_or_none()
+    if user is None:
+        user = User(email=email, full_name="Second Biosafety Officer",
+                    password_hash=hash_password(PASSWORD), role="BIOSAFETY_OFFICER",
+                    org_id=orgs["BIOTECH"].id, status="ACTIVE")
+        db.add(user)
+        db.commit()
+    return user
+
+
+@pytest.fixture
+def second_officer_auth(client, second_officer) -> dict[str, str]:
+    return {"Authorization": f"Bearer {_token(client, second_officer.email)}"}
+
+
+@pytest.fixture(scope="session")
 def second_farm_org(db) -> Organization:
     """A second farm organisation, used to prove cross-tenant isolation."""
     existing = db.query(Organization).filter(Organization.msp_id == "FarmMSP-B").one_or_none()

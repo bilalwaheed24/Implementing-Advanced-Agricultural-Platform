@@ -14,9 +14,12 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
              dependencies=[Depends(auth_rate_limit)],
              summary="Register a new account")
 def register(payload: RegisterRequest, request: Request, db: DbSession) -> UserOut:
-    """Privileged roles are created in PENDING status and require administrator approval."""
+    """Every self-registration is created PENDING with the least-privileged role and cannot
+    sign in until an administrator approves it and assigns the real role. A client-supplied
+    role is never honoured — see `identity.register`."""
     user = identity.register(db, payload.email, payload.full_name, payload.password,
-                             payload.role, payload.org_id, ip=client_ip(request))
+                             payload.org_id, ip=client_ip(request),
+                             requested_role=payload.requested_role)
     db.commit()
     return UserOut.model_validate(user)
 

@@ -1,7 +1,7 @@
 # Testing.md — Testing Strategy and Results
 
 Every category below is implemented and passing, not merely planned. Full run:
-`python3 -m pytest backend/tests/ -q` → **382 passed**. Frontend: a full headless-Chrome
+`python3 -m pytest backend/tests/ -q` → **469 passed**. Frontend: a full headless-Chrome
 smoke test walks all 23 authenticated views plus the public page (see §7).
 
 ---
@@ -10,18 +10,42 @@ smoke test walks all 23 authenticated views plus the public page (see §7).
 
 | Suite | File | Count | Covers |
 |---|---|---|---|
-| Security primitives | `test_security_primitives.py` | 30 | bcrypt, JWT (incl. `alg:none`), HMAC, AES-GCM, hashing, verification codes |
-| Ledger | `test_ledger.py` | 43 | Identity, Merkle proofs, genesis, endorsement, contract rules, tamper detection |
+| Security primitives | `test_security_primitives.py` | 31 | bcrypt, JWT (incl. `alg:none`), HMAC, AES-GCM, hashing, verification codes |
+| Ledger | `test_ledger.py` | 42 | Identity, Merkle proofs, genesis, endorsement, contract rules, tamper detection |
 | AI | `test_ai.py` | 55 | Sequence screening, CRISPR risk, anomaly detection, fraud rules, crop vision, data provenance |
-| Authentication | `test_auth.py` | 27 | Registration, login, lockout, refresh rotation + reuse detection, suspension |
-| Authorization (security) | `security/test_authorization.py` | 35 | RBAC matrix, route-coverage (mechanical), HTTP-level denial, tenancy isolation |
-| Hardening (security) | `security/test_hardening.py` | 99 | SQL injection, XSS storage, headers, error hygiene, input limits, rate limiting, log redaction, public endpoint exposure |
+| Authentication | `test_auth.py` | 41 | Registration, login, lockout, refresh rotation + reuse detection, suspension |
+| Authorization (security) | `security/test_authorization.py` | 38 | RBAC matrix, route-coverage (mechanical), HTTP-level denial, tenancy isolation |
+| Hardening (security) | `security/test_hardening.py` | 64 | SQL injection, XSS storage, headers, error hygiene, input limits, rate limiting, log redaction, public endpoint exposure |
 | Devices & telemetry | `test_devices_telemetry.py` | 29 | Provisioning, HMAC auth, replay, validation/quarantine, lifecycle, vulnerability management |
-| Biosecurity API | `test_biosecurity_api.py` | 26 | Screening workflow, CRISPR workflow, hazard database |
-| Supply chain E2E | `test_supplychain_e2e.py` | 51 | GMO registration, traceability, certification authentication, fraud/integrity, compliance, public verification, blockchain/audit, dashboards |
-| Config safety | `test_config_safety.py` | 8 | Production refuses missing/placeholder secrets; development still works with none set |
+| Biosecurity API | `test_biosecurity_api.py` | 34 | Screening workflow, CRISPR workflow, hazard database |
+| Supply chain E2E | `test_supplychain_e2e.py` | 67 | GMO registration, traceability, certification authentication, fraud/integrity, compliance, public verification, blockchain/audit, dashboards |
+| Config safety | `test_config_safety.py` | 14 | Production refuses missing/placeholder secrets; development still works with none set |
+| Security operations | `test_security_ops.py` | 25 | Alert and incident state machines, tenant scoping of the data-theft and device-health sweeps (audit P1/P2) |
+| Split services | `test_split_services.py` | 14 | ADR-016 `ai` and `ledger` service clients: request encoding, service token, status mapping, fail-closed error handling |
 | Performance | `performance/test_performance.py` | 15 | API latency, telemetry throughput (inline vs deferred), screening scaling, ledger append/verify, concurrency |
-| **Total** | | **382 (backend)** | |
+| **Total** | | **469 (backend)** | |
+
+### Live re-audit suite (`tests-e2e/`)
+
+A second suite runs against the **running compose stack** rather than in-process, so it exercises
+the real five-service deployment (ADR-016) end to end through a browser and over HTTP. It is not
+part of the 469 above and is not run in hosted CI, because it needs the stack up.
+
+| Suite | File | Count | Covers |
+|---|---|---|---|
+| Live browser workflows | `test_live_workflows.py` | 21 | Playwright (headed by default) driving the real forms: farm, device, batch, shipment, custody event, seed lot, GMO decision, certification, ledger visibility, notification inbox, alert acknowledge/resolve, public verification |
+| API controls | `test_api_controls.py` | 23 | Registration tenant takeover, four-eyes and self-certification, ledger explorer scoping, tenant isolation (foreign objects), read-permission-cannot-write, nine-role matrix |
+| **Total** | | **44 (live)** | |
+
+```bash
+docker compose up -d --build                       # stack must be running
+python3 -m pytest tests-e2e/ -q                    # 44 tests
+ABSP_HEADLESS=1 python3 -m pytest tests-e2e/ -q    # without a visible browser
+```
+
+Logins in the browser suite are paced by `ABSP_SLOWMO` (default 220 ms). Driving it with
+`ABSP_SLOWMO=0` can push the per-IP authentication limiter (10 attempts, refilling 10/min) over
+its budget and surface as a login timeout — that is the limiter working, not a defect.
 
 ## 2. Unit testing
 

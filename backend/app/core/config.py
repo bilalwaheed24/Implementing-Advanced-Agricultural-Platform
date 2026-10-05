@@ -100,6 +100,13 @@ class Settings:
 
     rate_limit_per_minute: int = 120
     public_rate_limit_per_minute: int = 30
+    # Device/IoT ingestion is authenticated by HMAC, not a user token, so the per-user bucket
+    # does not apply to it. Set generously: a legitimate gateway backfills in bursts.
+    device_rate_limit_per_minute: int = 240
+    # Peer addresses allowed to set X-Forwarded-For. Empty means trust nothing and always use
+    # the real peer address: an attacker could otherwise rotate the header to mint a fresh
+    # rate-limit bucket per request and defeat both the public and the auth limiter.
+    trusted_proxy_ips: tuple[str, ...] = ()
     max_body_bytes: int = 2 * 1024 * 1024
     max_page_size: int = 200
 
@@ -109,6 +116,14 @@ class Settings:
     ledger_channel: str = "agri-channel"
 
     ai_model_dir: str = "./ai/models"
+
+    # Split deployment (ADR-016). Empty = run the ai / ledger packages in-process, which
+    # is what the test suite and run_local.sh use. Set = call the `ai` / `ledger`
+    # containers over HTTP, authenticating with the shared service token.
+    ai_service_url: str = ""
+    ledger_service_url: str = ""
+    service_token: str = ""
+    service_timeout_seconds: float = 30.0
     # Where the demo device-secret file and any other writable demo artefacts go.
     # Separated from repo_root because a container's application directory is read-only
     # (docker-compose.yml sets read_only: true) — only this path needs to be a volume.
@@ -159,6 +174,14 @@ class Settings:
                 raise ConfigurationError("SQLite is not supported in production; use PostgreSQL")
             if any(o.strip() == "*" for o in self.cors_origins):
                 raise ConfigurationError("Wildcard CORS origin is not permitted in production")
+            if (self.ai_service_url or self.ledger_service_url) and len(self.service_token) < 32:
+                raise ConfigurationError(
+                    "SERVICE_TOKEN must be set to a strong value when AI_SERVICE_URL or "
+                    "LEDGER_SERVICE_URL is used in production")
+        for name, url in (("AI_SERVICE_URL", self.ai_service_url),
+                          ("LEDGER_SERVICE_URL", self.ledger_service_url)):
+            if url and not url.startswith(("http://", "https://")):
+                raise ConfigurationError(f"{name} must be an http:// or https:// URL")
         if self.bcrypt_rounds < 12:
             raise ConfigurationError("BCRYPT_ROUNDS must be at least 12")
 
@@ -177,6 +200,9 @@ def get_settings() -> Settings:
         jwt_secret = _DEV_JWT_DEFAULT if env_name != "production" else ""
     origins = tuple(
         o.strip() for o in _env("CORS_ORIGINS", "http://127.0.0.1:8000,http://localhost:8000").split(",") if o.strip()
+    )
+    trusted_proxies = tuple(
+        p.strip() for p in _env("TRUSTED_PROXY_IPS", "").split(",") if p.strip()
     )
     settings = Settings(
         env=_env("ENV", "development"),
@@ -207,12 +233,18 @@ def get_settings() -> Settings:
         telemetry_inline_scoring=_env_bool("TELEMETRY_INLINE_SCORING", True),
         rate_limit_per_minute=_env_int("RATE_LIMIT_PER_MINUTE", 120),
         public_rate_limit_per_minute=_env_int("PUBLIC_RATE_LIMIT_PER_MINUTE", 30),
+        device_rate_limit_per_minute=_env_int("DEVICE_RATE_LIMIT_PER_MINUTE", 240),
+        trusted_proxy_ips=trusted_proxies,
         max_body_bytes=_env_int("MAX_BODY_BYTES", 2 * 1024 * 1024),
         max_page_size=_env_int("MAX_PAGE_SIZE", 200),
         cors_origins=origins,
         ledger_data_dir=_env("LEDGER_DATA_DIR", "./ledger_data"),
         ledger_channel=_env("LEDGER_CHANNEL", "agri-channel"),
         ai_model_dir=_env("AI_MODEL_DIR", "./ai/models"),
+        ai_service_url=_env("AI_SERVICE_URL", "").rstrip("/"),
+        ledger_service_url=_env("LEDGER_SERVICE_URL", "").rstrip("/"),
+        service_token=_env("SERVICE_TOKEN", ""),
+        service_timeout_seconds=_env_float("SERVICE_TIMEOUT_SECONDS", 30.0),
         anomaly_alert_threshold=_env_float("ANOMALY_ALERT_THRESHOLD", 0.65),
         fraud_suspect_threshold=_env_float("FRAUD_SUSPECT_THRESHOLD", 0.30),
         fraud_fail_threshold=_env_float("FRAUD_FAIL_THRESHOLD", 0.70),

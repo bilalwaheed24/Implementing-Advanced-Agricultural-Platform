@@ -69,7 +69,9 @@ class TestGmoRegistration:
             "event_code": "ABS-77777-1", "crop_type": "Maize", "trait": "Test trait",
             "donor_organism": "Test donor", "developer": "Test Dev",
             "screening_id": "does-not-exist"})
-        assert response.status_code == 422
+        # Scoped resolution: an unknown or foreign screening is a plain 404, so the response
+        # cannot be used to confirm that a screening exists in another organisation.
+        assert response.status_code == 404
         assert "screening" in response.json()["detail"].lower()
 
     def test_event_code_format_is_enforced(self, client, auth, hazards):
@@ -121,13 +123,171 @@ class TestGmoRegistration:
                                json={"jurisdiction": "EU", "status": "APPROVED"})
         assert response.status_code == 403
 
-    def test_seed_lot_links_to_the_event(self, client, auth, gmo_event):
+
+
+@pytest.fixture
+def approved_event(client, auth, gmo_event):
+    """A GMO event a regulator has approved, which is the precondition for a seed lot."""
+    response = client.post(f"/api/v1/gmo/events/{gmo_event['id']}/approvals",
+                           headers=auth("REGULATOR"),
+                           json={"jurisdiction": "EU", "status": "APPROVED",
+                                 "reference": "EU-REF-TEST"})
+    assert response.status_code in (200, 201), response.text
+    return gmo_event
+
+
+class TestBatchStateMachine:
+    """The DB layer must enforce the lifecycle itself, not defer to the chaincode: the ledger
+    returns PENDING rather than REJECTED when it is degraded, and an illegal transition was
+    being written anyway (audit P1)."""
+
+    def test_the_application_table_matches_the_chaincode(self):
+        from ledger.contracts import BATCH_TRANSITIONS as ON_CHAIN
+        from app.services.supplychain import BATCH_TRANSITIONS as IN_APP
+
+        assert set(IN_APP) == set(ON_CHAIN), "state sets have drifted apart"
+        for state, allowed in ON_CHAIN.items():
+            assert set(IN_APP[state]) == set(allowed), f"transitions for {state} have drifted"
+
+    def test_illegal_transition_is_refused_by_the_application_layer(self, monkeypatch,
+                                                                    client, auth, traced_batch):
+        """With the ledger forced into its degraded PENDING path, the refusal must still happen."""
+        from app.services import ledger_client
+
+        monkeypatch.setattr(ledger_client, "submit",
+                            lambda *a, **k: {"ok": False, "status": "PENDING",
+                                             "detail": "circuit open"})
+        # traced_batch ends RECEIVED; harvesting (-> HARVESTED) is not reachable from there.
+        response = client.post("/api/v1/supply-chain/events",
+                               headers=auth("SUPPLY_CHAIN_OPERATOR"), json={
+                                   "batch_id": traced_batch["id"], "biz_step": "harvesting",
+                                   "disposition": "in_progress", "location_name": "Test Plant",
+                                   "quantity": 100.0, "unit": "kg", "occurred_at": iso(now())})
+        assert response.status_code == 422, response.text
+        assert "illegal transition" in response.json()["detail"].lower()
+
+        after = client.get(f"/api/v1/supply-chain/batches/{traced_batch['id']}",
+                           headers=auth("SUPPLY_CHAIN_OPERATOR")).json()
+        assert after["state"] == "RECEIVED", "the DB state must not have moved"
+
+    def test_legal_transition_succeeds_while_the_ledger_is_healthy(self, client, auth,
+                                                                   traced_batch):
+        """The baseline of the matrix: RECEIVED -> STORED is legal and must be anchored."""
+        response = client.post("/api/v1/supply-chain/events",
+                               headers=auth("SUPPLY_CHAIN_OPERATOR"), json={
+                                   "batch_id": traced_batch["id"], "biz_step": "storing",
+                                   "disposition": "in_storage", "location_name": "Test Store",
+                                   "quantity": 9500.0, "unit": "kg", "occurred_at": iso(now())})
+        assert response.status_code == 201, response.text
+        assert response.json()["anchor_status"] == "ANCHORED"
+
+        after = client.get(f"/api/v1/supply-chain/batches/{traced_batch['id']}",
+                           headers=auth("SUPPLY_CHAIN_OPERATOR")).json()
+        assert after["state"] == "STORED"
+
+    def test_illegal_transition_is_refused_while_the_ledger_is_healthy(self, client, auth,
+                                                                      traced_batch):
+        """The refusal is the application layer's own, so it does not depend on the chaincode
+        being reachable -- but it must of course also hold when the chaincode is reachable."""
+        response = client.post("/api/v1/supply-chain/events",
+                               headers=auth("SUPPLY_CHAIN_OPERATOR"), json={
+                                   "batch_id": traced_batch["id"], "biz_step": "harvesting",
+                                   "disposition": "in_progress", "location_name": "Test Plant",
+                                   "quantity": 100.0, "unit": "kg", "occurred_at": iso(now())})
+        assert response.status_code == 422, response.text
+        assert "illegal transition" in response.json()["detail"].lower()
+
+        after = client.get(f"/api/v1/supply-chain/batches/{traced_batch['id']}",
+                           headers=auth("SUPPLY_CHAIN_OPERATOR")).json()
+        assert after["state"] == "RECEIVED", "the DB state must not have moved"
+
+    def test_legal_transition_under_a_degraded_ledger_is_recorded_but_not_claimed_anchored(
+            self, monkeypatch, client, auth, traced_batch):
+        """The documented degraded behaviour: a legal transition is still accepted, and the
+        event is marked PENDING with no tx_id rather than being presented as anchored. The
+        divergence is therefore explicit and visible, not silent -- `verify_batch` only reports
+        `ledger_verified` for an ANCHORED batch."""
+        from app.services import ledger_client
+
+        monkeypatch.setattr(ledger_client, "submit",
+                            lambda *a, **k: {"ok": False, "status": "PENDING",
+                                             "detail": "circuit open"})
+        response = client.post("/api/v1/supply-chain/events",
+                               headers=auth("SUPPLY_CHAIN_OPERATOR"), json={
+                                   "batch_id": traced_batch["id"], "biz_step": "storing",
+                                   "disposition": "in_storage", "location_name": "Test Store",
+                                   "quantity": 9500.0, "unit": "kg", "occurred_at": iso(now())})
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["anchor_status"] == "PENDING"
+        assert not body["tx_id"], "a degraded submission must not report a transaction id"
+
+        after = client.get(f"/api/v1/supply-chain/batches/{traced_batch['id']}",
+                           headers=auth("SUPPLY_CHAIN_OPERATOR")).json()
+        assert after["state"] == "STORED"
+
+
+class TestSeedLotGovernance:
+    """A seed lot propagates a GMO event into planting material, which is a regulated step:
+    passing biosecurity screening is not sufficient on its own (audit P1, §15)."""
+
+    def test_seed_lot_refused_when_the_event_has_no_approval(self, client, auth, gmo_event):
         response = client.post("/api/v1/gmo/seed-lots", headers=auth("BIOTECH_RESEARCHER"),
                                json={"lot_code": unique("SL"), "gmo_event_id": gmo_event["id"],
                                      "crop_type": "Maize", "variety": "V1",
                                      "quantity_kg": 500.0, "produced_at": iso(now())})
-        assert response.status_code == 201
+        assert response.status_code == 422, response.text
+        assert "approval" in response.json()["detail"].lower()
+
+    def test_seed_lot_refused_when_the_only_approval_is_rejected(self, client, auth, gmo_event):
+        rejected = client.post(f"/api/v1/gmo/events/{gmo_event['id']}/approvals",
+                               headers=auth("REGULATOR"),
+                               json={"jurisdiction": "EU", "status": "REJECTED",
+                                     "reference": "EU-REJ-1"})
+        assert rejected.status_code in (200, 201), rejected.text
+        response = client.post("/api/v1/gmo/seed-lots", headers=auth("BIOTECH_RESEARCHER"),
+                               json={"lot_code": unique("SL"), "gmo_event_id": gmo_event["id"],
+                                     "crop_type": "Maize", "variety": "V1",
+                                     "quantity_kg": 500.0, "produced_at": iso(now())})
+        assert response.status_code == 422, response.text
+        assert "not approved" in response.json()["detail"].lower()
+
+    def test_seed_lot_accepted_once_a_regulator_has_approved(self, client, auth, approved_event):
+        response = client.post("/api/v1/gmo/seed-lots", headers=auth("BIOTECH_RESEARCHER"),
+                               json={"lot_code": unique("SL"),
+                                     "gmo_event_id": approved_event["id"],
+                                     "crop_type": "Maize", "variety": "V1",
+                                     "quantity_kg": 500.0, "produced_at": iso(now())})
+        assert response.status_code == 201, response.text
         assert response.json()["anchor_status"] == "ANCHORED"
+
+
+class TestGmoApprovalTransitions:
+    """A regulatory decision must not be silently rewritten (audit P2, §24)."""
+
+    def test_approved_cannot_flip_straight_back_to_approved_from_rejected(
+            self, client, auth, gmo_event):
+        first = client.post(f"/api/v1/gmo/events/{gmo_event['id']}/approvals",
+                            headers=auth("REGULATOR"),
+                            json={"jurisdiction": "US-FDA", "status": "REJECTED",
+                                  "reference": "R1"})
+        assert first.status_code in (200, 201), first.text
+        second = client.post(f"/api/v1/gmo/events/{gmo_event['id']}/approvals",
+                             headers=auth("REGULATOR"),
+                             json={"jurisdiction": "US-FDA", "status": "APPROVED",
+                                   "reference": "R2"})
+        assert second.status_code == 409, second.text
+        assert "cannot move" in second.json()["detail"].lower()
+
+    def test_rejected_may_be_resubmitted_as_pending(self, client, auth, gmo_event):
+        client.post(f"/api/v1/gmo/events/{gmo_event['id']}/approvals",
+                    headers=auth("REGULATOR"),
+                    json={"jurisdiction": "US-USDA", "status": "REJECTED", "reference": "R1"})
+        again = client.post(f"/api/v1/gmo/events/{gmo_event['id']}/approvals",
+                            headers=auth("REGULATOR"),
+                            json={"jurisdiction": "US-USDA", "status": "PENDING",
+                                  "reference": "R2"})
+        assert again.status_code in (200, 201), again.text
 
 
 class TestTraceability:
@@ -514,9 +674,16 @@ class TestBlockchainAndAudit:
                           headers=auth("REGULATOR")).json()["valid"] is True
 
     def test_audit_head_can_be_anchored(self, client, auth):
-        response = client.post("/api/v1/audit/anchor", headers=auth("REGULATOR"))
+        """Anchoring writes to the ledger, so it needs audit:anchor, not audit:read."""
+        response = client.post("/api/v1/audit/anchor", headers=auth("SECURITY_ANALYST"))
         assert response.status_code == 200
         assert response.json()["ok"] is True
+
+    def test_read_only_regulator_cannot_anchor_the_chain(self, client, auth):
+        """REGULATOR is documented as read-only apart from compliance and GMO approval, and a
+        read permission must not confer a ledger write (audit P1)."""
+        response = client.post("/api/v1/audit/anchor", headers=auth("REGULATOR"))
+        assert response.status_code == 403
 
     def test_audit_export_includes_its_verification(self, client, auth):
         response = client.get("/api/v1/audit/export", headers=auth("REGULATOR"),

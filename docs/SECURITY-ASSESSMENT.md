@@ -5,13 +5,14 @@ an already-built system adversarially rather than re-describing its design.
 **Scope:** the complete platform — backend, frontend, database, ledger, AI, IoT simulation,
 containers, CI/CD, and infrastructure-as-code.
 > **Note on figures.** Test counts quoted in this report are as of the audit it describes
-> (394 passing). The current suite is **399 passing**; the increase is regression tests added by
-> later documentation-and-demo alignment passes, not a change to any finding below.
+> (394 passing). The current suite is **469 passing**; the increase is regression tests added by
+> later documentation-and-demo alignment passes and by the ADR-016 service split, not a change to
+> any finding below.
 
 **Method:** live code review of every route handler and service function that performs an
 identifier-based lookup; dependency vulnerability scanning (`pip-audit`); secret scanning across
 162 tracked/untracked files; re-execution of the full test suite (394 tests at the time of that
-audit; 399 after the September 2026 exam-alignment passes) before and after
+audit; 469 after the later exam-alignment passes and the ADR-016 service split) before and after
 every fix; manual exploitation attempts against the running API for each threat class in
 `Security.md`'s STRIDE table.
 

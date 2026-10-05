@@ -12,7 +12,7 @@
 | Untrusted edge devices | FR-A1, TB-3 | Separate device credential type, HMAC + nonce, quarantine lifecycle |
 | Data segregation between competitors | FR-X3, NFR-13 | Organisation scoping in the data-access layer (ADR-015) |
 | Decisions must be explainable to regulators | FR-C2, FR-D3, FR-F1 | Rules-first AI with structured evidence (ADR-012) |
-| Must run offline on one machine | C-4, C-5 | Modular monolith, SQLite, in-process ledger |
+| Must run offline on one machine | C-4, C-5 | Modular monolith in code; `run_local.sh` runs it as one process with SQLite. The compose stack splits it into five containers (ADR-016) |
 | Security must be build-time | FR-E1…E3 | CI gates, tests that assert authorisation coverage |
 
 ## 2. Logical architecture
@@ -80,11 +80,31 @@ flowchart TB
 
 ## 3. Physical / deployment architecture
 
-**Demo (single machine).** One Uvicorn process serving the API and the static frontend; SQLite
-file; ledger state persisted to `ledger_data/`; IoT simulator as a separate local process.
+**Demo (single machine, `run_local.sh`).** One Uvicorn process serving the API and the static
+frontend, with the ai and ledger packages in-process; SQLite file; ledger state persisted to
+`ledger_data/`; IoT simulator as a separate local process.
 
-**Local compose.** `api` container + `postgres` container + `iot-simulator` container on a private
-bridge network; only the API port published; secrets from `.env`.
+**Local compose (ADR-016).** One container per component:
+
+```mermaid
+flowchart LR
+    B[Browser] -->|127.0.0.1:8080| F[frontend<br/>nginx: UI + reverse proxy]
+    subgraph edge[edge network]
+        F --> A[api<br/>FastAPI]
+        S[iot-simulator<br/>profile] --> A
+    end
+    subgraph backend[backend network - internal, no egress]
+        A -->|X-Service-Token| AI[ai<br/>inference]
+        A -->|X-Service-Token| L[ledger<br/>ledger node]
+        A --> D[(db<br/>PostgreSQL)]
+    end
+    L --- LV[(absp_ledger)]
+    D --- DV[(absp_pgdata)]
+```
+
+Only `frontend` is published. The api reaches `ai` and `ledger` through `ai_client.py` /
+`ledger_client.py`, which run the same handlers in-process when the service URLs are unset (tests,
+`run_local.sh`). Secrets come from `.env`.
 
 **Cloud (documented, Terraform).** ALB → ECS/EKS service (2+ tasks, non-root, read-only rootfs) in
 private subnets → RDS PostgreSQL (encrypted, private) ; ECR for images; Secrets Manager for
