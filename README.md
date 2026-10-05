@@ -73,7 +73,7 @@ agri-biotech-security-platform/
 ```
 
 `backend/` contains `app/` (16 routers, 11 service modules, 34-table model layer),
-`migrations/` (forward-only SQL runner, ADR-014) and `tests/` (413 tests, 99 of them security).
+`migrations/` (forward-only SQL runner, ADR-014) and `tests/` (469 tests, 102 of them security).
 
 ## 5. Prerequisites
 
@@ -204,7 +204,7 @@ demonstration** → audit-chain verification. 25 steps, every check asserted.
 ## 14. Tests
 
 ```bash
-python3 -m pytest backend/tests/ -q                       # 382 tests
+python3 -m pytest backend/tests/ -q                       # 469 tests
 python3 -m pytest backend/tests/security/ -q               # RBAC, tenancy, injection, headers
 python3 -m pytest backend/tests/performance/ -q -s         # NFR measurements, printed
 ```

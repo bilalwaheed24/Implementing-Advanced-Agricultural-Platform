@@ -210,7 +210,7 @@ enforced, and the network policy actually tested against a hostile pod.
 **What exists now.** An adversarial self-audit that found and fixed two real authorisation defects
 — a **BOLA** (any organisation could attach another organisation's certification to its own batch)
 and an **IDOR** (cross-organisation record verification) — plus a vulnerable `cryptography`
-version. Both defects have regression tests. A 99-test security suite covers RBAC, tenancy
+version. Both defects have regression tests. A 102-test security suite covers RBAC, tenancy
 isolation, injection, replay, hardening and log redaction.
 
 **The honest claim.** *No known critical findings remain from the testing performed; residual risks
@@ -253,17 +253,23 @@ readiness check and a metrics endpoint.
 **What production would change.** Distributed tracing, real metric aggregation and alerting
 thresholds, log shipping with retention policy, and an on-call runbook per alert.
 
-### 2.8 Single-process deployment
+### 2.8 Single-machine deployment
 
-**What exists now.** A modular monolith — one FastAPI process with eleven service modules
-(ADR-001). SQLite in development; the same models run against PostgreSQL unchanged.
+**What exists now.** Two paths, and they differ. The compose stack (ADR-016) runs five
+containers — `frontend`, `api`, `ai`, `ledger` and PostgreSQL `db` — on one machine, with only
+the frontend publishing a host port and `ai`/`ledger`/`db` reachable solely from the api over an
+internal network. `run_local.sh` still runs the api as a single process with SQLite and `ai`/
+`ledger` in-process, which is also how the 469 in-process tests execute. The code keeps the
+modular-monolith module boundaries of ADR-001 inside the api; ADR-016 supersedes ADR-001 only
+for how the components are deployed.
 
-**Why acceptable.** A deliberate decision, not a shortcut. Microservices pay off when independent
-scaling or independent deploys are actually needed, and neither was a requirement here.
+**Why acceptable.** Each component is isolated at the container and network boundary, which is
+what the security requirements turn on. One machine was a stated constraint (C-5).
 
-**What production would change.** PostgreSQL as the default, multiple replicas behind a load
-balancer, and extraction of the ledger and AI inference into separate services only if a measured
-scaling need appeared.
+**What production would change.** Multiple api replicas behind a load balancer, managed
+PostgreSQL rather than a container, and horizontal scaling of `ai` independently of `api` — the
+service split that makes this possible is already in place, but it is deployed as one replica
+per component here, so none of it is proven under real load.
 
 ---
 
@@ -285,4 +291,4 @@ scaling need appeared.
 | 2.5 | Accessibility not independently audited | Production | Disclose it |
 | 2.6 | Charts lack a tabular alternative | Production | Disclose it |
 | 2.7 | Basic observability | Production | Disclose it |
-| 2.8 | Single-process deployment | Production | Deliberate (ADR-001) |
+| 2.8 | Single-machine deployment, one replica per service | Production | Deliberate (ADR-016) |

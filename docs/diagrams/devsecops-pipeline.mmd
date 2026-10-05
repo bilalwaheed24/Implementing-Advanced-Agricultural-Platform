@@ -12,7 +12,7 @@ flowchart TB
     PreCommit --> CI["CI: lint + syntax check"]
     CI --> SAST["SAST: Bandit + Semgrep"]
     SAST --> SCA["SCA: pip-audit"]
-    SCA --> UnitTests["Unit + integration tests\n(399 tests)"]
+    SCA --> UnitTests["Unit + integration tests\n(469 tests)"]
     UnitTests --> Build["Docker build"]
     Build --> SBOM["SBOM: CycloneDX"]
     Build --> ContainerScan["Container scan: Trivy"]
