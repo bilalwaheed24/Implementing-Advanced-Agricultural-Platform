@@ -7,8 +7,7 @@ food systems.** Built for EduQual Level 6 Topic 135 (ANPP-OP).
 > control. `DEMO/SIMULATION` — a faithful stand-in for hardware or infrastructure this
 > deployment cannot depend on (physical IoT devices, a production Hyperledger Fabric network).
 > `MOCK` — not used; nothing in this repository fakes a result. Every simulated element is
-> named as such at the point it appears. See `docs/EXAM-LIMITATIONS.md` for the full
-> real-vs-simulated breakdown, and `docs/Decision.md` ADR-003.
+> named as such at the point it appears. See §22 for the full real-vs-simulated breakdown.
 
 ---
 
@@ -37,20 +36,15 @@ IoT device simulator                ──┼──►  FastAPI backend (11 serv
                                         │        └─► AI services (screening, anomaly, fraud, CRISPR, vision)
 ```
 
-Full detail: `docs/Architecture.md`. Every architectural choice is recorded as an ADR in
-`docs/Decision.md`. The complete requirement-to-implementation trace is in
-`docs/REQUIREMENTS-TRACEABILITY.md`.
-
 ## 3. Technology stack
 
 Python 3.12 · FastAPI · SQLAlchemy 2 · Pydantic 2 · PyJWT · bcrypt · `cryptography` ·
 scikit-learn · TensorFlow/Keras · dependency-free ES2022 frontend · Docker · Terraform (AWS) ·
 Kubernetes manifests · GitHub Actions.
 
-**No new Python dependency was added anywhere in this project** (Development-rules.md §10) —
-the build environment has no PyPI access, so the stack is exactly what `requirements.txt` pins,
-and everything else (rate limiting, QR codes, Merkle trees, sequence alignment) is implemented
-on the standard library. See `docs/TRD.md` for the full technology-decision rationale.
+**The only Python dependency added beyond the original pinned set is the PostgreSQL driver
+`psycopg`.** The stack is exactly what `requirements.txt` pins, and everything else (rate
+limiting, QR codes, Merkle trees, sequence alignment) is implemented on the standard library.
 
 ## 4. Repository structure
 
@@ -64,16 +58,15 @@ agri-biotech-security-platform/
 ├── infrastructure/     Terraform (AWS) and Kubernetes manifests
 ├── scripts/            run_local.sh, seed_demo.py, demo_flow.py, train_models.py, smoke_test.py
 ├── security/           Disclosure policy and OWASP ZAP rules
-├── docs/               Engineering documentation and 13 Mermaid diagrams (see §22)
 ├── .github/workflows/  CI and security pipelines
 ├── docker/             One Dockerfile per service (api, ai, ledger, frontend) + nginx config
 ├── requirements/       Per-image dependency subsets (requirements.txt is the full set)
-├── docker-compose.yml  Five-service stack: frontend, api, ai, ledger, db (ADR-016)
+├── docker-compose.yml  Five-service stack: frontend, api, ai, ledger, db
 └── .env.example
 ```
 
 `backend/` contains `app/` (16 routers, 11 service modules, 34-table model layer),
-`migrations/` (forward-only SQL runner, ADR-014) and `tests/` (469 tests, 102 of them security).
+`migrations/` (forward-only SQL runner) and `tests/` (469 tests, 102 of them security).
 
 ## 5. Prerequisites
 
@@ -136,25 +129,24 @@ Every variable is documented with a safe placeholder in `.env.example`. Notable 
 |---|---|
 | `JWT_SECRET`, `ENCRYPTION_KEY` | Required in production; the app refuses to start with a default in `ENV=production` |
 | `DATABASE_URL` | `sqlite:///./absp.db` for `run_local.sh`, `postgresql+psycopg://...` in the compose stack and production |
-| `AI_SERVICE_URL`, `LEDGER_SERVICE_URL`, `SERVICE_TOKEN` | Empty = ai and ledger run in-process. Set (compose does) = call the `ai` / `ledger` containers with the shared token (ADR-016) |
-| `TELEMETRY_INLINE_SCORING` | `true` gives an immediate anomaly verdict per message; `false` defers scoring to a background task for ~6x throughput — see PRD.md NFR-2 |
+| `AI_SERVICE_URL`, `LEDGER_SERVICE_URL`, `SERVICE_TOKEN` | Empty = ai and ledger run in-process. Set (compose does) = call the `ai` / `ledger` containers with the shared token |
+| `TELEMETRY_INLINE_SCORING` | `true` gives an immediate anomaly verdict per message; `false` defers scoring to a background task for ~6x throughput |
 | `DEMO_MODE` | Labels the deployment as a demonstration in API responses |
 
 ## 9. Database
 
 `run_local.sh` uses SQLite (zero setup). The Docker stack uses PostgreSQL in its own `db`
 container: the api creates the schema, applies migrations and seeds on first start (§16). The
-driver is `psycopg` 3, the one dependency added under Development-rules §10 (ADR-017).
+driver is `psycopg` 3, the one dependency added for the PostgreSQL stack.
 
-The same ORM models and migrations run against either engine (ADR-002).
+The same ORM models and migrations run against either engine.
 
 ## 10. Blockchain
 
 In the Docker stack the ledger runs as its own `ledger` container and is the only writer of the
-chain; under `run_local.sh` and the tests it runs in-process with the API (ADR-016). It implements the Hyperledger Fabric transaction model (MSP identities, ECDSA P-256 endorsement,
+chain; under `run_local.sh` and the tests it runs in-process with the API. It implements the Hyperledger Fabric transaction model (MSP identities, ECDSA P-256 endorsement,
 hash-linked blocks, Merkle proofs, chaincode-style contracts) as an in-process package. This is
-explicitly a **single-node ordering** demonstration; the migration path to a production Fabric
-network is documented function-by-function in `docs/Blockchain-integration.md` §17.
+explicitly a **single-node ordering** demonstration, not a production Fabric network.
 
 ```bash
 python3 -m pytest backend/tests/test_ledger.py -q     # 42 tests incl. tamper detection
@@ -163,7 +155,7 @@ python3 -m pytest backend/tests/test_ledger.py -q     # 42 tests incl. tamper de
 ## 11. AI models
 
 All models train on synthetic data generated by `ai/data/generate.py`, with a provenance
-header naming the generator (ADR-013). Training:
+header naming the generator. Training:
 
 ```bash
 python3 scripts/train_models.py            # full training run
@@ -212,7 +204,19 @@ python3 -m pytest backend/tests/performance/ -q -s         # NFR measurements, p
 Categories: unit (security primitives, AI algorithms, ledger contracts), integration (auth,
 devices, biosecurity, supply chain), end-to-end (the full traceability journey), security
 (authorization coverage, tenancy isolation, injection, headers, rate limiting, log redaction),
-and performance (latency, throughput, ledger append/verify cost). See `docs/Testing.md`.
+and performance (latency, throughput, ledger append/verify cost).
+
+`tests-e2e/` holds a separate **live re-audit suite of 44 tests** (21 Playwright browser tests,
+23 API security tests). It drives a running stack through the real login form and is not part
+of CI. Playwright is installed separately and is not in `requirements.txt`:
+
+```bash
+pip install playwright pytest && playwright install chromium
+ABSP_BASE_URL=http://127.0.0.1:8000 ABSP_HEADLESS=1 python3 -m pytest tests-e2e -q
+```
+
+Run it against a disposable stack: the tests create records. Leave `ABSP_SLOWMO` at its default
+(220 ms); the authentication rate limiter (10 logins/minute/IP) rejects faster runs with 429.
 
 ## 15. Security scans (offline-capable)
 
@@ -226,7 +230,7 @@ baseline scan — see `.github/workflows/ci.yml` and `security.yml`.
 
 ## 16. Docker
 
-Five containers, one per component (ADR-016):
+Five containers, one per component:
 
 | Service | Image | Role | Reachable from |
 |---|---|---|---|
@@ -244,8 +248,8 @@ docker compose logs -f api                   # follow one service
 
 `.env` must define `JWT_SECRET`, `ENCRYPTION_KEY`, `POSTGRES_PASSWORD` and `SERVICE_TOKEN`
 (see `.env.example`). The first start seeds the same demonstration dataset as `run_local.sh`.
-Every image is non-root with a read-only root filesystem, no capabilities and a health check
-(`docs/Security.md` §15); `ai`, `ledger` and `db` sit on an internal-only network.
+Every image is non-root with a read-only root filesystem, no capabilities and a health check;
+`ai`, `ledger` and `db` sit on an internal-only network.
 
 ### Kubernetes
 
@@ -296,7 +300,7 @@ reason each in `security/zap-rules.tsv`.
 
 Container scan: all HIGH/CRITICAL findings with an available vendor fix were remediated. Remaining
 findings are upstream OS-package vulnerabilities with no published fix at the time of testing and
-are documented as residual risk in `docs/EXAM-LIMITATIONS.md` §2.1.
+are listed as residual risk in §22.
 
 ## 18. Deployment
 
@@ -317,7 +321,7 @@ Post-deploy: `python3 scripts/smoke_test.py --api-url https://your-deployment`.
 | `sqlite3.OperationalError: disk I/O error` | Another process (often a previous server) holds the database file | Stop the other process before deleting/reseeding the database |
 | Telemetry returns 404 "Device authentication failed" | Wrong or stale device secret, or the device is not `ACTIVE` | Re-provision the device or check `demo_device_secrets.json` |
 | Login returns 429 | The authentication rate limiter (10/minute/IP) — a real security control | Wait for `Retry-After`, do not disable the limiter |
-| A view shows "Not available to your role" | The signed-in role lacks the required permission | Sign in as a role with that permission — see `docs/PRD.md` §11 |
+| A view shows "Not available to your role" | The signed-in role lacks the required permission | Sign in as a role with that permission |
 
 ## 20. Demo workflow for the oral presentation
 
@@ -330,24 +334,13 @@ Post-deploy: `python3 scripts/smoke_test.py --api-url https://your-deployment`.
 
 ## 21. Requirements coverage
 
-Traced requirement by requirement in `docs/REQUIREMENTS-TRACEABILITY.md`, against the exam brief,
-the documentation and the running code:
-
-| Status | Count |
-|---|---|
-| **COMPLETE** | 37 |
-| **PARTIAL** | 3 |
-| **MISSING** | 0 |
-
-The three PARTIAL items are: no independent accessibility audit or assistive-technology user
-testing; Hyperledger Fabric and BLAST implemented as model and algorithm rather than the named
-products running; and OpenDroneMap/QGIS not integrated. Each is explained in full — what exists,
-what is missing, and why it is acceptable for an academic demonstration.
+Three requirements from the exam brief are only partly met: no independent accessibility
+audit or assistive-technology user testing; Hyperledger Fabric and BLAST implemented as model
+and algorithm rather than the named products running; and OpenDroneMap/QGIS not integrated.
 
 ## 22. Known limitations
 
-`docs/EXAM-LIMITATIONS.md` is the complete, honest accounting of what is real, what is
-simulated, and what remains outstanding. In short:
+What is real, what is simulated, and what remains outstanding:
 
 * IoT devices, telemetry values, satellite scene data and hazard sequences are **simulated** —
   the fleet is simulated, the security envelope around it is not.
@@ -361,23 +354,5 @@ simulated, and what remains outstanding. In short:
   `lint-and-test`, `build-and-scan-image`, `secret-scan`, `smart-contract-tests`, `dast`.
 * Container scanning: all HIGH/CRITICAL findings with an available vendor fix were remediated.
   60 HIGH/CRITICAL findings remain in Debian base-image OS packages with no published fix at the
-  time of testing, and are documented as residual risk — see `docs/EXAM-LIMITATIONS.md` §2.1.
+  time of testing, and are documented as residual risk.
 * No independent penetration test and no independent accessibility audit have been performed.
-
-## 23. Documentation map
-
-| Document | What it answers |
-|---|---|
-| `docs/PRD.md`, `docs/TRD.md` | What is being built and to what requirements |
-| `docs/Architecture.md`, `docs/Backend.md` | How the system is structured |
-| `docs/Decision.md` | 15 ADRs — why each significant choice was made |
-| `docs/API-spec.md`, `docs/openapi.json` | The full API surface (121 operations, 101 paths) |
-| `docs/Security.md`, `docs/SECURITY-ASSESSMENT.md` | Threat model, controls, and the adversarial assessment |
-| `docs/Testing.md` | Test strategy and coverage |
-| `docs/IoT-Devices.md`, `docs/GMO.md`, `docs/Blockchain-integration.md` | Domain subsystems |
-| `docs/flow.md`, `docs/UIUX.md` | End-to-end flows and interface design |
-| `docs/REQUIREMENTS-TRACEABILITY.md` | Requirement → implementation → test → status |
-| `docs/DEMO-RUNBOOK.md` | How to run and demonstrate the platform |
-| `docs/EXAM-LIMITATIONS.md` | Real vs simulated, and what production would change |
-| `docs/diagrams/` | 13 Mermaid diagrams, labelled IMPLEMENTED / SIMULATED / NOT APPLIED |
-| `docs/Development-rules.md` | Engineering rules enforced in review and CI |
