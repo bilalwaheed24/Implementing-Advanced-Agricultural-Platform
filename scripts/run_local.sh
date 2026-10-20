@@ -34,8 +34,10 @@ fi
 echo "== Training AI models (synthetic data; skip with SKIP_TRAIN=1) =="
 # The full training path is used on purpose: --fast undertrains the crop-vision CNN
 # and it confuses LEAF_BLIGHT with RUST during a live demonstration. Costs a few
-# minutes, and only runs when no model card is present.
-if [ "${SKIP_TRAIN:-0}" != "1" ] && [ ! -f ai/models/crop_vision_model_card.json ]; then
+# minutes, and only runs when the trained weights are missing. The model cards are
+# committed but the weights (.keras/.joblib) are git-ignored, so the card alone does not
+# mean a model exists; without this check a fresh clone silently ran rules-only.
+if [ "${SKIP_TRAIN:-0}" != "1" ] && [ ! -f ai/models/crop_vision.keras ]; then
   python3 scripts/train_models.py
 fi
 

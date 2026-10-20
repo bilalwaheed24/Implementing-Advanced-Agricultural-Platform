@@ -605,7 +605,7 @@ def main() -> int:
     else:
         fail(f"audit chain verification failed: {status} {audit}")
 
-    status, anchored = api.as_user("regulator@absp.demo", "POST", "/api/v1/audit/anchor")
+    status, anchored = api.as_user("analyst@absp.demo", "POST", "/api/v1/audit/anchor")
     if anchored.get("ok"):
         ok(f"audit head anchored to the ledger in block {anchored['block_number']}")
     else:

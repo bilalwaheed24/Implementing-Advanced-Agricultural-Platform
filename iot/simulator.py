@@ -12,7 +12,7 @@ Fault-injection modes let the demonstration prove each control:
     spoof           attacker-shaped distribution       -> anomaly alert
     replay          re-sends a captured signed message -> 409 replay rejected
     bad-signature   wrong secret                       -> 401/404 auth failure
-    malformed       out-of-range values                -> 422 quarantined
+    malformed       out-of-range values                -> 202 accepted, QUARANTINED
     cold-chain-break temperature excursion             -> integrity signal on the batch
 
 Usage:
