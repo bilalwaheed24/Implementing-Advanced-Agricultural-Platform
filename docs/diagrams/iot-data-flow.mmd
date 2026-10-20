@@ -1,0 +1,21 @@
+%% IoT Data Flow — Diagram 6. Source: IoT-Devices.md §4, §11.
+%% Labelled: device fleet is SIMULATED, everything after ingestion is REAL.
+flowchart LR
+    Sensor["Sensor / device\n(SIMULATED fleet,\nREAL HMAC identity)"]
+    Gateway["Batch gateway\n(optional, up to 500 msgs)\nIMPLEMENTED"]
+    Auth["HMAC verify + replay check\n+ range validation\nIMPLEMENTED"]
+    Backend["Backend service layer\nIMPLEMENTED"]
+    Encrypt["AES-256-GCM at rest\nIMPLEMENTED"]
+    AI["Anomaly detector\n(Isolation Forest)\nIMPLEMENTED"]
+    DB[("Database")]
+    Dashboard["Dashboard / Alerts\nIMPLEMENTED"]
+
+    Sensor -->|"signed reading"| Gateway
+    Gateway --> Auth
+    Sensor -.->|"direct (no gateway)"| Auth
+    Auth -->|"quarantine if invalid"| Backend
+    Backend --> Encrypt --> DB
+    Backend --> AI
+    AI -->|"score, reasons[]"| DB
+    AI -->|"if score ≥ threshold"| Dashboard
+    DB --> Dashboard

@@ -1,0 +1,13 @@
+%% Data Flow Diagram — how data actually moves through the implemented system.
+flowchart LR
+    User["User / Device"] -->|"HTTPS JSON or\nHMAC-signed telemetry"| API["FastAPI backend"]
+    API -->|"validated, typed request"| Service["Service layer\n(business rules)"]
+    Service -->|"parameterised ORM query"| DB[("Database")]
+    Service -->|"typed feature vector"| AI["AI module\n(in-process call)"]
+    AI -->|"score + reasons[]"| Service
+    Service -->|"submit(contract, fn, args)"| Ledger["Ledger\n(in-process)"]
+    Ledger -->|"tx_id, block_number,\ncontent_hash"| Service
+    Service -->|"audit.record(...)"| Audit[("Hash-chained\naudit log")]
+    Service -->|"raise_alert(...)"| Notif["Notifications"]
+    Service -->|"RFC-7807 JSON"| API
+    API -->|"JSON response"| User

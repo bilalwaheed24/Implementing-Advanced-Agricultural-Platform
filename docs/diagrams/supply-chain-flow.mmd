@@ -1,0 +1,11 @@
+%% Food Supply Chain Flow — Diagram 9. Source: flow.md §14, GMO.md §7.
+flowchart LR
+    Producer["Producer / Farm"] -->|"harvesting"| Processor["Processor"]
+    Processor -->|"transforming"| Packer["Packer"]
+    Packer -->|"packing"| Transport["Transport\n(cold-chain telemetry\nIMPLEMENTED)"]
+    Transport -->|"shipping"| Distributor["Distributor"]
+    Distributor -->|"receiving"| Retailer["Retailer"]
+    Retailer -->|"retail_selling"| Consumer["Consumer"]
+
+    Consumer -.->|"scan QR"| Verify["Public verification\nIMPLEMENTED, no auth"]
+    Verify -.->|"ledger + fraud check"| Result["VERIFIED / SUSPECT / FAILED\n+ certification authenticity"]

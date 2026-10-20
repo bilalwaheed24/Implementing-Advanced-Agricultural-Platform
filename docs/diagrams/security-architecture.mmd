@@ -1,0 +1,12 @@
+%% Security Architecture — Diagram 10. Source: Security.md §4.
+flowchart TB
+    Users["Users / Devices"] --> L1["L1 Ingress\nheaders, CORS, rate limit\nIMPLEMENTED"]
+    L1 --> L2["L2 Identity\nbcrypt(12), JWT, device HMAC\nIMPLEMENTED"]
+    L2 --> L3["L3 Authorization\nRBAC + org scoping\n(2 IDOR/BOLA fixes this audit)"]
+    L3 --> L4["L4 Input validation\nPydantic + domain ranges\nIMPLEMENTED"]
+    L4 --> Services["Core services"]
+    Services --> L5["L5 Data protection\nAES-256-GCM at rest, TLS in transit\nIMPLEMENTED"]
+    Services --> L6["L6 Integrity\naudit hash chain + ledger anchor\nIMPLEMENTED"]
+    L6 --> AuditLog[("Audit log\n(tamper-evident,\nlive-proven)")]
+    Services --> Monitoring["Metrics + health checks\nIMPLEMENTED"]
+    L7["L7 Supply chain\nSAST/SCA/secrets/container scan,\nSBOM, pinned deps\nIMPLEMENTED, workflow-valid"]

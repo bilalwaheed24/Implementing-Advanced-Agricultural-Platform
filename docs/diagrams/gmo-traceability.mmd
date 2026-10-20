@@ -1,0 +1,18 @@
+%% GMO Traceability Flow — Diagram 7. Source: GMO.md §1.
+flowchart TB
+    A["Origin: donor organism\n& construct design"] --> B["Sequence screening\n(biosecurity gate)\nIMPLEMENTED"]
+    B -->|"CLEAR or\nAPPROVED_BY_REVIEW only"| C["GMO event registration\nECDSA-endorsed, anchored\nIMPLEMENTED"]
+    C --> D["Jurisdictional approval\n(regulator only)\nIMPLEMENTED"]
+    D --> E["Seed lot production\nanchored\nIMPLEMENTED"]
+    E --> F["Farm & field assignment"]
+    F --> G["Cultivation"]
+    G --> H["Harvest\n(batch created, anchored)"]
+    H --> I["Processing"]
+    I --> J["Packaging\n(GTIN, verification code)"]
+    J --> K["Transportation\n(shipment, cold-chain telemetry)"]
+    K --> L["Distribution"]
+    L --> M["Retail"]
+    M --> N["Consumer verification\n(public QR lookup)\nIMPLEMENTED"]
+
+    B -.->|"BLOCK verdict"| X["Biosafety officer review\nrequired before any release\nIMPLEMENTED"]
+    X -.-> C
