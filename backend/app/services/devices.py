@@ -185,6 +185,8 @@ def sweep_silent_devices(db: Session, missed_intervals: int = 3,
         threshold = timedelta(seconds=device.interval_seconds * missed_intervals)
         if now - last_seen > threshold:
             silent.append(device)
+            if notifications.has_open_alert(db, "DEVICE_HEALTH", device.id):
+                continue
             notifications.raise_alert(
                 db, "DEVICE_HEALTH", "WARNING", f"Device {device.id[:8]} has stopped reporting",
                 detail=f"No telemetry for {int((now - last_seen).total_seconds() // 60)} minutes "

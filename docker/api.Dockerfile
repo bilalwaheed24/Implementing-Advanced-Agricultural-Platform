@@ -41,7 +41,7 @@ COPY backend/migrations/ backend/migrations/
 # Inference runs in the `ai` container.
 COPY ai/__init__.py ai/__init__.py
 COPY ai/data/ ai/data/
-COPY scripts/start_api.py scripts/seed_demo.py scripts/
+COPY scripts/start_api.py scripts/seed_demo.py scripts/scheduled_tasks.py scripts/
 # The device simulator reuses this image (compose profile "simulator").
 COPY iot/simulator.py iot/
 

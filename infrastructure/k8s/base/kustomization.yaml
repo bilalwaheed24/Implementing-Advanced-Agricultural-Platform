@@ -11,4 +11,5 @@ resources:
   - ai.yaml
   - api.yaml
   - db-init-job.yaml
+  - sweeps-cronjob.yaml
   - frontend.yaml

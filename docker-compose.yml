@@ -81,6 +81,25 @@ services:
     restart: unless-stopped
     networks: [backend]
 
+  # Scheduled security sweeps every 15 minutes: silent devices, data-theft scoring,
+  # certification expiry (scripts/scheduled_tasks.py). Same image as the api.
+  # Opt-in so a quiet demo stack is not flooded with "device stopped reporting" warnings:
+  #   docker compose --profile scheduler up -d
+  scheduler:
+    <<: *hardened
+    image: absp-api:local
+    profiles: [scheduler]
+    entrypoint: ["python", "scripts/scheduled_tasks.py", "--every", "900"]
+    environment:
+      ENV: development
+      DATABASE_URL: *db-url
+      JWT_SECRET: ${JWT_SECRET:?}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?}
+    depends_on:
+      api: { condition: service_healthy }
+    healthcheck: { disable: true }
+    networks: [backend]
+
   # Optional: docker compose --profile simulator up
   iot-simulator:
     image: absp-api:local

@@ -4,7 +4,8 @@
 Run periodically (cron, Kubernetes CronJob, or a simple loop) against a live deployment.
 Each sweep is independent and safe to run repeatedly.
 
-Usage: python3 scripts/scheduled_tasks.py
+Usage: python3 scripts/scheduled_tasks.py              # one pass (cron / Kubernetes CronJob)
+       python3 scripts/scheduled_tasks.py --every 900  # loop (the compose `scheduler` service)
 """
 from __future__ import annotations
 
@@ -31,6 +32,8 @@ def sweep_expiring_certifications(db, warn_days: int = 30) -> int:
     for certification in db.execute(select(Certification).where(
             Certification.status == "ACTIVE",
             Certification.valid_to <= horizon)).scalars():
+        if notifications.has_open_alert(db, "CERTIFICATION", certification.id):
+            continue
         notifications.raise_alert(
             db, "CERTIFICATION", "WARNING",
             f"Certification {certification.cert_code} expires soon",
@@ -41,7 +44,7 @@ def sweep_expiring_certifications(db, warn_days: int = 30) -> int:
     return count
 
 
-def main() -> int:
+def run_once() -> None:
     with SessionLocal() as db:
         silent = device_service.sweep_silent_devices(db)
         print(f"Silent-device sweep: {len(silent)} device(s) flagged")
@@ -53,8 +56,27 @@ def main() -> int:
         print(f"Certification-expiry sweep: {expiring} certification(s) flagged")
 
         db.commit()
-    print("Scheduled sweeps complete.")
-    return 0
+    print(f"[{utcnow().isoformat(timespec='seconds')}] Scheduled sweeps complete.", flush=True)
+
+
+def main() -> int:
+    import argparse
+    import time
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--every", type=int, default=0,
+                        help="repeat every N seconds (0 = run once and exit, for cron/CronJob)")
+    args = parser.parse_args()
+    while True:
+        try:
+            run_once()
+        except Exception as exc:              # noqa: BLE001 - a failed pass must not stop the loop
+            print(f"sweep failed: {exc}", flush=True)
+            if not args.every:
+                return 1
+        if not args.every:
+            return 0
+        time.sleep(args.every)
 
 
 if __name__ == "__main__":

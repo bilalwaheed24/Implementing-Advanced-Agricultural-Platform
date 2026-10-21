@@ -29,6 +29,17 @@ CATEGORY_ROLES: dict[str, tuple[Role, ...]] = {
 SEVERITY_ORDER = {"INFO": 0, "WARNING": 1, "HIGH": 2, "CRITICAL": 3}
 
 
+def has_open_alert(db: Session, category: str, entity_id: str) -> bool:
+    """True when this entity already has an open alert of this category.
+
+    Scheduled sweeps run repeatedly; without this check every run would raise the same
+    alert again and bury the analyst in duplicates.
+    """
+    return db.execute(select(Alert.id).where(
+        Alert.category == category, Alert.entity_id == entity_id,
+        Alert.status == "OPEN").limit(1)).first() is not None
+
+
 def raise_alert(db: Session, category: str, severity: str, title: str, *,
                 detail: str = "", org_id: str | None = None, entity_type: str | None = None,
                 entity_id: str | None = None, reasons: Iterable[Any] = (),

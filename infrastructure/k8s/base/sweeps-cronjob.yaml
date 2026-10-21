@@ -1,0 +1,47 @@
+# Scheduled security sweeps: silent devices, agricultural data-theft scoring and
+# certification expiry. Runs scripts/scheduled_tasks.py once every 15 minutes.
+# Labelled as a backend client so the NetworkPolicy lets it reach the database.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: security-sweeps
+  namespace: absp
+  labels: { app: security-sweeps, app.kubernetes.io/part-of: absp }
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid          # never two sweeps at once
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels: { app: security-sweeps, absp/backend-client: "true" }
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: sweeps
+              image: absp-api:1.0.0
+              command: ["python", "scripts/scheduled_tasks.py"]
+              envFrom:
+                - configMapRef: { name: absp-config }
+                - secretRef: { name: absp-secrets }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: [ALL] }
+              resources:
+                requests: { cpu: "50m", memory: "128Mi" }
+                limits: { cpu: "500m", memory: "256Mi" }
+              volumeMounts:
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - { name: tmp, emptyDir: {} }
