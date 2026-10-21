@@ -147,14 +147,17 @@ def main() -> int:
           bool(spoof) and mean_spoof > mean_normal + 0.1,
           f"mean anomaly normal={mean_normal:.2f} spoof={mean_spoof:.2f}")
 
-    # 8. competitive-intelligence probing: a tenant asks for another tenant's farm records
+    # 8. competitive-intelligence probing: a farm operator asks for a distributor's shipment
+    #    records (cold-chain routes and quantities are commercially sensitive)
     admin = login(api, "admin@absp.demo")
-    status, farms = call(api, "GET", "/api/v1/farms?page_size=50", admin)
-    farm_ids = [f["id"] for f in (farms.get("items", []) if isinstance(farms, dict) else [])]
-    prober = login(api, "supply@absp.demo")
+    status, shipments = call(api, "GET", "/api/v1/supply-chain/shipments?page_size=50", admin)
+    shipment_ids = [s["id"] for s in (shipments.get("items", [])
+                                      if isinstance(shipments, dict) else [])]
+    prober = login(api, "farmer@absp.demo")
     _, me = call(api, "GET", "/api/v1/auth/me", prober)
-    statuses = [call(api, "GET", f"/api/v1/farms/{farm_id}", prober)[0] for farm_id in farm_ids]
-    check("foreign farm records stay hidden (404, no existence leak)",
+    statuses = [call(api, "GET", f"/api/v1/supply-chain/shipments/{sid}/cold-chain", prober)[0]
+                for sid in shipment_ids for _ in range(3)]
+    check("foreign shipment records stay hidden (404, no existence leak)",
           bool(statuses) and all(s == 404 for s in statuses), f"{statuses}")
     analyst = login(api, "analyst@absp.demo")
     status, verdict = call(api, "GET",
