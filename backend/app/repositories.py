@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
+from .core import request_flags
 from .core.errors import NotFound, PermissionDenied
 from .core.permissions import CROSS_TENANT_ROLES, Role
 
@@ -70,6 +71,11 @@ def get_or_404(db: Session, model: type[T], entity_id: str, role: str, org_id: s
     query = visible(model, role, org_id).where(getattr(model, "id") == entity_id)
     entity = db.execute(query).scalar_one_or_none()
     if entity is None:
+        # The caller still gets a plain 404, but if the row exists in another tenant this
+        # was a cross-tenant probe, which the data-theft detector must count.
+        if db.execute(select(getattr(model, "id")).where(
+                getattr(model, "id") == entity_id).limit(1)).first() is not None:
+            request_flags.raise_flag("cross_tenant_probe")
         raise NotFound(f"{name or model.__name__} not found")
     return entity
 
