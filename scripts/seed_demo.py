@@ -637,6 +637,13 @@ def main() -> int:
         print(f"\n  Demo password for every seeded account: {DEMO_PASSWORD}")
         print("  Accounts: " + ", ".join(email for email, *_ in USERS))
         print("\n  Device secrets written to demo_device_secrets.json (git-ignored).")
+    from app.services import fabric_bridge                              # noqa: PLC0415
+
+    if fabric_bridge.enabled():
+        fabric_bridge.flush()            # the last anchors must reach Fabric before exit
+        mirrored = fabric_bridge.status()
+        print(f"  Hyperledger Fabric mirror: {mirrored.get('mirrored_ok', 0)} recent anchor(s) "
+              f"written, {mirrored.get('mirrored_failed', 0)} failed.")
     return 0
 
 

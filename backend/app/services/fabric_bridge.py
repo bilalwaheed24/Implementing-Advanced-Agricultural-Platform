@@ -25,6 +25,7 @@ from ..core.logging_conf import app_log, log_event
 
 _recent: deque[dict[str, Any]] = deque(maxlen=25)
 _lock = threading.Lock()
+_pending: set[threading.Thread] = set()
 
 # Local ledger function -> (key prefix, identifier arg, hash arg). The key matches the local
 # ledger's own world-state key, so the two can be compared record for record.
@@ -109,9 +110,31 @@ def mirror(contract: str, function: str, args: dict[str, Any], local_tx_id: str,
     """Fire-and-forget mirror, used by ledger_client after a successful local anchor."""
     if not enabled() or key_for(contract, function, args) is None:
         return
-    thread = threading.Thread(target=anchor_now, name="fabric-mirror", daemon=True,
-                              args=(contract, function, dict(args), local_tx_id, source_msp))
+    def run() -> None:
+        try:
+            anchor_now(contract, function, dict(args), local_tx_id, source_msp)
+        finally:
+            with _lock:
+                _pending.discard(threading.current_thread())
+
+    thread = threading.Thread(target=run, name="fabric-mirror", daemon=True)
+    with _lock:
+        _pending.add(thread)
     thread.start()
+
+
+def flush(timeout: float = 60.0) -> None:
+    """Wait for background mirrors to finish. Short-lived scripts (the seeder) call this
+    before exiting, otherwise their last anchors would never reach Fabric."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while True:
+        with _lock:
+            threads = list(_pending)
+        if not threads or time.monotonic() > deadline:
+            return
+        threads[0].join(max(0.0, deadline - time.monotonic()))
 
 
 def verify(key: str, digest: str) -> dict[str, Any]:
