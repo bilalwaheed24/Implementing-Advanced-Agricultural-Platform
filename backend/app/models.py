@@ -229,6 +229,15 @@ class SatelliteScene(Base):
     cloud_cover_pct: Mapped[float] = mapped_column(Float, nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     is_simulated: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Drone / OpenDroneMap imagery (migration 0002). `index_name` says which vegetation index
+    # the ndvi_* columns hold: true NDVI needs a near-infrared band, an RGB drone camera gives
+    # VARI instead. `file_sha256` is the hash of the actual orthophoto file, anchored on the
+    # ledger so the imagery itself can be proven unaltered later.
+    source: Mapped[str | None] = mapped_column(String(20), default="SATELLITE")
+    index_name: Mapped[str | None] = mapped_column(String(10), default="NDVI")
+    file_sha256: Mapped[str | None] = mapped_column(String(64))
+    footprint_geojson: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    anchor_tx_id: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = _created()
 
 

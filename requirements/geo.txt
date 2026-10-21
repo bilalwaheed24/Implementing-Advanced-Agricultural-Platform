@@ -1,0 +1,4 @@
+# Geospatial tools used only by scripts/odm_ingest.py and scripts/make_sample_orthophoto.py
+# (OpenDroneMap orthophoto ingestion). Not part of any container image.
+rasterio==1.4.3
+numpy==2.4.4

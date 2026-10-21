@@ -209,7 +209,9 @@ def shipment_summary(db: Session, shipment_id: str) -> dict[str, Any]:
 def ingest_scene(db: Session, org_id: str, actor_id: str, actor_role: str, scene_id: str,
                  field_id: str, provider: str, captured_at: datetime, ndvi_mean: float,
                  ndvi_min: float, ndvi_max: float, cloud_cover_pct: float,
-                 checksum: str) -> SatelliteScene:
+                 checksum: str, source: str = "SATELLITE", index_name: str = "NDVI",
+                 file_sha256: str | None = None,
+                 footprint_geojson: dict[str, Any] | None = None) -> SatelliteScene:
     from ..models import Field
 
     field = db.execute(select(Field).where(Field.id == field_id, Field.org_id == org_id,
@@ -222,9 +224,7 @@ def ingest_scene(db: Session, org_id: str, actor_id: str, actor_role: str, scene
     if not (ndvi_min <= ndvi_mean <= ndvi_max):
         raise ValidationFailed("NDVI statistics are inconsistent: min <= mean <= max is required")
 
-    expected = content_hash({"scene_id": scene_id, "field_id": field_id,
-                             "captured_at": _aware(captured_at).isoformat(),
-                             "ndvi_mean": ndvi_mean})
+    expected = scene_checksum(scene_id, field_id, captured_at, ndvi_mean, file_sha256)
     if checksum != expected:
         security_event("satellite scene rejected: checksum mismatch", scene_id=scene_id)
         raise ValidationFailed("Scene checksum does not match its metadata")
@@ -232,25 +232,99 @@ def ingest_scene(db: Session, org_id: str, actor_id: str, actor_role: str, scene
     scene = SatelliteScene(scene_id=scene_id, org_id=org_id, field_id=field_id, provider=provider,
                            captured_at=_aware(captured_at), ndvi_mean=ndvi_mean,
                            ndvi_min=ndvi_min, ndvi_max=ndvi_max,
-                           cloud_cover_pct=cloud_cover_pct, checksum=checksum, is_simulated=True)
+                           cloud_cover_pct=cloud_cover_pct, checksum=checksum,
+                           # A scene that arrives with the hash of a real image file (an
+                           # OpenDroneMap orthophoto) is not simulated metadata.
+                           is_simulated=file_sha256 is None, source=source,
+                           index_name=index_name, file_sha256=file_sha256,
+                           footprint_geojson=footprint_geojson)
     db.add(scene)
     db.flush()
     audit.record(db, "satellite.ingest", actor_id=actor_id, actor_role=actor_role, org_id=org_id,
                  entity_type="SatelliteScene", entity_id=scene.id,
-                 detail={"scene_id": scene_id, "field_id": field_id})
+                 detail={"scene_id": scene_id, "field_id": field_id, "source": source,
+                         "file_sha256": file_sha256})
 
-    if ndvi_mean < 0.35 and cloud_cover_pct < 40:
+    if file_sha256:
+        from ..models import Organization
+        from . import ledger_client
+
+        organization = db.get(Organization, org_id)
+        receipt = ledger_client.submit(
+            "imagery", "AnchorScene",
+            {"scene_id": scene_id, "field": field.name, "source": source,
+             "index_name": index_name, "file_sha256": file_sha256, "content_hash": checksum},
+            organization.msp_id if organization else "FarmMSP")
+        if receipt.get("ok"):
+            scene.anchor_tx_id = receipt.get("tx_id")
+        else:
+            security_event("scene file hash not anchored", scene_id=scene_id,
+                           reason=receipt.get("error") or receipt.get("detail"))
+
+    # VARI (RGB cameras) sits lower than NDVI for the same healthy crop, so it has its own line.
+    threshold = 0.35 if index_name == "NDVI" else 0.05
+    if ndvi_mean < threshold and cloud_cover_pct < 40:
         notifications.raise_alert(
             db, "AGRONOMY", "WARNING", f"Low vegetation index on field {field.name}",
-            detail=f"NDVI mean {ndvi_mean:.2f} indicates crop stress in this field.",
+            detail=f"{index_name} mean {ndvi_mean:.2f} from {source.lower()} imagery indicates "
+                   f"crop stress in this field.",
             org_id=org_id, entity_type="Field", entity_id=field_id, open_incident=False)
     return scene
 
 
-def scene_checksum(scene_id: str, field_id: str, captured_at: datetime, ndvi_mean: float) -> str:
-    """Helper used by the simulator and tests to produce a valid checksum."""
-    return content_hash({"scene_id": scene_id, "field_id": field_id,
-                         "captured_at": _aware(captured_at).isoformat(), "ndvi_mean": ndvi_mean})
+def scene_checksum(scene_id: str, field_id: str, captured_at: datetime, ndvi_mean: float,
+                   file_sha256: str | None = None) -> str:
+    """Checksum binding a scene's metadata (and, for real imagery, its file hash) together."""
+    payload = {"scene_id": scene_id, "field_id": field_id,
+               "captured_at": _aware(captured_at).isoformat(), "ndvi_mean": ndvi_mean}
+    if file_sha256:
+        payload["file_sha256"] = file_sha256
+    return content_hash(payload)
+
+
+def fields_geojson(db: Session, org_id: str | None) -> dict[str, Any]:
+    """Every field as a GeoJSON Feature with its latest vegetation index, plus the footprint of
+    each drone orthophoto. Opens directly in QGIS (Layer > Add Vector Layer). Coordinates are
+    WGS84 (EPSG:4326), which is what the GeoJSON standard requires."""
+    from ..models import Farm, Field
+
+    field_query = select(Field).where(Field.deleted_at.is_(None))
+    scene_query = select(SatelliteScene).order_by(SatelliteScene.captured_at.desc()).limit(1000)
+    if org_id:
+        field_query = field_query.where(Field.org_id == org_id)
+        scene_query = scene_query.where(SatelliteScene.org_id == org_id)
+    scenes = list(db.execute(scene_query).scalars())
+    latest: dict[str, SatelliteScene] = {}
+    for scene in scenes:
+        latest.setdefault(scene.field_id, scene)
+    stress = {row["field_id"]: row for row in field_stress_ranking(db, org_id, limit=1000)}
+
+    features: list[dict[str, Any]] = []
+    for field in db.execute(field_query).scalars():
+        farm = db.get(Farm, field.farm_id)
+        geometry = field.boundary_geojson or (
+            {"type": "Point", "coordinates": [farm.longitude, farm.latitude]} if farm else None)
+        scene = latest.get(field.id)
+        ranked = stress.get(field.id, {})
+        features.append({"type": "Feature", "geometry": geometry, "properties": {
+            "layer": "field", "field_id": field.id, "field": field.name,
+            "farm": farm.name if farm else None, "area_ha": field.area_ha,
+            "soil_type": field.soil_type,
+            "index_name": scene.index_name if scene else None,
+            "index_mean": scene.ndvi_mean if scene else None,
+            "cloud_cover_pct": scene.cloud_cover_pct if scene else None,
+            "captured_at": scene.captured_at.isoformat() if scene else None,
+            "source": scene.source if scene else None,
+            "stress_index": ranked.get("stress_index"), "stress_level": ranked.get("level")}})
+    for scene in scenes:
+        if scene.footprint_geojson:
+            features.append({"type": "Feature", "geometry": scene.footprint_geojson, "properties": {
+                "layer": "drone_footprint", "scene_id": scene.scene_id,
+                "field_id": scene.field_id, "source": scene.source,
+                "index_name": scene.index_name, "index_mean": scene.ndvi_mean,
+                "file_sha256": scene.file_sha256, "anchor_tx_id": scene.anchor_tx_id,
+                "captured_at": scene.captured_at.isoformat()}})
+    return {"type": "FeatureCollection", "name": "absp_fields", "features": features}
 
 
 def field_stress_ranking(db: Session, org_id: str | None, limit: int = 10) -> list[dict[str, Any]]:

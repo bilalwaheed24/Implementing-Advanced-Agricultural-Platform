@@ -55,6 +55,21 @@ FARMS = [
 
 FIELD_NAMES = ["Block A", "Block B", "Block C"]
 
+
+def field_boundary(lat: float, lon: float, area_ha: float, index: int) -> dict:
+    """A square WGS84 polygon of the field's area, placed side by side east of the farm point,
+    so the fields draw as real shapes in QGIS (GeoJSON export on the Satellite page)."""
+    import math
+
+    side_m = math.sqrt(area_ha * 10_000)
+    dlat = side_m / 111_320
+    dlon = side_m / (111_320 * math.cos(math.radians(lat)))
+    west = lon + index * dlon * 1.08
+    south = lat - dlat / 2
+    ring = [[west, south], [west + dlon, south], [west + dlon, south + dlat],
+            [west, south + dlat], [west, south]]
+    return {"type": "Polygon", "coordinates": [[[round(x, 6), round(y, 6)] for x, y in ring]]}
+
 DEVICE_PLAN = [
     ("SOIL_SENSOR", "TerraProbe TP-200", "2.3.1", 900),
     ("SOIL_SENSOR", "TerraProbe TP-200", "2.1.0", 900),
@@ -470,9 +485,12 @@ def seed(reset_first: bool) -> dict:
         db.flush()
 
         for farm in farms:
-            for field_name in FIELD_NAMES:
+            for field_index, field_name in enumerate(FIELD_NAMES):
+                field_area = round(farm.area_ha / 4, 1)
                 field = Field(farm_id=farm.id, org_id=farm_org.id, name=field_name,
-                              area_ha=round(farm.area_ha / 4, 1), soil_type="Silty clay loam")
+                              area_ha=field_area, soil_type="Silty clay loam",
+                              boundary_geojson=field_boundary(farm.latitude, farm.longitude,
+                                                              field_area, field_index))
                 db.add(field)
                 fields.append(field)
         db.flush()

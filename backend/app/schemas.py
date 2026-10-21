@@ -318,6 +318,25 @@ class SatelliteSceneCreate(BaseModel):
     ndvi_max: float = Field(ge=-1, le=1)
     cloud_cover_pct: float = Field(ge=0, le=100)
     checksum: str = Field(min_length=64, max_length=64)
+    source: str = Field(default="SATELLITE", pattern=r"^(SATELLITE|DRONE)$")
+    index_name: str = Field(default="NDVI", pattern=r"^(NDVI|VARI)$")
+    file_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    footprint_geojson: dict[str, Any] | None = None
+
+    @field_validator("footprint_geojson")
+    @classmethod
+    def _footprint(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return value
+        if value.get("type") != "Polygon" or not isinstance(value.get("coordinates"), list):
+            raise ValueError("footprint_geojson must be a GeoJSON Polygon")
+        ring = value["coordinates"][0] if value["coordinates"] else []
+        if len(ring) < 4 or len(ring) > 2000:
+            raise ValueError("footprint ring must have between 4 and 2000 positions")
+        for lon, lat, *_ in ring:
+            if not (-180 <= float(lon) <= 180 and -90 <= float(lat) <= 90):
+                raise ValueError("footprint coordinates must be WGS84 longitude/latitude")
+        return value
 
 
 class SatelliteSceneOut(ORMModel):
@@ -331,6 +350,10 @@ class SatelliteSceneOut(ORMModel):
     ndvi_max: float
     cloud_cover_pct: float
     is_simulated: bool
+    source: str | None = "SATELLITE"
+    index_name: str | None = "NDVI"
+    file_sha256: str | None = None
+    anchor_tx_id: str | None = None
 
 
 # --------------------------------------------------------------------------- #
