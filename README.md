@@ -58,6 +58,7 @@ agri-biotech-security-platform/
 ├── infrastructure/     Terraform (AWS) and Kubernetes manifests
 ├── scripts/            run_local.sh, seed_demo.py, demo_flow.py, train_models.py, smoke_test.py
 ├── security/           Disclosure policy and OWASP ZAP rules
+├── fabric/             Hyperledger Fabric chaincode (absp-anchor) and the gateway bridge
 ├── .github/workflows/  CI and security pipelines
 ├── docker/             One Dockerfile per service (api, ai, ledger, frontend) + nginx config
 ├── requirements/       Per-image dependency subsets (requirements.txt is the full set)
@@ -66,7 +67,7 @@ agri-biotech-security-platform/
 ```
 
 `backend/` contains `app/` (16 routers, 11 service modules, 34-table model layer),
-`migrations/` (forward-only SQL runner) and `tests/` (469 tests, 102 of them security).
+`migrations/` (forward-only SQL runner) and `tests/` (501 tests).
 
 ## 5. Prerequisites
 
@@ -181,6 +182,49 @@ python3 iot/simulator.py --mode malformed                  # demonstrates quaran
 python3 iot/simulator.py --mode cold-chain-break --count 10 # temperature excursion
 ```
 
+### IoT attack tests
+
+```bash
+python3 scripts/iot_attack_tests.py --api-url http://127.0.0.1:8000
+```
+
+Plays nine attackers against the live, seeded API: replay, forged signature, unregistered
+device, stale timestamp, impossible values, spoofed but validly signed data, and a tenant
+probing another organisation's shipments (which must stay a plain 404 *and* be counted by the
+data-theft detector). Runs in CI as the `iot-attack-tests` job of the Security workflow.
+
+### Drone imagery (OpenDroneMap) and QGIS
+
+OpenDroneMap turns drone photos into one georeferenced map (`odm_orthophoto.tif`).
+`scripts/odm_ingest.py` hashes that file, computes a vegetation index from the pixels (NDVI
+with a near-infrared band, VARI for an ordinary RGB camera), converts the footprint to WGS84
+and ingests it as a DRONE scene; the API anchors the file's SHA-256 on the ledger.
+
+```bash
+pip install -r requirements/geo.txt                       # rasterio, for these scripts only
+docker run --rm -v "$PWD/odm:/datasets" opendronemap/odm --project-path /datasets project --fast-orthophoto
+python3 scripts/odm_ingest.py --project odm/project --field-id <field id>
+python3 scripts/make_sample_orthophoto.py --lat 42.03 --lon -93.63 --out sample.tif   # synthetic test image
+```
+
+The **Satellite & Drone** page has *Download fields for QGIS (GeoJSON)*: every field polygon
+with its latest index and stress level, plus each drone footprint. In QGIS: Layer > Add Layer >
+Add Vector Layer, then style by `index_mean`.
+
+### Hyperledger Fabric mirror
+
+`./scripts/fabric_up.sh` starts a Fabric 2.5 test network (two organisations, Raft orderer),
+deploys the `absp-anchor` chaincode with `AND('Org1MSP.peer','Org2MSP.peer')` endorsement and
+starts the bridge. With `FABRIC_BRIDGE_URL` set, every ledger anchor is also written to Fabric,
+and record and batch verification return a second verdict read from Fabric. See
+`fabric/README.md`; `./scripts/fabric_down.sh` removes it.
+
+### Scheduled security sweeps
+
+`scripts/scheduled_tasks.py` (silent devices, data-theft scoring, certification expiry) runs
+every 15 minutes as the Kubernetes CronJob `security-sweeps`, or in Docker with
+`docker compose --profile scheduler up -d`. Repeated runs do not duplicate open alerts.
+
 ## 13. Running the full demonstration
 
 ```bash
@@ -196,7 +240,7 @@ demonstration** → audit-chain verification. 25 steps, every check asserted.
 ## 14. Tests
 
 ```bash
-python3 -m pytest backend/tests/ -q                       # 469 tests
+python3 -m pytest backend/tests/ -q                       # 501 tests
 python3 -m pytest backend/tests/security/ -q               # RBAC, tenancy, injection, headers
 python3 -m pytest backend/tests/performance/ -q -s         # NFR measurements, printed
 ```
