@@ -132,6 +132,8 @@ export async function render({ id }) {
         verifyResult.replaceChildren(el('div', { class: 'card u-mt-12' }, [
           el('div', { class: 'row' }, [
             badge(result.integrity_status), badge(result.ledger_status),
+            result.fabric_status ? el('span', { class: 'hint', text: 'Hyperledger Fabric:' }) : null,
+            result.fabric_status ? badge(result.fabric_status) : null,
             el('span', { class: 'hint',
               text: `fraud score ${result.fraud_score} (${result.fraud_level})` }),
           ]),

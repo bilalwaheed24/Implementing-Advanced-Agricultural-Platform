@@ -507,6 +507,17 @@ def verify_batch(db: Session, batch: Batch, actor_id: str | None = None,
             ledger_status = "MISMATCH"
             mismatches.append(f"event:{event.id}")
 
+    # Independent second opinion from the Hyperledger Fabric network, when connected.
+    # Informational: it does not change the fraud score, which the local check already drives.
+    fabric_status = None
+    if product is not None:
+        from . import fabric_bridge                                   # noqa: PLC0415
+
+        if fabric_bridge.enabled():
+            fabric_status = fabric_bridge.verify(
+                f"batch:{batch.batch_code}", content_hash(batch_content(batch, product))
+            ).get("result")
+
     telemetry_summary: dict[str, Any] = {}
     for shipment in shipments:
         summary = telemetry_service.shipment_summary(db, shipment.id)
@@ -572,6 +583,7 @@ def verify_batch(db: Session, batch: Batch, actor_id: str | None = None,
     return {
         "integrity_status": integrity, "fraud_score": verdict["score"],
         "fraud_level": verdict["level"], "ledger_status": ledger_status,
+        "fabric_status": fabric_status,
         "ledger_mismatches": mismatches, "reasons": verdict["reasons"],
         "events_checked": len(events), "certifications_checked": len(certifications),
         "verified_at": utcnow(), "model_version": verdict["model_version"],

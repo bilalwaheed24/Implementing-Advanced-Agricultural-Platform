@@ -142,13 +142,21 @@ def test_a_database_tamper_is_caught_by_fabric_too(client, auth, bridge, traced_
 def test_ledger_writes_are_mirrored_in_the_background(bridge):
     from app.services import ledger_client
 
-    receipt = ledger_client.submit("compliance_anchor", "AnchorAuditHead",
-                                   {"seq": 10_000_000, "head_hash": "e" * 64}, "RegulatorMSP")
+    scene_id = f"MIRROR-{time.time_ns()}"
+    receipt = ledger_client.submit("imagery", "AnchorScene",
+                                   {"scene_id": scene_id, "file_sha256": "e" * 64}, "FarmMSP")
     assert receipt["ok"]
-    assert _wait_for(bridge, "audithead:latest")["contentHash"] == "e" * 64
+    assert _wait_for(bridge, f"scene:{scene_id}")["contentHash"] == "e" * 64
 
 
 def test_status_endpoint_reports_the_bridge(client, auth, bridge):
     body = client.get("/api/v1/blockchain/fabric", headers=auth("REGULATOR")).json()
     assert body["enabled"] is True and body["reachable"] is True
     assert body["bridge"]["network"] == "hyperledger-fabric"
+
+
+def test_batch_integrity_check_reports_fabric_verdict(client, auth, bridge, traced_batch, db):
+    _mirror_batch(db, traced_batch)
+    result = client.post(f"/api/v1/supply-chain/batches/{traced_batch['id']}/verify",
+                         headers=auth("SUPPLY_CHAIN_OPERATOR")).json()
+    assert result["fabric_status"] == "MATCH"

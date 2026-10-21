@@ -828,6 +828,7 @@ class VerificationResult(BaseModel):
     fraud_score: float
     fraud_level: str
     ledger_status: str
+    fabric_status: str | None = None      # MATCH / MISMATCH / ... when the Fabric mirror is on
     reasons: list[dict[str, Any]]
     events_checked: int
     certifications_checked: int
