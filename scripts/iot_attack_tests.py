@@ -56,8 +56,15 @@ def call(api: str, method: str, path: str, token: str | None = None,
 
 
 def login(api: str, email: str) -> str:
-    status, body = call(api, "POST", "/api/v1/auth/login", body={"email": email,
-                                                                  "password": PASSWORD})
+    import time
+
+    for _ in range(6):                      # honour the login rate limiter (10/min per IP)
+        status, body = call(api, "POST", "/api/v1/auth/login", body={"email": email,
+                                                                      "password": PASSWORD})
+        if status == 429:
+            time.sleep(float(body.get("retry_after", 6)) + 0.5)
+            continue
+        break
     if status != 200:
         raise SystemExit(f"login failed for {email}: {status} {body}")
     return body["access_token"]
