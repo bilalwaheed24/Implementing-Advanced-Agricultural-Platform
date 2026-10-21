@@ -41,6 +41,11 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?}
       CORS_ORIGINS: http://127.0.0.1:8080,http://localhost:8080
       DATA_DIR: /app/data
+      # Optional Hyperledger Fabric mirror. The bridge runs on the host (scripts/fabric_up.sh
+      # with BRIDGE_HOST=0.0.0.0); set COMPOSE_FABRIC_BRIDGE_URL=http://host.docker.internal:8300
+      FABRIC_BRIDGE_URL: ${COMPOSE_FABRIC_BRIDGE_URL:-}
+      FABRIC_BRIDGE_TOKEN: ${FABRIC_BRIDGE_TOKEN:-}
+    extra_hosts: ["host.docker.internal:host-gateway"]
     volumes: [absp_data:/app/data]
     depends_on:
       db: { condition: service_healthy }

@@ -106,6 +106,19 @@ _breaker = CircuitBreaker()
 
 def submit(contract: str, function: str, args: dict[str, Any], submitter_msp: str,
            retries: int = 2) -> dict[str, Any]:
+    """Submit a transaction, then mirror a successful anchor to Hyperledger Fabric when the
+    bridge is configured (background thread: Fabric can never block or fail the write)."""
+    receipt = _submit(contract, function, args, submitter_msp, retries)
+    if receipt.get("ok"):
+        from . import fabric_bridge                                   # noqa: PLC0415
+
+        fabric_bridge.mirror(contract, function, args, str(receipt.get("tx_id", "")),
+                             submitter_msp)
+    return receipt
+
+
+def _submit(contract: str, function: str, args: dict[str, Any], submitter_msp: str,
+            retries: int = 2) -> dict[str, Any]:
     """Submit a transaction. Returns {ok, ...} and never raises to the caller.
 
     A contract rejection is a business error and is reported as ok=False with the

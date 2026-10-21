@@ -124,6 +124,10 @@ class Settings:
     ledger_service_url: str = ""
     service_token: str = ""
     service_timeout_seconds: float = 30.0
+    # Optional Hyperledger Fabric mirror (fabric/gateway). Empty = disabled. Set, every ledger
+    # anchor is also written to the absp-anchor chaincode on a real Fabric network.
+    fabric_bridge_url: str = ""
+    fabric_bridge_token: str = ""
     # Where the demo device-secret file and any other writable demo artefacts go.
     # Separated from repo_root because a container's application directory is read-only
     # (docker-compose.yml sets read_only: true) — only this path needs to be a volume.
@@ -179,7 +183,8 @@ class Settings:
                     "SERVICE_TOKEN must be set to a strong value when AI_SERVICE_URL or "
                     "LEDGER_SERVICE_URL is used in production")
         for name, url in (("AI_SERVICE_URL", self.ai_service_url),
-                          ("LEDGER_SERVICE_URL", self.ledger_service_url)):
+                          ("LEDGER_SERVICE_URL", self.ledger_service_url),
+                          ("FABRIC_BRIDGE_URL", self.fabric_bridge_url)):
             if url and not url.startswith(("http://", "https://")):
                 raise ConfigurationError(f"{name} must be an http:// or https:// URL")
         if self.bcrypt_rounds < 12:
@@ -245,6 +250,8 @@ def get_settings() -> Settings:
         ledger_service_url=_env("LEDGER_SERVICE_URL", "").rstrip("/"),
         service_token=_env("SERVICE_TOKEN", ""),
         service_timeout_seconds=_env_float("SERVICE_TIMEOUT_SECONDS", 30.0),
+        fabric_bridge_url=_env("FABRIC_BRIDGE_URL", "").rstrip("/"),
+        fabric_bridge_token=_env("FABRIC_BRIDGE_TOKEN", ""),
         anomaly_alert_threshold=_env_float("ANOMALY_ALERT_THRESHOLD", 0.65),
         fraud_suspect_threshold=_env_float("FRAUD_SUSPECT_THRESHOLD", 0.30),
         fraud_fail_threshold=_env_float("FRAUD_FAIL_THRESHOLD", 0.70),

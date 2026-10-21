@@ -11,7 +11,7 @@ from ..core.permissions import P, has_permission
 from ..core.security import content_hash
 from ..models import Batch, Certification, ComplianceReport, GMOEvent, Product, SupplyChainEvent
 from ..schemas import VerifyRecordRequest
-from ..services import gmo as gmo_service, ledger_client, supplychain as supply_service
+from ..services import fabric_bridge, gmo as gmo_service, ledger_client, supplychain as supply_service
 
 router = APIRouter(prefix="/blockchain", tags=["Blockchain"], dependencies=[Depends(rate_limit)])
 
@@ -106,6 +106,7 @@ def verify_record(payload: VerifyRecordRequest, db: DbSession,
         digest, tx_id, stored = content_hash(gmo_service.event_content(event)), event.tx_id, \
             event.content_hash
         _require_visible(principal, {event.org_id})
+        fabric_key = f"gmo:{event.event_code}"
     elif entity_type == "BATCH":
         batch = db.get(Batch, payload.entity_id)
         if batch is None:
@@ -114,6 +115,7 @@ def verify_record(payload: VerifyRecordRequest, db: DbSession,
         product = db.get(Product, batch.product_id)
         digest, tx_id, stored = content_hash(supply_service.batch_content(batch, product)), \
             batch.tx_id, batch.content_hash
+        fabric_key = f"batch:{batch.batch_code}"
     elif entity_type == "SUPPLY_CHAIN_EVENT":
         event = db.get(SupplyChainEvent, payload.entity_id)
         if event is None:
@@ -122,6 +124,7 @@ def verify_record(payload: VerifyRecordRequest, db: DbSession,
         batch = db.get(Batch, event.batch_id)
         digest, tx_id, stored = content_hash(supply_service.event_content(event, batch)), \
             event.tx_id, event.content_hash
+        fabric_key = f"event:{event.id}"
     elif entity_type == "CERTIFICATION":
         certification = db.get(Certification, payload.entity_id)
         if certification is None:
@@ -129,6 +132,7 @@ def verify_record(payload: VerifyRecordRequest, db: DbSession,
         _require_visible(principal, {certification.issuer_org_id, certification.subject_org_id})
         digest, tx_id, stored = certification.content_hash or "", certification.tx_id, \
             certification.content_hash
+        fabric_key = f"cert:{certification.cert_code}"
     elif entity_type == "COMPLIANCE_REPORT":
         report = db.get(ComplianceReport, payload.entity_id)
         if report is None:
@@ -137,14 +141,32 @@ def verify_record(payload: VerifyRecordRequest, db: DbSession,
         digest = content_hash({"subject": report.subject_id, "jurisdiction": report.jurisdiction,
                                "status": report.status, "results": report.results})
         tx_id, stored = report.tx_id, report.content_hash
+        fabric_key = f"report:{report.id}"
     else:
         raise ValidationFailed(
             "entity_type must be one of GMO_EVENT, BATCH, SUPPLY_CHAIN_EVENT, "
             "CERTIFICATION, COMPLIANCE_REPORT")
 
     result = ledger_client.verify_content(digest, tx_id)
-    return {**result, "entity_type": entity_type, "entity_id": payload.entity_id,
-            "computed_hash": digest, "stored_hash": stored, "tx_id": tx_id}
+    response = {**result, "entity_type": entity_type, "entity_id": payload.entity_id,
+                "computed_hash": digest, "stored_hash": stored, "tx_id": tx_id}
+    if fabric_bridge.enabled():
+        # Second, independent opinion from the Fabric network (two organisations' peers).
+        response["fabric"] = fabric_bridge.verify(fabric_key, digest)
+    return response
+
+
+@router.get("/fabric", summary="Hyperledger Fabric mirror: connection and recent anchors")
+def fabric_status(principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_READ))]
+                  ) -> dict:
+    return fabric_bridge.status()
+
+
+@router.get("/fabric/history", summary="Every Fabric version of one anchored key")
+def fabric_history(principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_EXPLORE))],
+                   key: str = Query(min_length=3, max_length=140,
+                                    pattern=r"^[a-z_]{2,20}:[A-Za-z0-9._:-]{1,120}$")) -> dict:
+    return fabric_bridge.history(key)
 
 
 @router.get("/contracts", summary="Deployed chaincode functions and endorsement policies")

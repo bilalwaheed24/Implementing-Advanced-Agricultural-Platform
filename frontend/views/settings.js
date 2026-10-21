@@ -30,9 +30,10 @@ export async function render() {
     ]),
     el('div', { class: 'card' }, [
       el('h2', { text: 'About this deployment' }),
-      el('p', { text: 'This is a demonstration deployment. Device fleets, hazard sequences, '
-        + 'crop imagery and the permissioned ledger network are simulated, as documented in '
-        + 'docs/EXAM-LIMITATIONS.md. Cryptography, access control and audit logging are real.' }),
+      el('p', { text: 'This is a demonstration deployment. Device fleets, hazard sequences '
+        + 'and the training data are simulated, and the platform ledger orders on a single node '
+        + '(see Known limitations in the README). Cryptography, access control, audit logging, '
+        + 'drone-imagery hashing and the optional Hyperledger Fabric mirror are real.' }),
     ]),
   ]);
 }
