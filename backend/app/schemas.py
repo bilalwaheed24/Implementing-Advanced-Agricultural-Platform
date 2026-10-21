@@ -191,7 +191,7 @@ class CropOut(ORMModel):
 # Devices and telemetry
 # --------------------------------------------------------------------------- #
 DEVICE_TYPES = {"DRONE", "SOIL_SENSOR", "WEATHER_STATION", "YIELD_MONITOR",
-                "IRRIGATION_CONTROLLER", "COLD_CHAIN_SENSOR"}
+                "IRRIGATION_CONTROLLER", "COLD_CHAIN_SENSOR", "LAB_INSTRUMENT"}
 
 
 class DeviceCreate(BaseModel):

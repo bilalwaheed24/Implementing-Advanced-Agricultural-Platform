@@ -9,6 +9,7 @@ const DEVICE_TYPES = [
   ['YIELD_MONITOR', 'Yield monitor'],
   ['IRRIGATION_CONTROLLER', 'Irrigation controller'],
   ['COLD_CHAIN_SENSOR', 'Cold-chain sensor'],
+  ['LAB_INSTRUMENT', 'Lab instrument (biotech lab)'],
 ];
 
 /* The provisioning secret is returned by the API exactly once. It is rendered here rather
@@ -125,7 +126,7 @@ export const render = listView({
   actions: ({ reload, host }) => (can('device:write') ? registerForm(reload, host) : null),
   filters: [
     { key: 'device_type', label: 'Type', options: ['DRONE', 'SOIL_SENSOR', 'WEATHER_STATION',
-      'YIELD_MONITOR', 'IRRIGATION_CONTROLLER', 'COLD_CHAIN_SENSOR'] },
+      'YIELD_MONITOR', 'IRRIGATION_CONTROLLER', 'COLD_CHAIN_SENSOR', 'LAB_INSTRUMENT'] },
     { key: 'status', label: 'Status', options: ['PROVISIONED', 'ACTIVE', 'SUSPENDED',
       'QUARANTINED', 'RETIRED'] },
   ],

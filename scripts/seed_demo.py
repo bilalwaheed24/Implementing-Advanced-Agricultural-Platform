@@ -78,6 +78,9 @@ DEVICE_PLAN = [
     ("YIELD_MONITOR", "HarvestSense YM-9", "3.2.0", 10),
     ("IRRIGATION_CONTROLLER", "AquaFlow IC-12", "1.4.7", 1800),
     ("COLD_CHAIN_SENSOR", "ChillGuard CC-3", "2.0.5", 300),
+    # The cooperative's seed-testing lab (GMO PCR screening): biosafety cabinet with incubator
+    # and freezer probes. Lab equipment gets the same identity and CVE tracking as field kit.
+    ("LAB_INSTRUMENT", "BioSafe LX-2 lab monitor", "5.0.3", 300),
 ]
 
 VULNERABILITIES = [
@@ -497,12 +500,12 @@ def seed(reset_first: bool) -> dict:
 
         device_secrets: dict[str, str] = {}
         for index, (device_type, model, firmware, interval) in enumerate(DEVICE_PLAN):
-            for farm_index, farm in enumerate(farms[:2] if device_type != "COLD_CHAIN_SENSOR"
-                                              else farms[:1]):
+            single_site = device_type in {"COLD_CHAIN_SENSOR", "LAB_INSTRUMENT"}
+            for farm_index, farm in enumerate(farms[:1] if single_site else farms[:2]):
                 field = fields[farm_index * 3 + (index % 3)]
                 secret = generate_device_secret()
                 device = Device(org_id=farm_org.id, farm_id=farm.id,
-                                field_id=field.id if device_type != "COLD_CHAIN_SENSOR" else None,
+                                field_id=None if single_site else field.id,
                                 device_type=device_type, model=model,
                                 serial_number=f"SN-{device_type[:3]}-{index}{farm_index}",
                                 firmware_version=firmware, secret_enc="",
@@ -519,6 +522,12 @@ def seed(reset_first: bool) -> dict:
         db.flush()
 
         # --- device vulnerabilities (FR-E3) -------------------------------
+        lab = next(d for d in devices if d.device_type == "LAB_INSTRUMENT")
+        db.add(DeviceVulnerability(
+            device_id=lab.id, org_id=lab.org_id, cve_id="CVE-2025-40417",
+            title="Lab monitor web console allows unauthenticated setpoint changes (demo data)",
+            severity="HIGH", cvss=8.6, affected_versions="< 5.1.0", fixed_in="5.1.0",
+            status="OPEN", discovered_at=now - timedelta(days=1)))
         for offset, (cve, title, severity, cvss, affected, fixed) in enumerate(VULNERABILITIES):
             device = devices[offset % len(devices)]
             db.add(DeviceVulnerability(device_id=device.id, org_id=device.org_id, cve_id=cve,
