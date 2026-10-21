@@ -86,9 +86,13 @@ def foreign_batch(tokens):
     if not items:
         # The farm tenant owns no product in the seed; create one so the batch has a parent
         # product inside that organisation.
-        digits = uuid.uuid4().int % 10**13
+        # GTINs need a valid GS1 mod-10 check digit (weights 3,1 from the right).
+        body = f"{uuid.uuid4().int % 10**12:012d}"
+        check = (10 - sum(int(c) * (3 if i % 2 == 0 else 1)
+                          for i, c in enumerate(reversed(body))) % 10) % 10
+        digits = int(body)
         status, product = call("POST", "/supply-chain/products", tokens["FARM_OPERATOR"], {
-            "gtin": f"{digits:013d}", "name": f"PW Farm Product {digits % 1000}",
+            "gtin": f"{body}{check}", "name": f"PW Farm Product {digits % 1000}",
             "category": "Grain"})
         assert status == 201, product
         items = [product]
