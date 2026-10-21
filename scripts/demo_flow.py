@@ -28,6 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "backend"))
 
+from app.gs1 import with_check_digit  # noqa: E402
+
 PASSWORD = "DemoPassw0rd!2026"
 STEP = 0
 FAILURES: list[str] = []
@@ -293,7 +295,7 @@ def main() -> int:
     step("Product and harvest batch created with GMO lineage (FR-B2)")
     status, product = api.as_user(
         "supply@absp.demo", "POST", "/api/v1/supply-chain/products",
-        {"gtin": f"095011015{suffix:05d}", "name": f"Chilled Sweetcorn Demo {suffix}",
+        {"gtin": with_check_digit(f"095011015{suffix:04d}"), "name": f"Chilled Sweetcorn Demo {suffix}",
          "category": "Chilled vegetables", "organic_claim": False, "non_gmo_claim": False,
          "storage_temp_min_c": 0.0, "storage_temp_max_c": 4.0})
     if status != 201:

@@ -11,6 +11,8 @@ from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from . import gs1
+
 EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 GTIN_PATTERN = re.compile(r"^\d{8,14}$")
 EVENT_CODE_PATTERN = re.compile(r"^[A-Z]{2,4}-[0-9A-ZØ]{3,7}-[0-9]$")   # OECD-style unique identifier
@@ -620,8 +622,11 @@ class ProductCreate(BaseModel):
     @classmethod
     def _gtin(cls, value: str) -> str:
         value = value.strip()
-        if not GTIN_PATTERN.match(value):
-            raise ValueError("gtin must be 8 to 14 digits")
+        if not GTIN_PATTERN.match(value) or len(value) not in gs1.GTIN_LENGTHS:
+            raise ValueError("gtin must be a GTIN-8, -12, -13 or -14 (8, 12, 13 or 14 digits)")
+        if not gs1.is_valid_gtin(value):
+            raise ValueError(f"gtin check digit is wrong: expected "
+                             f"{gs1.check_digit(value[:-1])}, got {value[-1]}")
         return value
 
 

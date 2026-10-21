@@ -229,9 +229,9 @@ def provisioned_device(client, auth, farm, field):
 
 @pytest.fixture(scope="session")
 def product(db, orgs) -> Product:
-    existing = db.query(Product).filter(Product.gtin == "09999900000017").one_or_none()
+    existing = db.query(Product).filter(Product.gtin == "09999900000016").one_or_none()
     if existing is None:
-        existing = Product(org_id=orgs["SUPPLY"].id, gtin="09999900000017",
+        existing = Product(org_id=orgs["SUPPLY"].id, gtin="09999900000016",
                            name="Test Sweetcorn", category="Chilled vegetables",
                            storage_temp_min_c=0.0, storage_temp_max_c=4.0)
         db.add(existing)
