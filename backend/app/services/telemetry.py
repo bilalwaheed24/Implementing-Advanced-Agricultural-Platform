@@ -331,7 +331,11 @@ def field_stress_ranking(db: Session, org_id: str | None, limit: int = 10) -> li
     """Precision-farming insight: rank fields by vegetation index and soil moisture."""
     from ..models import Field
 
-    query = select(SatelliteScene).order_by(SatelliteScene.captured_at.desc()).limit(400)
+    # NDVI scenes only: VARI from an RGB drone camera sits on a different scale, so mixing the
+    # two would rank a healthy drone-mapped field as stressed. Drone VARI has its own alert.
+    query = (select(SatelliteScene)
+             .where((SatelliteScene.index_name == "NDVI") | SatelliteScene.index_name.is_(None))
+             .order_by(SatelliteScene.captured_at.desc()).limit(400))
     if org_id:
         query = query.where(SatelliteScene.org_id == org_id)
     latest: dict[str, SatelliteScene] = {}

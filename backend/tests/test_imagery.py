@@ -80,3 +80,9 @@ def test_geojson_export_is_tenant_scoped(client, rival_auth, field_id):
         return
     ids = {f["properties"].get("field_id") for f in response.json()["features"]}
     assert field_id not in ids
+
+
+def test_drone_vari_does_not_distort_the_ndvi_stress_ranking(client, auth, field_id):
+    ranking = client.get("/api/v1/telemetry/insights/field-stress",
+                         headers=auth("FARM_OPERATOR")).json()["ranking"]
+    assert all(row["ndvi_mean"] != 0.21 for row in ranking if row["field_id"] == field_id)

@@ -11,7 +11,7 @@ const NAV = [
     { path: '#/farms', label: 'Farms & Fields', permission: 'farm:read' },
     { path: '#/devices', label: 'Devices', permission: 'device:read' },
     { path: '#/telemetry', label: 'Telemetry', permission: 'telemetry:read' },
-    { path: '#/satellite', label: 'Satellite & NDVI', permission: 'telemetry:read' },
+    { path: '#/satellite', label: 'Satellite & Drone', permission: 'telemetry:read' },
   ] },
   { group: 'Intelligence', items: [
     { path: '#/ai', label: 'AI Insights', permission: 'ai:read' },
