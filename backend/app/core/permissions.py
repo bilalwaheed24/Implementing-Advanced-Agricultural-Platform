@@ -113,9 +113,13 @@ ROLE_PERMISSIONS: dict[Role, frozenset[P]] = {
         P.SUPPLY_VERIFY, P.AUDIT_ANCHOR,
     }),
 
+    # INCIDENT_READ: a farm operator is notified of, and contains, incidents about its own
+    # devices; it could already read the alerts behind them. Not cross-tenant, so
+    # repositories.visible() scopes every incident read to the operator's organisation.
     Role.FARM_OPERATOR: frozenset({
         P.FARM_READ, P.FARM_WRITE, P.DEVICE_READ, P.DEVICE_WRITE, P.DEVICE_CONTAIN,
         P.TELEMETRY_READ, P.TELEMETRY_WRITE, P.AI_READ, P.AI_RUN, P.ALERT_READ, P.ALERT_WRITE,
+        P.INCIDENT_READ,
         P.GMO_READ, P.SUPPLY_READ, P.SUPPLY_WRITE, P.SUPPLY_VERIFY, P.CERT_READ,
         P.BLOCKCHAIN_READ, P.ORG_READ,
     }),

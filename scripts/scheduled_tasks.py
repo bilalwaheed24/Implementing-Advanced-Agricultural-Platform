@@ -21,6 +21,7 @@ from app.core.security import utcnow                            # noqa: E402
 from app.models import Certification                             # noqa: E402
 from app.services import devices as device_service               # noqa: E402
 from app.services import notifications, security_ops             # noqa: E402
+from app.services import telemetry as telemetry_service          # noqa: E402
 from sqlalchemy import select                                    # noqa: E402
 
 
@@ -48,6 +49,9 @@ def run_once() -> None:
     with SessionLocal() as db:
         silent = device_service.sweep_silent_devices(db)
         print(f"Silent-device sweep: {len(silent)} device(s) flagged")
+
+        rescored = telemetry_service.rescore_unscored(db)
+        print(f"Telemetry rescore: {rescored} unscored reading(s) scored")
 
         theft = security_ops.sweep_data_theft(db)
         print(f"Data-theft sweep: {len(theft)} principal(s) flagged")

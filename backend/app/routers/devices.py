@@ -13,7 +13,7 @@ from ..models import Device, DeviceVulnerability
 from ..repositories import get_or_404, paginate, visible
 from ..schemas import (DeviceAction, DeviceCreate, DeviceOut, DeviceProvisionOut, Page,
                        VulnerabilityCreate, VulnerabilityOut)
-from ..services import devices as device_service
+from ..services import devices as device_service, telemetry as telemetry_service
 
 router = APIRouter(prefix="/devices", tags=["Devices"], dependencies=[Depends(rate_limit)])
 
@@ -180,5 +180,8 @@ def sweep_health(db: DbSession,
     # the request cannot raise alerts inside another tenant.
     scope = None if principal.is_cross_tenant else principal.org_id
     silent = device_service.sweep_silent_devices(db, org_id=scope)
+    # Readings stored unscored while the AI service was unavailable are scored now.
+    rescored = telemetry_service.rescore_unscored(db, org_id=scope)
     db.commit()
-    return {"silent_devices": [d.id for d in silent], "count": len(silent)}
+    return {"silent_devices": [d.id for d in silent], "count": len(silent),
+            "rescored_readings": rescored}

@@ -36,7 +36,12 @@ def dashboard(db: DbSession, principal: CurrentUser) -> dict:
     if has_permission(principal.role, P.DEVICE_READ):
         tiles["devices"] = {
             "total": _count(db, Device, org_id),
-            "active": _count(db, Device, org_id, Device.status == "ACTIVE"),
+            # "active" means active and reporting: a device the health sweep found silent
+            # keeps status ACTIVE (so it can come back) but is counted as offline instead.
+            "active": _count(db, Device, org_id, Device.status == "ACTIVE",
+                             Device.offline_since.is_(None)),
+            "offline": _count(db, Device, org_id, Device.status == "ACTIVE",
+                              Device.offline_since.is_not(None)),
             "quarantined": _count(db, Device, org_id, Device.status == "QUARANTINED"),
         }
     if has_permission(principal.role, P.TELEMETRY_READ):

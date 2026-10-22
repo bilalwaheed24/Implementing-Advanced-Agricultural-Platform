@@ -170,6 +170,11 @@ class Device(Base):
     auth_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     quarantine_reason: Mapped[str | None] = mapped_column(Text)
+    # Set by the health sweep when an ACTIVE device has missed several reporting intervals,
+    # cleared by its next accepted reading. The lifecycle status stays ACTIVE (the device must
+    # still be able to authenticate to come back), so "active and reporting" is
+    # status == ACTIVE and offline_since IS NULL.
+    offline_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime] = _created()
@@ -276,6 +281,12 @@ class Alert(Base):
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     incident_id: Mapped[str | None] = mapped_column(ForeignKey("incidents.id"), index=True)
+    # Discriminator within category + entity ("low_battery", "silent", "anomaly", ...). An
+    # unresolved alert with the same (category, entity_id, kind) absorbs a repeat occurrence
+    # instead of a new row being raised (notifications.raise_alert).
+    kind: Mapped[str | None] = mapped_column(String(80), index=True)
+    occurrences: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _created()
 
 
@@ -289,6 +300,13 @@ class Incident(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     root_cause: Mapped[str | None] = mapped_column(Text)
     opened_by: Mapped[str | None] = mapped_column(String(36))
+    # What the incident is about: the category of the alert that opened it, and the record
+    # that alert was raised against (a Device, a SequenceScreening, a Batch, ...).
+    category: Mapped[str | None] = mapped_column(String(40), index=True)
+    entity_type: Mapped[str | None] = mapped_column(String(40))
+    entity_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    source_alert_id: Mapped[str | None] = mapped_column(String(36))
+    assignee_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()

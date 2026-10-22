@@ -15,7 +15,7 @@ from ..core.errors import Conflict, NotFound, ValidationFailed
 from ..core.logging_conf import security_event
 from ..core.security import (decrypt_at_rest, encrypt_at_rest, ensure_aware,
                              generate_device_secret, utcnow)
-from ..models import Device, DeviceVulnerability, Farm, Field
+from ..models import Device, DeviceVulnerability, Farm, Field, Incident
 from . import audit, notifications
 
 LIFECYCLE: dict[str, set[str]] = {
@@ -88,10 +88,21 @@ def transition(db: Session, device: Device, new_status: str, actor_id: str, acto
                  org_id=device.org_id, entity_type="Device", entity_id=device.id,
                  detail={"from": current, "to": new_status, "reason": reason})
     if new_status == "QUARANTINED":
-        notifications.raise_alert(
+        # raise_alert attaches this to the incident already active for the device (the one
+        # whose anomaly prompted the quarantine) rather than opening a second one.
+        alert = notifications.raise_alert(
             db, "DEVICE_AUTH", "HIGH", f"Device {device.id[:8]} quarantined",
             detail=f"{device.device_type} quarantined: {reason}. Its credential has been revoked.",
-            org_id=device.org_id, entity_type="Device", entity_id=device.id)
+            org_id=device.org_id, entity_type="Device", entity_id=device.id, kind="quarantined")
+        incident = db.get(Incident, alert.incident_id) if alert.incident_id else None
+        if incident is not None and incident.status in {"OPEN", "TRIAGED"}:
+            incident.status = "CONTAINED"
+            db.flush()
+            notifications.add_incident_event(
+                db, incident.id, "CONTAINED",
+                f"Device {device.id[:8]} quarantined and its credential revoked: {reason}",
+                actor_id)
+            notifications.sync_alerts_from_incident(db, incident, actor_id)
     return device
 
 
@@ -143,21 +154,35 @@ def record_auth_failure(db: Session, device: Device) -> None:
             f"Repeated authentication failures from device {device.id[:8]}",
             detail=f"{device.auth_failures} consecutive failures. Possible spoofing attempt or "
                    f"a device holding a stale credential.",
-            org_id=device.org_id, entity_type="Device", entity_id=device.id)
+            org_id=device.org_id, entity_type="Device", entity_id=device.id,
+            kind="auth_failures")
     db.commit()
+
+
+LOW_BATTERY_PCT = 15
 
 
 def update_health(db: Session, device: Device, readings: dict[str, Any]) -> None:
     device.last_seen_at = utcnow()
     device.auth_failures = 0
+    if device.offline_since is not None:
+        # Reporting again: clear the sweep's flag and close its "stopped reporting" alert,
+        # which no longer describes the device.
+        device.offline_since = None
+        silent_alert = notifications.find_open_alert(db, "DEVICE_HEALTH", device.id, "silent")
+        if silent_alert is not None:
+            notifications.resolve(db, silent_alert)
     battery = readings.get("battery_pct")
     if isinstance(battery, (int, float)) and not isinstance(battery, bool):
         device.battery_pct = float(battery)
-        if device.battery_pct < 15:
+        if device.battery_pct < LOW_BATTERY_PCT:
+            # One alert per low-battery episode: every later low reading is folded into it
+            # (occurrences/last_seen_at) instead of raising and notifying again.
             notifications.raise_alert(
                 db, "DEVICE_HEALTH", "WARNING", f"Low battery on device {device.id[:8]}",
                 detail=f"Battery at {device.battery_pct:.0f}%.", org_id=device.org_id,
-                entity_type="Device", entity_id=device.id, open_incident=False)
+                entity_type="Device", entity_id=device.id, open_incident=False,
+                kind="low_battery")
     signal = readings.get("signal_dbm")
     if isinstance(signal, (int, float)) and not isinstance(signal, bool):
         device.signal_dbm = float(signal)
@@ -185,14 +210,20 @@ def sweep_silent_devices(db: Session, missed_intervals: int = 3,
         threshold = timedelta(seconds=device.interval_seconds * missed_intervals)
         if now - last_seen > threshold:
             silent.append(device)
-            if notifications.has_open_alert(db, "DEVICE_HEALTH", device.id):
-                continue
+            # Flag it, so "active" counts stop including devices that are not reporting. The
+            # status stays ACTIVE: the device must still authenticate to come back.
+            if device.offline_since is None:
+                device.offline_since = last_seen
+            # Matched on kind: an open low-battery alert no longer hides this one, and an
+            # unresolved (even acknowledged) "stopped reporting" alert absorbs the repeat —
+            # its detail is refreshed with the current silence — instead of a new alert.
             notifications.raise_alert(
                 db, "DEVICE_HEALTH", "WARNING", f"Device {device.id[:8]} has stopped reporting",
                 detail=f"No telemetry for {int((now - last_seen).total_seconds() // 60)} minutes "
                        f"(expected every {device.interval_seconds}s).",
                 org_id=device.org_id, entity_type="Device", entity_id=device.id,
-                open_incident=False)
+                open_incident=False, kind="silent")
+    db.flush()
     return silent
 
 
@@ -220,7 +251,8 @@ def add_vulnerability(db: Session, device: Device, actor_id: str, actor_role: st
         notifications.raise_alert(
             db, "DEVICE_HEALTH", severity,
             f"{severity} vulnerability {cve_id} on device {device.id[:8]}",
-            detail=title, org_id=device.org_id, entity_type="Device", entity_id=device.id)
+            detail=title, org_id=device.org_id, entity_type="Device", entity_id=device.id,
+            kind=f"vulnerability:{cve_id}"[:80])
     return vulnerability
 
 
@@ -237,6 +269,12 @@ def remediate_vulnerability(db: Session, vulnerability: DeviceVulnerability, act
                  org_id=vulnerability.org_id, entity_type="DeviceVulnerability",
                  entity_id=vulnerability.id,
                  detail={"cve_id": vulnerability.cve_id, "firmware": new_firmware})
+    # The finding is fixed, so the alert it raised is too (and its incident, if that was the
+    # last thing open on it — notifications.resolve).
+    alert = notifications.find_open_alert(db, "DEVICE_HEALTH", vulnerability.device_id,
+                                          f"vulnerability:{vulnerability.cve_id}"[:80])
+    if alert is not None:
+        notifications.resolve(db, alert, actor_id)
     return vulnerability
 
 

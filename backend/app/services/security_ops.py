@@ -8,8 +8,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..core.errors import Conflict, ValidationFailed
+from ..core.permissions import CROSS_TENANT_ROLES, P, has_permission
 from ..core.security import ensure_aware as _aware, utcnow
-from ..models import AccessRecord, Alert, Device, Incident, IncidentEvent
+from ..models import AccessRecord, Alert, Device, Incident, IncidentEvent, User
 from . import audit, notifications
 
 # Signal weights. Configuration, not constants buried in branches.
@@ -138,11 +139,8 @@ def sweep_data_theft(db: Session, hours: int = 24,
         verdict = evaluate_principal(db, principal_id, org_id)
         if verdict["score"] >= DETECTION_THRESHOLD:
             findings.append({"principal_id": principal_id, **verdict})
-            existing = db.execute(
-                select(Alert).where(Alert.category == "DATA_THEFT",
-                                    Alert.entity_id == principal_id,
-                                    Alert.status == "OPEN")).scalar_one_or_none()
-            if existing is None:
+            # Any unresolved alert counts: an acknowledged one is being looked at already.
+            if not notifications.has_open_alert(db, "DATA_THEFT", principal_id):
                 notifications.raise_alert(
                     db, "DATA_THEFT", verdict["level"],
                     f"Possible agricultural data exfiltration by principal {principal_id[:8]}",
@@ -170,8 +168,21 @@ INCIDENT_TRANSITIONS: dict[str, frozenset[str]] = {
 
 def update_incident(db: Session, incident: Incident, actor_id: str, actor_role: str,
                     status: str | None, root_cause: str | None,
-                    note: str | None) -> Incident:
+                    note: str | None, assignee_id: str | None = None) -> Incident:
     changes: dict[str, Any] = {}
+    if assignee_id is not None:
+        # "" unassigns. An assignee must be an active account that can see the incident:
+        # a member of its organisation, or a platform-wide oversight role.
+        if assignee_id:
+            assignee = db.get(User, assignee_id)
+            if assignee is None or assignee.status != "ACTIVE" or assignee.deleted_at is not None \
+                    or not (assignee.org_id == incident.org_id or incident.org_id is None
+                            or assignee.role in {r.value for r in CROSS_TENANT_ROLES}):
+                raise ValidationFailed("Assignee must be an active user who can see this incident")
+            if not has_permission(assignee.role, P.INCIDENT_READ):
+                raise ValidationFailed("Assignee's role cannot read incidents")
+        changes["assignee_id"] = {"from": incident.assignee_id, "to": assignee_id or None}
+        incident.assignee_id = assignee_id or None
     if status:
         if status not in INCIDENT_STATES:
             raise ValidationFailed(f"status must be one of {sorted(INCIDENT_STATES)}")
@@ -191,8 +202,22 @@ def update_incident(db: Session, incident: Incident, actor_id: str, actor_role: 
         incident.root_cause = root_cause
         changes["root_cause"] = True
     db.flush()
-    notifications.add_incident_event(db, incident.id, status or "UPDATED",
-                                     note or root_cause or "Incident updated", actor_id)
+    if "status" in changes and changes["status"]["from"] != changes["status"]["to"]:
+        # Status flows to the alerts the incident was opened from (and those attached since),
+        # so a resolved incident does not leave its alerts open on the alert board.
+        changes["alerts_synced"] = notifications.sync_alerts_from_incident(db, incident,
+                                                                           actor_id)
+    if status:
+        action = status
+    elif note and not root_cause and "assignee_id" not in changes:
+        action = "NOTE"
+    elif "assignee_id" in changes and not root_cause:
+        action = "ASSIGNED"
+    else:
+        action = "UPDATED"
+    default_detail = root_cause or ("Assignee changed" if "assignee_id" in changes
+                                    else "Incident updated")
+    notifications.add_incident_event(db, incident.id, action, note or default_detail, actor_id)
     audit.record(db, "incident.update", actor_id=actor_id, actor_role=actor_role,
                  org_id=incident.org_id, entity_type="Incident", entity_id=incident.id,
                  detail=changes)

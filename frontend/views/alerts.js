@@ -1,36 +1,45 @@
 import { el, api, badge, fmtDate, humanizeText, titleCase, toast,
          can } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
+import { entityLink, incidentLink } from '/static/views/entity-links.js';
+
+async function alertAction(row, action, done, reload) {
+  try {
+    await api(`/security/alerts/${row.id}/${action}`, { method: 'POST' });
+    toast(done, 'ok');
+    reload();
+  } catch (error) { toast(error.message, 'error'); }
+}
 
 function actionButtons(row, reload) {
-  // Permission- and state-aware exactly as before: only an open alert can be acted on,
-  // and only by a principal holding alert:write. The difference is that the current
-  // state is no longer communicated by the absence of buttons — it has its own column.
-  if (!can('alert:write') || row.status !== 'OPEN') {
+  // Mirrors the server's alert lifecycle (notifications.ALERT_TRANSITIONS): an OPEN alert
+  // may be acknowledged or resolved, an ACKNOWLEDGED one may still be resolved, and a
+  // RESOLVED one is final. Only a principal holding alert:write is offered either.
+  if (!can('alert:write') || row.status === 'RESOLVED') {
     return el('span', { class: 'hint', text: '—' });
   }
-  return el('div', { class: 'row' }, [
-    el('button', { text: 'Acknowledge', onClick: async () => {
-      try {
-        await api(`/security/alerts/${row.id}/acknowledge`, { method: 'POST' });
-        toast('Alert acknowledged', 'ok');
-        reload();
-      } catch (error) { toast(error.message, 'error'); }
-    } }),
-    el('button', { text: 'Resolve', onClick: async () => {
-      try {
-        await api(`/security/alerts/${row.id}/resolve`, { method: 'POST' });
-        toast('Alert resolved', 'ok');
-        reload();
-      } catch (error) { toast(error.message, 'error'); }
-    } }),
-  ]);
+  const buttons = [];
+  if (row.status === 'OPEN') {
+    buttons.push(el('button', { text: 'Acknowledge',
+      onClick: () => alertAction(row, 'acknowledge', 'Alert acknowledged', reload) }));
+  }
+  buttons.push(el('button', { text: 'Resolve', title: row.incident_id
+    ? 'Resolving the last open alert on an incident also resolves the incident' : null,
+    onClick: () => alertAction(row, 'resolve', 'Alert resolved', reload) }));
+  return el('div', { class: 'row' }, buttons);
+}
+
+function occurrenceHint(row) {
+  if (!row.occurrences || row.occurrences < 2) return null;
+  return el('div', { class: 'hint', text: `Seen ${row.occurrences} times, last `
+    + `${fmtDate(row.last_seen_at)}` });
 }
 
 export const render = listView({
   title: 'Security and agronomy alerts',
   subtitle: 'Raised by AI scoring, deterministic rules and scheduled sweeps. '
-    + 'Every alert carries the reasons that produced it.',
+    + 'Every alert carries the reasons that produced it. A condition that keeps recurring '
+    + 'is counted on its open alert rather than raised again.',
   endpoint: '/security/alerts',
   filters: [
     { key: 'severity', label: 'Severity', options: ['INFO', 'WARNING', 'HIGH', 'CRITICAL'] },
@@ -40,7 +49,8 @@ export const render = listView({
         'CERTIFICATION', 'AGRONOMY'] },
     ],
   columns: [
-    { label: 'Raised', render: (row) => fmtDate(row.created_at) },
+    { label: 'Raised', render: (row) => el('div', {}, [fmtDate(row.created_at),
+      occurrenceHint(row)]) },
     { label: 'Severity', render: (row) => badge(row.severity) },
     { label: 'Category', render: (row) => titleCase(row.category) },
     { label: 'Title', render: (row) => el('div', {}, [
@@ -50,6 +60,10 @@ export const render = listView({
     { label: 'Reasons', render: (row) => el('span', { class: 'hint',
         text: humanizeText((row.reasons || []).slice(0, 2)
           .map((r) => (typeof r === 'string' ? r : r.rule || '')).join('; ')) }) },
+    { label: 'Source', render: (row) => el('div', {}, [
+        entityLink(row.entity_type, row.entity_id) || el('span', { class: 'hint', text: '—' }),
+        row.incident_id ? el('div', {}, [incidentLink(row.incident_id)]) : null,
+      ]) },
     { label: 'Status', render: (row) => badge(row.status) },
     { label: 'Actions', render: (row, ctx) => actionButtons(row, ctx.reload) },
   ],

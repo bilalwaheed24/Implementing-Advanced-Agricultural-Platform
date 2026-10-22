@@ -242,9 +242,11 @@ class DeviceOut(ORMModel):
     device_type: str
     model: str
     firmware_version: str
+    serial_number: str | None = None
     status: str
     interval_seconds: int
     last_seen_at: datetime | None = None
+    offline_since: datetime | None = None
     battery_pct: float | None = None
     signal_dbm: float | None = None
     auth_failures: int
@@ -415,6 +417,9 @@ class AlertOut(ORMModel):
     reasons: list[Any]
     status: str
     incident_id: str | None = None
+    kind: str | None = None
+    occurrences: int = 1
+    last_seen_at: datetime | None = None
     created_at: datetime
 
 
@@ -425,6 +430,11 @@ class IncidentOut(ORMModel):
     status: str
     summary: str
     root_cause: str | None = None
+    category: str | None = None
+    entity_type: str | None = None
+    entity_id: str | None = None
+    source_alert_id: str | None = None
+    assignee_id: str | None = None
     created_at: datetime
 
 
@@ -432,6 +442,8 @@ class IncidentUpdate(BaseModel):
     status: str | None = None
     root_cause: str | None = Field(default=None, max_length=2000)
     note: str | None = Field(default=None, max_length=2000)
+    # A user id to assign, or "" to unassign. Omitted leaves the assignee unchanged.
+    assignee_id: str | None = Field(default=None, max_length=36)
 
 
 class NotificationOut(ORMModel):

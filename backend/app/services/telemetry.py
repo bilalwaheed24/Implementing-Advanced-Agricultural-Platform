@@ -135,11 +135,15 @@ def _score_and_persist(db: Session, device: Device, record: Telemetry,
     if verdict["score"] >= settings.anomaly_alert_threshold:
         if record.quality == "OK":
             record.quality = "SUSPECT"
+        # kind="anomaly": while this device's anomaly alert is unresolved, further anomalous
+        # readings are counted on it (and noted on its incident) instead of each raising a
+        # new alert and incident — a faulty sensor otherwise produced ~96 of each a day.
         notifications.raise_alert(
             db, "DEVICE_ANOMALY", verdict["level"],
             f"Anomalous telemetry from {device.device_type} {device.id[:8]}",
             detail="; ".join(verdict["reasons"][:3]), org_id=device.org_id,
-            entity_type="Device", entity_id=device.id, reasons=verdict["reasons"])
+            entity_type="Device", entity_id=device.id, reasons=verdict["reasons"],
+            kind="anomaly")
     db.flush()
     return verdict
 
@@ -387,3 +391,44 @@ def score_pending(telemetry_id: str) -> None:
             _ = verdict
     except Exception:                                    # noqa: BLE001
         security_event("deferred anomaly scoring failed", telemetry_id=telemetry_id)
+
+
+def rescore_unscored(db: Session, limit: int = 200, org_id: str | None = None,
+                     min_age: timedelta = timedelta(minutes=2)) -> int:
+    """Score stored readings that were never scored (the AI service was down at ingest, or a
+    deferred task was lost). Run by the health sweep; returns how many were scored.
+
+    Readings younger than `min_age` are left to their own background task. The pass stops at
+    the first ServiceUnavailable: the service is still down, and the rest wait for the next
+    sweep. The caller commits.
+    """
+    settings = get_settings()
+    query = (select(Telemetry).where(Telemetry.anomaly_score.is_(None),
+                                     Telemetry.received_at <= utcnow() - min_age)
+             .order_by(Telemetry.recorded_at.asc()).limit(limit))
+    if org_id is not None:
+        query = query.where(Telemetry.org_id == org_id)
+    scored = 0
+    for record in list(db.execute(query).scalars()):
+        device = db.get(Device, record.device_id)
+        if device is None:
+            continue
+        previous = db.execute(
+            select(Telemetry).where(Telemetry.device_id == device.id,
+                                    Telemetry.recorded_at < record.recorded_at)
+            .order_by(Telemetry.recorded_at.desc()).limit(1)).scalars().first()
+        try:
+            readings = decrypt_payload(record)
+            problems = ai_client.validate_readings(device.device_type, readings)
+            _score_and_persist(db, device, record, readings,
+                               previous.summary if previous else None, settings, problems)
+        except ai_client.service_http.ServiceUnavailable:
+            security_event("rescore paused: anomaly scoring is still unavailable",
+                           telemetry_id=record.id)
+            break
+        except Exception:                                # noqa: BLE001 - one bad row must not stop the pass
+            security_event("rescore of a stored reading failed", telemetry_id=record.id)
+            continue
+        scored += 1
+    db.flush()
+    return scored

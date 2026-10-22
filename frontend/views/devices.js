@@ -17,9 +17,12 @@ const DEVICE_TYPES = [
 function secretNotice(device, secret) {
   const value = el('code', { class: 'mono', text: secret });
   const panel = el('div', { class: 'card u-mb-16', role: 'alert' }, [
-    el('h3', { text: `Secret for ${titleCase(device.device_type)} ${device.id.slice(0, 8)}` }),
+    el('h3', { text: `Secret for ${device.model} ${device.id.slice(0, 8)}` }),
     el('p', { class: 'hint', text: 'This is the only time this value is shown. Copy it into '
       + 'the device now — if it is lost the device must have its secret rotated.' }),
+    el('p', { class: 'hint' }, ['The device is Provisioned: its telemetry is refused until '
+      + 'you ', el('a', { href: `#/device/${device.id}`, text: 'open it and press Activate' }),
+      '.']),
     value,
     el('div', { class: 'row' }, [
       el('button', { text: 'Copy', onClick: async () => {
@@ -121,10 +124,49 @@ async function postureCard() {
   }
 }
 
-export const render = listView({
+/* Farm and field names for the list, loaded once per render. A role without farm:read sees
+ * short ids instead. */
+const places = { farms: new Map(), fields: new Map() };
+
+async function loadPlaces() {
+  places.farms.clear();
+  places.fields.clear();
+  if (!can('farm:read')) return;
+  const [farms, fields] = await Promise.all([
+    api('/farms?page=1&page_size=200').catch(() => ({ items: [] })),
+    api('/fields?page=1&page_size=200').catch(() => ({ items: [] })),
+  ]);
+  for (const row of farms.items || []) places.farms.set(row.id, row.name);
+  for (const row of fields.items || []) places.fields.set(row.id, row.name);
+}
+
+function locationCell(row) {
+  const farm = places.farms.get(row.farm_id);
+  const fieldName = row.field_id ? places.fields.get(row.field_id) : null;
+  if (!farm) return el('span', { class: 'mono hint', text: row.farm_id.slice(0, 8) });
+  return el('div', {}, [
+    el('a', { href: `#/farm/${row.farm_id}`, text: farm }),
+    el('div', { class: 'hint', text: row.field_id ? (fieldName || 'Field') : 'Whole farm' }),
+  ]);
+}
+
+function statusCell(row) {
+  if (row.status === 'PROVISIONED') {
+    return el('div', {}, [badge(row.status), el('div', { class: 'hint',
+      text: 'Load its secret, then open it and press Activate' })]);
+  }
+  if (row.status === 'ACTIVE' && row.offline_since) {
+    return el('div', {}, [badge(row.status), ' ', badge('OFFLINE', 'warning'),
+      el('div', { class: 'hint', text: `Silent since ${fmtDate(row.offline_since)}` })]);
+  }
+  return badge(row.status);
+}
+
+const listing = listView({
   title: 'Device trust centre',
   subtitle: 'Every device holds a cryptographic identity. Telemetry is HMAC-authenticated, '
-    + 'replay-protected and range-validated before it is stored.',
+    + 'replay-protected and range-validated before it is stored. A newly registered device '
+    + 'is Provisioned: it is activated from its own page once its secret is loaded onto it.',
   endpoint: '/devices',
   extra: postureCard,
   actions: ({ reload, host }) => (can('device:write') ? registerForm(reload, host) : null),
@@ -135,12 +177,14 @@ export const render = listView({
       'QUARANTINED', 'RETIRED'] },
   ],
   columns: [
-    { label: 'Device', render: (row) => el('a', { href: `#/device/${row.id}`,
-      class: 'mono', text: row.id.slice(0, 8) }) },
+    { label: 'Device', render: (row) => el('div', {}, [
+      el('a', { href: `#/device/${row.id}`, text: row.model }),
+      el('div', { class: 'hint mono', text: row.id.slice(0, 8) }),
+    ]) },
     { label: 'Type', render: (row) => titleCase(row.device_type) },
-    { label: 'Model', key: 'model' },
+    { label: 'Location', render: (row) => locationCell(row) },
     { label: 'Firmware', render: (row) => el('span', { class: 'mono', text: row.firmware_version }) },
-    { label: 'Status', render: (row) => badge(row.status) },
+    { label: 'Status', render: (row) => statusCell(row) },
     { label: 'Battery', numeric: true, render: (row) =>
       row.battery_pct === null ? '—' : `${fmtNum(row.battery_pct, 0)}%` },
     { label: 'Auth failures', numeric: true, render: (row) => row.auth_failures },
@@ -149,3 +193,8 @@ export const render = listView({
   emptyTitle: 'No devices registered',
   emptyMessage: 'Register a device to receive its one-time secret, then activate it.',
 });
+
+export async function render(context = {}) {
+  await loadPlaces();
+  return listing(context);
+}
