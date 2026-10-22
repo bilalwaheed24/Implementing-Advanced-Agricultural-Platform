@@ -293,3 +293,12 @@ svg.chart { width: 100%; height: auto; display: block; }
     .lookup-form input { flex: 1; }
   .u-text-center { text-align: center; }
 .u-block-mb-12 { display: block; margin-bottom: 12px; }
+
+/* Consumer label on the batch page: QR plus the typed code, printable on its own. */
+.qr-label { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.qr-image { width: 148px; height: 148px; background: #fff; border-radius: 4px; }
+@media print {
+  body * { visibility: hidden; }
+  .print-area, .print-area * { visibility: visible; color: #000; }
+  .print-area { position: absolute; left: 0; top: 0; padding: 12mm; }
+}

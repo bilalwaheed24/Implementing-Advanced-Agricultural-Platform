@@ -74,6 +74,11 @@ class TestSupplyChain:
         open_form(page, "Create a batch")
         page.fill("form input[placeholder*='MAIZE-2026-014']", code)
         page.locator("form select").first.select_option(index=1)
+        # Provenance is declared by the operator, never prefilled.
+        page.fill("form input[placeholder='e.g. 12000']", "1000")
+        page.fill("form input[placeholder='e.g. Iowa']", "Iowa")
+        page.fill("form input[placeholder='ISO code, e.g. US']", "US")
+        page.fill("form input[type=date]", "2026-10-01")
         page.get_by_role("button", name="Create batch").click()
         page.wait_for_timeout(3000)
         go(page, "#/batches")

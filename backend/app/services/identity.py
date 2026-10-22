@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..core.config import get_settings
 from ..core.errors import AccountLocked, AuthError, Conflict, NotFound, ValidationFailed
 from ..core.logging_conf import security_event
-from ..core.permissions import SELF_REGISTRATION_ROLE, Role
+from ..core.permissions import APPROVAL_REQUIRED_ROLES, SELF_REGISTRATION_ROLE, Role
 from ..core.security import (create_access_token, create_refresh_token, decode_token,
                              ensure_aware, hash_password, new_id, utcnow,
                              validate_password_strength, verify_password)
@@ -58,6 +58,33 @@ def register(db: Session, email: str, full_name: str, password: str,
                          "requested_role": (requested_role or "")[:40],
                          "note": "self-registration grants no access until approved"})
     _ = settings
+    return user
+
+
+def create_user(db: Session, email: str, full_name: str, password: str, org_id: str,
+                role: str, actor_id: str, actor_role: str) -> User:
+    """Administrator onboarding. Ordinary roles are ACTIVE at once; the privileged roles in
+    APPROVAL_REQUIRED_ROLES are created PENDING and still need an explicit approval."""
+    try:
+        role_enum = Role(role.upper())
+    except ValueError as exc:
+        raise ValidationFailed(f"Unknown role {role}") from exc
+    if db.execute(select(User).where(User.email == email)).scalar_one_or_none():
+        raise Conflict("A user with this email address already exists")
+    organization = db.execute(
+        select(Organization).where(Organization.id == org_id,
+                                   Organization.is_active.is_(True))).scalar_one_or_none()
+    if organization is None:
+        raise ValidationFailed("Unknown or inactive organisation")
+    validate_password_strength(password)
+    status = "PENDING" if role_enum in APPROVAL_REQUIRED_ROLES else "ACTIVE"
+    user = User(email=email, full_name=full_name, password_hash=hash_password(password),
+                role=role_enum.value, org_id=org_id, status=status)
+    db.add(user)
+    db.flush()
+    audit.record(db, "user.create", actor_id=actor_id, actor_role=actor_role, org_id=org_id,
+                 entity_type="User", entity_id=user.id,
+                 detail={"role": user.role, "status": status, "org": organization.msp_id})
     return user
 
 

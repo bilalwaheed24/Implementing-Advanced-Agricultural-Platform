@@ -1,9 +1,65 @@
-import { el, api, badge, fmtDate, table, titleCase, toast, can, empty, roleLabel } from '/static/assets/core.js';
+import { el, api, badge, fmtDate, table, titleCase, toast, can, empty, roleLabel, refreshView } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
+import { createPanel, choiceSelect } from '/static/views/formkit.js';
+
+const ORG_TYPES = [['FARM', 'Farm'], ['SUPPLY', 'Processor / supply chain'],
+  ['BIOTECH', 'Biotech developer'], ['REGULATOR', 'Regulator / certifier']];
+
+/* Onboarding a new organisation, e.g. a farm joining the platform. */
+function addOrgPanel() {
+  const name = el('input', { required: 'required', maxlength: '200',
+    placeholder: 'e.g. Prairie Ridge Farms' });
+  const type = choiceSelect(ORG_TYPES);
+  const msp = el('input', { required: 'required', minlength: '3', maxlength: '40',
+    placeholder: 'ledger identity, e.g. PrairieRidgeMSP' });
+  const country = el('input', { maxlength: '2', minlength: '2', placeholder: 'e.g. US' });
+  return createPanel({
+    toggleLabel: 'Add organisation',
+    submitLabel: 'Create organisation',
+    primary: false,
+    hint: 'Creates the organisation and its ledger signing identity. Add its people next.',
+    controls: [['Name', name], ['Type', type], ['Ledger identity (MSP)', msp],
+      ['Country', country]],
+    submit: async () => {
+      const created = await api('/admin/organizations', { method: 'POST', body: {
+        name: name.value, org_type: type.value, msp_id: msp.value,
+        country: country.value ? country.value.toUpperCase() : null } });
+      return `Organisation ${created.name} created`;
+    },
+    onDone: () => refreshView(),
+  });
+}
+
+/* Onboarding a person into an organisation with a temporary password. */
+function addUserPanel(orgs) {
+  const email = el('input', { type: 'email', required: 'required', maxlength: '255' });
+  const fullName = el('input', { required: 'required', minlength: '2', maxlength: '200' });
+  const org = choiceSelect(orgs.map((o) => [o.id, `${o.name} (${titleCase(o.org_type)})`]));
+  const roleSelect = choiceSelect(ROLES.map((r) => [r, roleName(r)]), { value: 'FARM_OPERATOR' });
+  const password = el('input', { type: 'text', required: 'required', minlength: '12',
+    maxlength: '128', placeholder: 'temporary, at least 12 characters' });
+  return createPanel({
+    toggleLabel: 'Add user',
+    submitLabel: 'Create user',
+    primary: false,
+    hint: 'Ordinary roles can sign in at once. Privileged roles (administrator, security '
+      + 'analyst, biosafety officer, certifier, regulator) are created Pending and must be '
+      + 'approved below. Give the person the temporary password through a separate channel.',
+    controls: [['Email', email], ['Full name', fullName], ['Organisation', org],
+      ['Role', roleSelect], ['Temporary password', password]],
+    submit: async () => {
+      const created = await api('/admin/users', { method: 'POST', body: {
+        email: email.value, full_name: fullName.value, org_id: org.value,
+        role: roleSelect.value, password: password.value } });
+      return `${created.email} created (${titleCase(created.status)})`;
+    },
+    onDone: () => refreshView(),
+  });
+}
 
 async function orgsCard() {
   try {
-    const orgs = await api('/admin/organizations?page_size=20');
+    const orgs = await api('/admin/organizations?page_size=100');
     return el('div', { class: 'card' }, [
       el('h2', { text: 'Organisations' }),
       table([
@@ -13,6 +69,10 @@ async function orgsCard() {
         { label: 'Trusted issuer for',
           render: (row) => (row.trusted_issuer_types || []).map(titleCase).join(', ') || '—' },
       ], orgs.items),
+      el('div', { class: 'row u-toolbar u-mt-12' }, [
+        can('org:write') ? addOrgPanel() : null,
+        can('user:write') ? addUserPanel(orgs.items) : null,
+      ]),
     ]);
   } catch (error) {
     return el('div', { class: 'card' }, [el('p', { class: 'error-text', text: error.message })]);
@@ -68,6 +128,15 @@ function userActions(row, reload) {
       try {
         await api(`/admin/users/${row.id}/approve`, { method: 'POST' });
         toast('User approved', 'ok');
+        reload();
+      } catch (error) { toast(error.message, 'error'); }
+    } }));
+  }
+  if (row.status === 'SUSPENDED') {
+    buttons.push(el('button', { text: 'Reactivate', onClick: async () => {
+      try {
+        await api(`/admin/users/${row.id}/approve`, { method: 'POST' });
+        toast('User reactivated', 'ok');
         reload();
       } catch (error) { toast(error.message, 'error'); }
     } }));

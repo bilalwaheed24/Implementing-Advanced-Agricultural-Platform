@@ -11,7 +11,7 @@ from ..core.permissions import P
 from ..models import Batch, GMOApproval, GMOEvent, SeedLot
 from ..repositories import get_or_404, paginate, visible
 from ..schemas import (GMOApprovalCreate, GMOApprovalOut, GMOEventCreate, GMOEventOut, Page,
-                       SeedLotCreate, SeedLotOut)
+                       SeedLotCreate, SeedLotOut, TransferRequest)
 from ..services import gmo as service
 
 router = APIRouter(prefix="/gmo", tags=["GMO Registry"], dependencies=[Depends(rate_limit)])
@@ -103,7 +103,17 @@ def create_seed_lot(payload: SeedLotCreate, db: DbSession,
         payload.gmo_event_id, payload.crop_type, payload.variety, payload.quantity_kg,
         payload.produced_at, payload.germination_pct)
     db.commit()
-    return SeedLotOut.model_validate(lot)
+    return _lot_out(db, lot)
+
+
+def _lot_out(db, lot: SeedLot) -> SeedLotOut:
+    """The event code is lineage the holder is entitled to see, even when the event itself
+    belongs to the developer's organisation and is not readable through /gmo/events."""
+    out = SeedLotOut.model_validate(lot)
+    if lot.gmo_event_id:
+        event = db.get(GMOEvent, lot.gmo_event_id)
+        out.gmo_event_code = event.event_code if event else None
+    return out
 
 
 @router.get("/seed-lots", response_model=Page[SeedLotOut], summary="List seed lots")
@@ -112,8 +122,20 @@ def list_seed_lots(db: DbSession, paging: PagingDep,
                    ) -> Page[SeedLotOut]:
     query = visible(SeedLot, principal.role, principal.org_id).order_by(SeedLot.created_at.desc())
     rows, total = paginate(db, query, paging.page, paging.page_size)
-    return Page[SeedLotOut](items=[SeedLotOut.model_validate(r) for r in rows], total=total,
+    return Page[SeedLotOut](items=[_lot_out(db, r) for r in rows], total=total,
                             page=paging.page, page_size=paging.page_size)
+
+
+@router.post("/seed-lots/{lot_id}/transfer", response_model=SeedLotOut,
+             summary="Supply a seed lot to a farm")
+def transfer_seed_lot(lot_id: str, payload: TransferRequest, db: DbSession,
+                      principal: Annotated[object, Depends(require_permission(P.GMO_WRITE))]
+                      ) -> SeedLotOut:
+    lot = get_or_404(db, SeedLot, lot_id, principal.role, principal.org_id, name="Seed lot")
+    service.transfer_seed_lot(db, lot, principal.org_id, payload.to_org_id, principal.id,
+                              principal.role)
+    db.commit()
+    return _lot_out(db, lot)
 
 
 @router.get("/labelling/{batch_id}", summary="Validate GMO labelling for a batch")

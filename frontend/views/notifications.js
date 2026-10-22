@@ -6,6 +6,13 @@
 import { el, api, badge, fmtDate, toast, titleCase, empty, loading, errorBox }
   from '/static/assets/core.js';
 
+/* Entities that have their own screen, so a notification can open what it is about. */
+const ENTITY_LINKS = {
+  Device: { href: (id) => `#/device/${id}`, text: 'Open device' },
+  Batch: { href: (id) => `#/batch/${id}`, text: 'Open batch' },
+  SeedLot: { href: () => '#/seed-lots', text: 'Open seed lots' },
+};
+
 export async function render() {
   const body = el('div', {}, [loading()]);
   const header = el('div', { class: 'row u-toolbar' }, []);
@@ -52,8 +59,9 @@ export async function render() {
         row.body ? el('div', { class: 'hint', text: row.body }) : null,
         el('div', { class: 'row' }, [
           // Where the notification came from, as a link when the entity has a screen.
-          row.entity_type === 'Device' && row.entity_id
-            ? el('a', { href: `#/device/${row.entity_id}`, text: 'Open device' })
+          row.entity_id && ENTITY_LINKS[row.entity_type]
+            ? el('a', { href: ENTITY_LINKS[row.entity_type].href(row.entity_id),
+              text: ENTITY_LINKS[row.entity_type].text })
             : row.entity_type
               ? el('span', { class: 'hint', text: `Source: ${titleCase(row.entity_type)}` })
               : null,

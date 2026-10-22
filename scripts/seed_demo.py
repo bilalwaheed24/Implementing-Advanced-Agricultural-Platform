@@ -238,6 +238,7 @@ def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now) -> 
     researcher = users["BIOTECH_RESEARCHER"]
     biosafety = users["BIOSAFETY_OFFICER"]
     supply_user = users["SUPPLY_CHAIN_OPERATOR"]
+    farmer = users["FARM_OPERATOR"]
     certifier = users["CERTIFIER"]
     reg_user = users["REGULATOR"]
 
@@ -302,28 +303,55 @@ def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now) -> 
         "Maize", "GV-Hybrid-12", 4200.0, now - timedelta(days=210), 94.5)
     db.flush()
 
-    # --- supply chain: seed lot -> batch -> custody events -> shipment -----------
-    product = db.execute(
-        select(Product).where(Product.gtin == "09501101530027")).scalar_one()
+    # --- seed to farm: the developer supplies the lot, the farm plants it ----------
+    gmo.transfer_seed_lot(db, seed_lot, biotech_org.id, farm_org.id, researcher.id,
+                          researcher.role)
+    planted_field = next(f for f in fields if f.farm_id == farms[0].id)
+    crop = Crop(org_id=farm_org.id, field_id=planted_field.id, crop_type="Maize",
+                variety="GV-Hybrid-12", gmo_event_id=event.id, seed_lot_id=seed_lot.id,
+                planted_at=now - timedelta(days=150), expected_harvest=now - timedelta(days=9),
+                status="HARVESTED")
+    db.add(crop)
+    db.flush()
+
+    # --- farm harvest -> hand-over to the processor -> processing -> shipment ------
+    # The grower creates the batch from its crop (farm, seed lot and GMO event come from
+    # the planting) and ships it to the processor, which then holds it and continues the
+    # chain of custody. Both organisations see the batch; each records only its own steps.
+    from app.gs1 import with_check_digit
+    product = Product(org_id=farm_org.id, gtin=with_check_digit("0950110153004"),
+                      name="Sweetcorn, Green Valley harvest", category="Fresh vegetables",
+                      storage_temp_min_c=0.0, storage_temp_max_c=4.0)
+    db.add(product)
+    db.flush()
     batch = supplychain.create_batch(
-        db, supply_org.id, supply_user.id, supply_user.role, "B-2026-0114", product.id,
-        1800.0, "kg", None, seed_lot.id, None, farms[0].id, event.id, "Iowa", "US",
+        db, farm_org.id, farmer.id, farmer.role, "B-2026-0114", product.id,
+        1800.0, "kg", None, None, crop.id, None, None, "Iowa", "US",
         now - timedelta(days=9))
     db.flush()
 
     journey = [
-        ("harvesting", "in_progress", "Green Valley North", 42.03, -93.63, 8),
-        ("transforming", "in_progress", "Continental Foods Plant A", 41.88, -93.41, 7),
-        ("packing", "in_progress", "Continental Foods Plant A", 41.88, -93.41, 6),
-        ("shipping", "in_transit", "Rotterdam Distribution Hub", 51.92, 4.48, 5),
-        ("receiving", "in_progress", "Rotterdam Distribution Hub", 51.92, 4.48, 4),
+        (farm_org, farmer, "harvesting", "in_progress", "Green Valley North", 42.03, -93.63,
+         8, 1800.0, None),
+        (farm_org, farmer, "shipping", "in_transit", "Green Valley North", 42.03, -93.63,
+         7.5, 1800.0, supply_org.id),
+        (supply_org, supply_user, "receiving", "in_storage", "Continental Foods Plant A",
+         41.88, -93.41, 7.2, 1800.0, None),
+        (supply_org, supply_user, "transforming", "in_progress", "Continental Foods Plant A",
+         41.88, -93.41, 6, 1750.0, None),
+        (supply_org, supply_user, "packing", "in_progress", "Continental Foods Plant A",
+         41.88, -93.41, 5.8, 1750.0, None),
+        (supply_org, supply_user, "shipping", "in_transit", "Continental Foods Plant A",
+         41.88, -93.41, 5, 1750.0, None),
+        (supply_org, supply_user, "receiving", "in_storage", "Chicago Distribution Center",
+         41.88, -87.63, 4, 1750.0, None),
     ]
-    for biz_step, disposition, place, lat, lon, days_ago in journey:
-        actor_org = farm_org if biz_step == "harvesting" else supply_org
+    for actor_org, actor, biz_step, disposition, place, lat, lon, days_ago, qty, to_org \
+            in journey:
         try:
             supplychain.record_event(
-                db, actor_org.id, supply_user.id, supply_user.role, batch, biz_step,
-                disposition, "OBJECT", None, place, lat, lon, batch.quantity, "kg", None,
+                db, actor_org.id, actor.id, actor.role, batch, biz_step,
+                disposition, "OBJECT", None, place, lat, lon, qty, "kg", to_org,
                 now - timedelta(days=days_ago), {"seeded": True})
             db.flush()
         except Exception as error:                                  # noqa: BLE001
@@ -337,8 +365,8 @@ def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now) -> 
             sscc="003123450000001148", batch_id=batch.id,
             carrier="Continental Cold Logistics", origin_name="Continental Foods Plant A",
             origin_lat=41.88, origin_lon=-93.41,
-            destination_name="Rotterdam Distribution Hub",
-            destination_lat=51.92, destination_lon=4.48,
+            destination_name="Chicago Distribution Center",
+            destination_lat=41.88, destination_lon=-87.63,
             departed_at=now - timedelta(days=5), arrived_at=now - timedelta(days=4),
             cold_chain_device_id=cold_sensor.id if cold_sensor else None)
         db.flush()

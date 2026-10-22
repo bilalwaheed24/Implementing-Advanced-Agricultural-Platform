@@ -85,6 +85,29 @@ class UserOut(ORMModel):
     created_at: datetime
 
 
+class AdminUserCreate(BaseModel):
+    """An administrator onboarding a member of an organisation, e.g. a new farm's operator."""
+    email: str = Field(min_length=5, max_length=255)
+    full_name: str = Field(min_length=2, max_length=200)
+    password: str = Field(min_length=12, max_length=128)    # temporary; the user changes it
+    org_id: str = Field(min_length=1, max_length=36)
+    role: str = Field(min_length=3, max_length=40)
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not EMAIL_PATTERN.match(value):
+            raise ValueError("Invalid email address")
+        return value
+
+
+class OrganizationDirectoryEntry(BaseModel):
+    id: str
+    name: str
+    org_type: str
+
+
 class UserUpdate(BaseModel):
     full_name: str | None = Field(default=None, min_length=2, max_length=200)
     role: str | None = None
@@ -626,7 +649,14 @@ class SeedLotOut(ORMModel):
     germination_pct: float | None = None
     tx_id: str | None = None
     anchor_status: str
+    org_id: str
+    custodian_org_id: str | None = None
+    gmo_event_code: str | None = None      # filled by the router: the farm cannot read the event
     created_at: datetime
+
+
+class TransferRequest(BaseModel):
+    to_org_id: str = Field(min_length=1, max_length=36)
 
 
 # --------------------------------------------------------------------------- #

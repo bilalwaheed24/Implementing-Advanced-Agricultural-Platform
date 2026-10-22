@@ -72,6 +72,19 @@ def open_incident_for(db: Session, alert: Alert) -> Incident:
     return incident
 
 
+def notify_org(db: Session, org_id: str, category: str, title: str, body: str,
+               entity_type: str | None, entity_id: str | None, severity: str = "INFO") -> int:
+    """Notify every active user of one organisation, e.g. that a record was handed to it."""
+    recipients = list(db.execute(select(User).where(
+        User.org_id == org_id, User.status == "ACTIVE", User.deleted_at.is_(None))).scalars())
+    for user in recipients:
+        db.add(Notification(user_id=user.id, severity=severity, category=category,
+                            title=title[:255], body=body, entity_type=entity_type,
+                            entity_id=entity_id))
+    db.flush()
+    return len(recipients)
+
+
 def fan_out(db: Session, category: str, severity: str, title: str, body: str,
             org_id: str | None, entity_type: str | None, entity_id: str | None) -> int:
     """Notify every active user holding a role that owns this alert category."""

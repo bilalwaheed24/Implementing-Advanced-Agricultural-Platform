@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 
 from ..core.deps import DbSession, PagingDep, rate_limit, require_permission
-from ..core.errors import NotFound
+from ..core.errors import NotFound, PermissionDenied
 from ..core.permissions import P
 from ..models import (Batch, Certification, CertificationLink, FraudAssessment, Organization,
                       Product, Shipment, SupplyChainEvent)
@@ -89,6 +89,7 @@ def custody(batch_id: str, db: DbSession,
         "lineage": [{"batch_code": b.batch_code, "state": b.state, "quantity": b.quantity}
                     for b in lineage],
         "certifications": service.authenticate_certifications(db, batch),
+        "context": service.batch_context(db, batch, events),
     }
 
 
@@ -112,6 +113,11 @@ def record_event(payload: SupplyChainEventCreate, db: DbSession,
                  ) -> SupplyChainEventOut:
     batch = get_or_404(db, Batch, payload.batch_id, principal.role, principal.org_id,
                        name="Batch")
+    if not principal.is_cross_tenant and batch.custodian_org_id != principal.org_id:
+        # The producer keeps read access after a hand-over, but only the organisation that
+        # physically holds the batch can record what happens to it next.
+        raise PermissionDenied("Only the organisation currently holding this batch may record "
+                               "its next custody event")
     event = service.record_event(
         db, principal.org_id, principal.id, principal.role, batch, payload.biz_step,
         payload.disposition, payload.event_type, payload.location_gln, payload.location_name,
@@ -238,6 +244,10 @@ def link_certification(certification_id: str, payload: CertificationLinkCreate, 
     certification = db.get(Certification, certification_id)
     if certification is None:
         raise NotFound("Certification not found")
+    if not principal.is_cross_tenant and certification.subject_org_id != principal.org_id:
+        # An organisation claims only certifications issued to itself.
+        raise PermissionDenied(f"Certification {certification.cert_code} was issued to a "
+                               f"different organisation; only that organisation may claim it")
     batch = get_or_404(db, Batch, payload.batch_id, principal.role, principal.org_id,
                        name="Batch")
     link = service.link_certification(db, certification, batch, principal.id, principal.role)

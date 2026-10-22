@@ -61,10 +61,13 @@ def posture(db: DbSession,
 def list_vulnerabilities(db: DbSession, paging: PagingDep,
                          principal: Annotated[object, Depends(require_permission(P.DEVICE_READ))],
                          severity: str | None = Query(default=None),
-                         status_filter: str | None = Query(default=None, alias="status")
+                         status_filter: str | None = Query(default=None, alias="status"),
+                         device_id: str | None = Query(default=None)
                          ) -> Page[VulnerabilityOut]:
     query = visible(DeviceVulnerability, principal.role, principal.org_id).order_by(
         DeviceVulnerability.discovered_at.desc())
+    if device_id:
+        query = query.where(DeviceVulnerability.device_id == device_id)
     if severity:
         query = query.where(DeviceVulnerability.severity == severity.upper())
     if status_filter:

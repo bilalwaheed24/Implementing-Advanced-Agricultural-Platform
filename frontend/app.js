@@ -3,6 +3,22 @@ import { el, clear, session, api, can, toast, errorBox, loading,
          unauthorizedCard,
          roleLabel } from '/static/assets/core.js';
 
+/* Menu items withheld from roles that hold the read permission but can never see data there:
+ * the records belong to other organisations (each organisation sees its own rows only).
+ * The page itself stays reachable; this only keeps the menu to what the role works with. */
+const NOT_USEFUL_FOR = {
+  '#/devices': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/telemetry': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/satellite': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/ai': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER', 'BIOTECH_RESEARCHER'],
+  '#/gmo': ['FARM_OPERATOR', 'AGRONOMIST', 'SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/seed-lots': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/batches': ['BIOTECH_RESEARCHER', 'CERTIFIER'],
+  '#/products': ['BIOTECH_RESEARCHER', 'CERTIFIER', 'AGRONOMIST'],
+  '#/shipments': ['BIOTECH_RESEARCHER', 'CERTIFIER', 'AGRONOMIST'],
+  '#/fraud': ['BIOTECH_RESEARCHER', 'CERTIFIER', 'AGRONOMIST'],
+};
+
 const NAV = [
   { group: 'Overview', items: [
     { path: '#/dashboard', label: 'Dashboard', permission: null },
@@ -53,6 +69,7 @@ const ROUTES = {
   '#/login': () => import('/static/views/login.js'),
   '#/dashboard': () => import('/static/views/dashboard.js'),
   '#/farms': () => import('/static/views/farms.js'),
+  '#/farm': () => import('/static/views/farm-detail.js'),
   '#/devices': () => import('/static/views/devices.js'),
   '#/device': () => import('/static/views/device-detail.js'),
   '#/telemetry': () => import('/static/views/telemetry.js'),
@@ -99,7 +116,9 @@ function parseHash() {
 function sidebar(current) {
   const groups = [];
   for (const group of NAV) {
-    const items = group.items.filter((item) => !item.permission || can(item.permission));
+    const role = session.read()?.role;
+    const items = group.items.filter((item) => (!item.permission || can(item.permission))
+      && !(NOT_USEFUL_FOR[item.path] || []).includes(role));
     if (!items.length) continue;
     groups.push(el('div', { class: 'nav-group' }, [
       el('h2', { text: group.group }),

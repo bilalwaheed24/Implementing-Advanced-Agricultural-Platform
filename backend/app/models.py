@@ -471,6 +471,10 @@ class SeedLot(Base):
     content_hash: Mapped[str | None] = mapped_column(String(64))
     tx_id: Mapped[str | None] = mapped_column(String(64), index=True)
     anchor_status: Mapped[str] = mapped_column(String(16), default="PENDING", nullable=False)
+    # The organisation currently holding the seed (the developer until it is supplied to a
+    # farm). Like Batch.custodian_org_id, it makes the lot visible to that organisation.
+    custodian_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"),
+                                                         index=True)
     created_at: Mapped[datetime] = _created()
     __table_args__ = (CheckConstraint("quantity_kg >= 0", name="ck_seedlot_qty"),)
 

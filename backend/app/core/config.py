@@ -128,6 +128,10 @@ class Settings:
     # anchor is also written to the absp-anchor chaincode on a real Fabric network.
     fabric_bridge_url: str = ""
     fabric_bridge_token: str = ""
+    # Public address printed into product QR codes, e.g. https://verify.example.gov. Empty =
+    # use the host the request arrived on (fine for a demo; set it in production so the QR
+    # never depends on a client-supplied Host header).
+    public_base_url: str = ""
     # Where the demo device-secret file and any other writable demo artefacts go.
     # Separated from repo_root because a container's application directory is read-only
     # (docker-compose.yml sets read_only: true) — only this path needs to be a volume.
@@ -184,9 +188,15 @@ class Settings:
                     "LEDGER_SERVICE_URL is used in production")
         for name, url in (("AI_SERVICE_URL", self.ai_service_url),
                           ("LEDGER_SERVICE_URL", self.ledger_service_url),
-                          ("FABRIC_BRIDGE_URL", self.fabric_bridge_url)):
+                          ("FABRIC_BRIDGE_URL", self.fabric_bridge_url),
+                          ("PUBLIC_BASE_URL", self.public_base_url)):
             if url and not url.startswith(("http://", "https://")):
                 raise ConfigurationError(f"{name} must be an http:// or https:// URL")
+        # A version 5-L QR holds 106 bytes; "/verify.html?code=" plus a 40-character code
+        # leaves 48 for the address.
+        if len(self.public_base_url) > 48:
+            raise ConfigurationError("PUBLIC_BASE_URL must be at most 48 characters to fit "
+                                     "in a product QR code")
         if self.bcrypt_rounds < 12:
             raise ConfigurationError("BCRYPT_ROUNDS must be at least 12")
 
@@ -251,6 +261,7 @@ def get_settings() -> Settings:
         service_token=_env("SERVICE_TOKEN", ""),
         service_timeout_seconds=_env_float("SERVICE_TIMEOUT_SECONDS", 30.0),
         fabric_bridge_url=_env("FABRIC_BRIDGE_URL", "").rstrip("/"),
+        public_base_url=_env("PUBLIC_BASE_URL", "").rstrip("/"),
         fabric_bridge_token=_env("FABRIC_BRIDGE_TOKEN", ""),
         anomaly_alert_threshold=_env_float("ANOMALY_ALERT_THRESHOLD", 0.65),
         fraud_suspect_threshold=_env_float("FRAUD_SUSPECT_THRESHOLD", 0.30),

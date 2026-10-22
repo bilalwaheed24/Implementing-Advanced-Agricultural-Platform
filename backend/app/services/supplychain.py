@@ -13,10 +13,12 @@ from sqlalchemy.orm import Session
 
 from ..core.config import get_settings
 from ..core.errors import Conflict, NotFound, PermissionDenied, ValidationFailed
+from ..core.permissions import CROSS_TENANT_ROLES
 from ..core.security import ensure_aware as _aware, content_hash, utcnow, verification_code
 from ..repositories import get_or_404, visible
-from ..models import (Batch, Certification, CertificationLink, Crop, Farm, FraudAssessment,
-                      GMOEvent, Organization, Product, SeedLot, Shipment, SupplyChainEvent)
+from ..models import (Batch, Certification, CertificationLink, Crop, Farm, Field,
+                      FraudAssessment, GMOApproval, GMOEvent, Organization, Product, SeedLot,
+                      Shipment, SupplyChainEvent)
 from . import ai_client, audit, gmo as gmo_service, ledger_client, notifications, telemetry as telemetry_service
 
 BIZ_STEP_TO_STATE = {
@@ -57,6 +59,10 @@ def require_batch_transition(current: str, target: str) -> None:
         raise ValidationFailed(
             f"Illegal transition {current} -> {target}; allowed: "
             f"{', '.join(sorted(allowed)) or 'none, this state is final'}")
+
+
+def _is_cross_tenant(role: str) -> bool:
+    return role in {r.value for r in CROSS_TENANT_ROLES}
 
 
 def _require_exists(db: Session, model: type, entity_id: str, name: str) -> Any:
@@ -139,17 +145,49 @@ def create_batch(db: Session, org_id: str, actor_id: str, actor_role: str, batch
     parent = None
     if parent_batch_id:
         parent = get_or_404(db, Batch, parent_batch_id, actor_role, org_id, name="Parent batch")
+        if not _is_cross_tenant(actor_role) and parent.custodian_org_id != org_id:
+            raise PermissionDenied("A batch can only be derived from a batch you currently hold")
         if quantity > parent.quantity + 1e-9:
             raise ValidationFailed(
                 f"Quantity {quantity} exceeds the parent batch quantity {parent.quantity}")
-    if seed_lot_id:
-        _require_exists(db, SeedLot, seed_lot_id, "Seed lot")
     if crop_id:
-        _require_exists(db, Crop, crop_id, "Crop")
+        # A grower harvesting its own crop: the batch inherits the crop's farm, seed lot and
+        # GMO event, so lineage is recorded from the planting rather than retyped — and a
+        # different value sent alongside it is refused, as create_crop refuses a mismatch.
+        crop = db.execute(visible(Crop, actor_role, org_id).where(
+            Crop.id == crop_id)).scalar_one_or_none()
+        if crop is not None:
+            field = db.get(Field, crop.field_id)
+            crop_farm = field.farm_id if field else None
+            for label, given, planted in (("farm", farm_id, crop_farm),
+                                          ("seed lot", seed_lot_id, crop.seed_lot_id),
+                                          ("GMO event", gmo_event_id, crop.gmo_event_id)):
+                if given and planted and given != planted:
+                    raise ValidationFailed(
+                        f"The {label} does not match the harvested crop's {label}")
+            farm_id = farm_id or crop_farm
+            seed_lot_id = seed_lot_id or crop.seed_lot_id
+            gmo_event_id = gmo_event_id or crop.gmo_event_id
+        else:
+            _require_exists(db, Crop, crop_id, "Crop")
+    lot = _require_exists(db, SeedLot, seed_lot_id, "Seed lot") if seed_lot_id else None
     if farm_id:
         _require_exists(db, Farm, farm_id, "Farm")
+    # The GMO event the batch will carry, from wherever its lineage brings it in: named
+    # directly, through the seed lot, or through the parent batch. Each route needs the
+    # same live approval, or a lapsed event could enter the chain by the side door.
     if gmo_event_id:
-        _require_exists(db, GMOEvent, gmo_event_id, "GMO event")
+        event = _require_exists(db, GMOEvent, gmo_event_id, "GMO event")
+        if lot is not None and lot.gmo_event_id and lot.gmo_event_id != gmo_event_id:
+            raise ValidationFailed("The GMO event does not match the seed lot's GMO event")
+    elif lot is not None and lot.gmo_event_id:
+        event = db.get(GMOEvent, lot.gmo_event_id)
+    elif parent is not None:
+        event = gmo_service.lineage_gmo_event(db, parent)
+    else:
+        event = None
+    if event is not None:
+        gmo_service.require_live_approval(db, event, "A batch")
 
     batch = Batch(org_id=org_id, batch_code=batch_code, verification_code=verification_code(),
                   product_id=product_id, parent_batch_id=parent_batch_id, seed_lot_id=seed_lot_id,
@@ -248,17 +286,72 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
 def transfer_custody(db: Session, batch: Batch, from_org_id: str, to_org_id: str,
                      occurred_at: datetime) -> dict[str, Any]:
     receiving = db.get(Organization, to_org_id)
-    if receiving is None:
+    if receiving is None or not receiving.is_active:
         raise NotFound("Receiving organisation not found")
     receipt = ledger_client.submit(
         "provenance", "TransferCustody",
         {"batch_code": batch.batch_code, "from_org": _msp_for(db, from_org_id),
          "to_org": receiving.msp_id, "occurred_at": _aware(occurred_at).isoformat()},
         _msp_for(db, from_org_id))
-    if receipt.get("ok"):
-        batch.custodian_org_id = to_org_id
-        db.flush()
+    if receipt.get("status") == "REJECTED":
+        # The contract refused the hand-over: fail the whole request (nothing is committed),
+        # so the caller is never told a transfer happened when it did not.
+        raise ValidationFailed(receipt.get("detail", "The ledger rejected the custody transfer"))
+    # Anchored, or PENDING/FAILED because the ledger is degraded: the database is the system
+    # of record for who holds the batch, exactly as for every other write that anchors
+    # asynchronously, so the hand-over takes effect and the ledger status is audited.
+    batch.custodian_org_id = to_org_id
+    db.flush()
+    if not receipt.get("ok"):
+        audit.record(db, "supply.custody_transfer_unanchored", actor_id=None, actor_role=None,
+                     org_id=from_org_id, entity_type="Batch", entity_id=batch.id,
+                     detail={"batch_code": batch.batch_code, "to_org": receiving.msp_id,
+                             "ledger_status": receipt.get("status")})
+    notifications.notify_org(
+        db, to_org_id, "HANDOVER", f"Batch {batch.batch_code} handed over to you",
+        f"{batch.quantity:g} {batch.unit}. Record its receipt to continue the chain of "
+        f"custody.", "Batch", batch.id)
     return receipt
+
+
+def batch_context(db: Session, batch: Batch, events: list[SupplyChainEvent]) -> dict[str, Any]:
+    """Who the batch belongs to, who holds it, where it was grown and its GMO lineage.
+
+    Every party to a batch needs this to act on it, but the farm, the developer's GMO event and
+    the other organisations are not readable through their own scoped endpoints. Only
+    names, codes and approval states are returned, never the underlying records.
+    """
+    org_ids = {batch.org_id, batch.custodian_org_id}
+    org_ids |= {e.from_org_id for e in events if e.from_org_id}
+    org_ids |= {e.to_org_id for e in events if e.to_org_id}
+    organisations = {o.id: o.name for o in db.execute(
+        select(Organization).where(Organization.id.in_(org_ids))).scalars()}
+    farm = db.get(Farm, batch.farm_id) if batch.farm_id else None
+    if farm is not None and farm.org_id not in {batch.org_id, batch.custodian_org_id}:
+        # A farm id is accepted on existence alone when a batch is created, so naming a
+        # stranger's farm must not be a way to read its name and location back.
+        farm = None
+    event = gmo_service.lineage_gmo_event(db, batch)
+    gmo = None
+    if event is not None:
+        approvals = db.execute(select(GMOApproval).where(
+            GMOApproval.gmo_event_id == event.id)).scalars()
+        gmo = {"event_code": event.event_code, "crop_type": event.crop_type,
+               "trait": event.trait, "developer": event.developer,
+               "approvals": [{"jurisdiction": a.jurisdiction, "status": a.status,
+                              "expires_at": a.expires_at.isoformat() if a.expires_at else None}
+                             for a in approvals]}
+    product = db.get(Product, batch.product_id)
+    return {
+        "owner": {"id": batch.org_id, "name": organisations.get(batch.org_id)},
+        "custodian": {"id": batch.custodian_org_id,
+                      "name": organisations.get(batch.custodian_org_id)},
+        "organisations": organisations,
+        "farm": {"name": farm.name, "region": farm.region, "country": farm.country}
+                if farm else None,
+        "product": {"name": product.name, "gtin": product.gtin} if product else None,
+        "gmo": gmo,
+    }
 
 
 def chain_of_custody(db: Session, batch: Batch) -> list[SupplyChainEvent]:
@@ -298,8 +391,11 @@ def lineage(db: Session, batch: Batch, role: str | None = None, org_id: str | No
 def create_shipment(db: Session, org_id: str, actor_id: str, actor_role: str, **kwargs) -> Shipment:
     if db.execute(select(Shipment).where(Shipment.sscc == kwargs["sscc"])).scalar_one_or_none():
         raise Conflict(f"Shipment {kwargs['sscc']} already exists")
-    # A shipment must reference a batch the caller actually holds (audit P1).
+    # A shipment must reference a batch the caller actually holds (audit P1). Visibility is
+    # not enough: the producer still sees a batch after handing it over, but no longer holds it.
     batch = get_or_404(db, Batch, kwargs["batch_id"], actor_role, org_id, name="Batch")
+    if not _is_cross_tenant(actor_role) and batch.custodian_org_id != org_id:
+        raise PermissionDenied("Only the organisation currently holding this batch may ship it")
     arrived = _aware(kwargs.get("arrived_at"))
     departed = _aware(kwargs["departed_at"])
     if arrived and arrived < departed:
@@ -420,7 +516,9 @@ def link_certification(db: Session, certification: Certification, batch: Batch, 
     # attach ANY other organisation's certification id to it, forging an organic/non-GMO/
     # specialty claim they were never issued — the exact failure FR-D2 exists to prevent.
     # Unguessable UUIDs are not an authorisation boundary; this check is.
-    if certification.subject_org_id != batch.org_id:
+    # The producer and the current custodian are both parties to the batch: a processor that
+    # received it may claim its own processing certification on it.
+    if certification.subject_org_id not in {batch.org_id, batch.custodian_org_id}:
         raise PermissionDenied(
             f"Certification {certification.cert_code} was issued to a different "
             f"organisation and cannot be claimed on this batch")

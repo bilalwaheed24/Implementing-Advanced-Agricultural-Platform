@@ -1,4 +1,4 @@
-import { el, api, badge, field, fmtDate, toast, can, empty, titleCase, humanizeText } from '/static/assets/core.js';
+import { el, api, badge, field, fmtDate, toast, can, empty, titleCase, humanizeText, refreshView } from '/static/assets/core.js';
 
 export async function render({ id }) {
   if (!id) return empty('No incident selected', 'Choose an incident from the list.');
@@ -22,7 +22,7 @@ export async function render({ id }) {
           status, root_cause: rootCause.value.trim() || null,
           note: `Status set to ${status}` } });
         toast(`Incident marked ${status.toLowerCase()}`, 'ok');
-        window.location.reload();
+        refreshView();
       } catch (error) { message.textContent = error.message; }
     }
     controls.push(el('div', { class: 'card' }, [

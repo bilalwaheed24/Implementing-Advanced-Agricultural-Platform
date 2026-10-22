@@ -45,6 +45,7 @@ services:
       # with BRIDGE_HOST=0.0.0.0); set COMPOSE_FABRIC_BRIDGE_URL=http://host.docker.internal:8300
       FABRIC_BRIDGE_URL: ${COMPOSE_FABRIC_BRIDGE_URL:-}
       FABRIC_BRIDGE_TOKEN: ${FABRIC_BRIDGE_TOKEN:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}   # address printed into QR codes; empty = request host
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes: [absp_data:/app/data]
     depends_on:

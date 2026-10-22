@@ -1,4 +1,4 @@
-import { el, api, badge, can, fmtDate, fmtNum, tile, toast, titleCase } from '/static/assets/core.js';
+import { session, el, api, badge, can, fmtDate, fmtNum, tile, toast, titleCase } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, choiceSelect } from '/static/views/formkit.js';
 
@@ -37,7 +37,11 @@ function secretNotice(device, secret) {
 function registerForm(reload, host) {
   const farmSelect = remoteSelect({
     endpoint: '/farms', requires: 'farm:read', label: (row) => `${row.name} — ${row.region}, ${row.country}`,
-    placeholder: 'Select a farm', emptyLabel: 'Register a farm first',
+    placeholder: 'Select a farm',
+    // A device can only be registered on a farm of the caller's own organisation (the API
+    // refuses any other), so a cross-tenant role must not be offered other tenants' farms.
+    filter: (row) => row.org_id === session.read()?.org_id,
+    emptyLabel: 'Your organisation has no farm — devices are registered by the farm that owns them',
   });
   const fieldSelect = remoteSelect({
     endpoint: '/fields', requires: 'farm:read', label: (row) => `${row.name} (${row.area_ha} ha)`,

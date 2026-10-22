@@ -13,8 +13,16 @@ function issueForm(reload) {
   const certCode = el('input', { required: 'required', minlength: '3', maxlength: '60',
     placeholder: 'your own certificate code, e.g. ORG-2026-0012' });
   const certType = choiceSelect(CERT_TYPES);
+  // A suggested standard per certificate type, US first; the certifier can overwrite it.
+  const SUGGESTED = { ORGANIC: 'USDA-NOP 7 CFR 205', NON_GMO: 'Non-GMO Project Standard',
+    SPECIALTY: '' };
   const standard = el('input', { required: 'required', minlength: '2', maxlength: '80',
-    value: 'EU 2018/848' });
+    placeholder: 'e.g. USDA-NOP 7 CFR 205, EU 2018/848', value: SUGGESTED[certType.value] || '' });
+  certType.addEventListener('change', () => {
+    if (!standard.value || Object.values(SUGGESTED).includes(standard.value)) {
+      standard.value = SUGGESTED[certType.value] || '';
+    }
+  });
   // Fed by the eligible-subjects endpoint, which excludes the certifier's own organisation,
   // so self-certification is not offerable in the UI and is refused by the API (audit P0-3).
   const subject = remoteSelect({

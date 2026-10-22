@@ -11,8 +11,8 @@ from ..core.permissions import P, ROLE_PERMISSIONS, Role
 from ..models import Organization, User
 from ..repositories import paginate, unscoped, visible
 from ..core.errors import ValidationFailed
-from ..schemas import (OrganizationCreate, OrganizationOut, Page, UserOut,
-                      UserUpdate)
+from ..schemas import (AdminUserCreate, OrganizationCreate, OrganizationDirectoryEntry,
+                      OrganizationOut, Page, UserOut, UserUpdate)
 from ..services import audit, identity, ledger_client
 
 router = APIRouter(prefix="/admin", tags=["Administration"],
@@ -32,6 +32,16 @@ def list_users(db: DbSession, paging: PagingDep,
     rows, total = paginate(db, query, paging.page, paging.page_size)
     return Page[UserOut](items=[UserOut.model_validate(r) for r in rows], total=total,
                          page=paging.page, page_size=paging.page_size)
+
+
+@router.post("/users", response_model=UserOut, status_code=201,
+             summary="Onboard a user into an organisation")
+def create_user(payload: AdminUserCreate, db: DbSession,
+                principal: Annotated[object, Depends(require_permission(P.USER_WRITE))]) -> UserOut:
+    user = identity.create_user(db, payload.email, payload.full_name, payload.password,
+                                payload.org_id, payload.role, principal.id, principal.role)
+    db.commit()
+    return UserOut.model_validate(user)
 
 
 @router.post("/users/{user_id}/approve", response_model=UserOut, summary="Approve a pending user")
@@ -67,6 +77,26 @@ def list_organizations(db: DbSession, paging: PagingDep,
     rows, total = paginate(db, query, paging.page, paging.page_size)
     return Page[OrganizationOut](items=[OrganizationOut.model_validate(r) for r in rows],
                                  total=total, page=paging.page, page_size=paging.page_size)
+
+
+@router.get("/organizations/directory", response_model=list[OrganizationDirectoryEntry],
+            summary="Trading-partner directory: names and types of active organisations")
+def organization_directory(db: DbSession,
+                           principal: Annotated[object, Depends(require_permission(P.ORG_READ))]
+                           ) -> list[OrganizationDirectoryEntry]:
+    """What a hand-over needs: whom to send seed or a batch to. A deliberate, narrow exception
+    to the no-global-directory rule on /organizations: it is offered only to roles that hand
+    records over (or already read across tenants), and exposes only name, type and id — no
+    MSP identity, country, GLN or member list. Receiving a record grants nothing else."""
+    from sqlalchemy import select
+    from ..core.errors import PermissionDenied
+    granted = set(principal.permissions())
+    if not ({P.SUPPLY_WRITE.value, P.GMO_WRITE.value, P.USER_READ.value} & granted):
+        raise PermissionDenied("The partner directory is available to roles that hand over "
+                               "seed or batches")
+    rows = db.execute(select(Organization).where(Organization.is_active.is_(True))
+                      .order_by(Organization.name.asc())).scalars()
+    return [OrganizationDirectoryEntry(id=o.id, name=o.name, org_type=o.org_type) for o in rows]
 
 
 @router.post("/organizations", response_model=OrganizationOut, status_code=201,

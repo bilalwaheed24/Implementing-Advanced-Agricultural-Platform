@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, TypeVar
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
 
 from .core import request_flags
@@ -30,7 +30,13 @@ def scoped(model: type[T], org_id: str | None, *, include_deleted: bool = False)
     """Base SELECT for a model, filtered to one organisation and excluding soft-deleted rows."""
     query = select(model)
     if org_id is not None and _has_column(model, "org_id"):
-        query = query.where(getattr(model, "org_id") == org_id)
+        if _has_column(model, "custodian_org_id"):
+            # A batch handed over in a custody transfer is visible to its current custodian
+            # as well as to the organisation that created it.
+            query = query.where(or_(getattr(model, "org_id") == org_id,
+                                    getattr(model, "custodian_org_id") == org_id))
+        else:
+            query = query.where(getattr(model, "org_id") == org_id)
     if not include_deleted and _has_column(model, "deleted_at"):
         query = query.where(getattr(model, "deleted_at").is_(None))
     return query

@@ -63,8 +63,8 @@ export const render = listView({
       el('span', { class: 'mono', text: `${fmtNum(row.latitude, 3)}, ${fmtNum(row.longitude, 3)}` }) },
     { label: 'GLN', render: (row) => row.gln || '—' },
     { label: 'Registered', render: (row) => fmtDay(row.created_at) },
-    { label: 'Fields', render: (row) => el('a', {
-      href: `#/farms?farm_id=${row.id}`, text: 'View fields' }) },
+    { label: 'Fields & crops', render: (row) => el('a', {
+      href: `#/farm/${row.id}`, text: 'Open farm' }) },
   ],
   // Evaluated per render, and gated on the permission the endpoint actually requires, so
   // read-only roles are not offered a button that can only ever return 403.

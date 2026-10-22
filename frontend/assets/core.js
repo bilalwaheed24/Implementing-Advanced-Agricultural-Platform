@@ -108,7 +108,8 @@ const ROLE_LABELS = {
  * One label used by both the filter and the table so the two cannot disagree. */
 const JURISDICTION_LABELS = {
   'US-USDA': 'USDA (US)', 'US-FDA': 'FDA (US)', EU: 'EU',
-  CODEX: 'Codex Alimentarius', GS1: 'GS1',
+  // GS1 is a data standard (product and batch identifiers), not a legal jurisdiction.
+  CODEX: 'Codex Alimentarius', GS1: 'GS1 data standard',
 };
 
 export function jurisdictionLabel(value) {
@@ -262,6 +263,39 @@ export async function api(path, { method = 'GET', body, retry = true, raw = fals
   if (raw) return response;
   if (response.status === 204) return null;
   return safeJson(response);
+}
+
+/* ---------------- trading-partner directory ---------------- */
+/* Names of the active organisations, fetched once per page load and shared by every view
+ * that has to say who holds a record or offer whom to hand it to. */
+let directoryPromise = null;
+export function orgDirectory() {
+  if (!directoryPromise) {
+    directoryPromise = api('/admin/organizations/directory').catch(() => {
+      directoryPromise = null;
+      return [];
+    });
+  }
+  return directoryPromise;
+}
+
+/* A span that shows an organisation's name once the directory has loaded. */
+export function orgName(orgId, fallback = '—') {
+  const span = el('span', { text: orgId ? '…' : fallback });
+  if (orgId) {
+    orgDirectory().then((rows) => {
+      const found = rows.find((row) => row.id === orgId);
+      span.textContent = found ? found.name : fallback;
+      if (orgId === session.read()?.org_id) span.textContent += ' (you)';
+    });
+  }
+  return span;
+}
+
+/* Re-render the current view in place after a change. A full page reload would also wipe
+ * the confirmation toast the action just raised, so the user never saw it succeed. */
+export function refreshView() {
+  window.dispatchEvent(new HashChangeEvent('hashchange'));
 }
 
 /* ---------------- permissions ---------------- */

@@ -1,6 +1,6 @@
 import { el, api, badge, fmtDate, fmtNum, table, toast, can, empty, lineChart,
          confirmDialog,
-         titleCase } from '/static/assets/core.js';
+         titleCase, refreshView } from '/static/assets/core.js';
 
 async function containmentAction(id, action, promptText) {
   const reason = window.prompt(promptText);
@@ -21,7 +21,7 @@ export async function render({ id }) {
   if (can('device:write') && device.status === 'PROVISIONED') {
     actions.push(el('button', { class: 'primary', text: 'Activate', onClick: async () => {
       await api(`/devices/${id}/activate`, { method: 'POST' });
-      window.location.reload();
+      refreshView();
     } }));
   }
   if (can('device:write') && device.status === 'ACTIVE') {
@@ -40,7 +40,7 @@ export async function render({ id }) {
         if (await containmentAction(id, 'suspend',
           'Reason for suspension (written to the audit trail):')) {
           toast('Device suspended', 'ok');
-          window.location.reload();
+          refreshView();
         }
       } catch (error) { toast(error.message, 'error'); }
     } }));
@@ -50,7 +50,7 @@ export async function render({ id }) {
       try {
         await api(`/devices/${id}/activate`, { method: 'POST' });
         toast('Device resumed', 'ok');
-        window.location.reload();
+        refreshView();
       } catch (error) { toast(error.message, 'error'); }
     } }));
   }
@@ -62,7 +62,7 @@ export async function render({ id }) {
         if (await containmentAction(id, 'quarantine',
           'Reason for quarantine (written to the audit trail):')) {
           toast('Device quarantined', 'ok');
-          window.location.reload();
+          refreshView();
         }
       } catch (error) { toast(error.message, 'error'); }
     } }));
@@ -73,7 +73,7 @@ export async function render({ id }) {
       try {
         if (await containmentAction(id, 'retire', 'Reason for retirement:')) {
           toast('Device retired', 'ok');
-          window.location.reload();
+          refreshView();
         }
       } catch (error) { toast(error.message, 'error'); }
     } }));

@@ -1,5 +1,5 @@
-import { el, api, badge, field, fmtDate, fmtPct, fmtNum, table, toast, can, reasonList,
-         titleCase, empty } from '/static/assets/core.js';
+import { session, el, api, badge, field, fmtDate, fmtPct, fmtNum, table, toast, can, reasonList,
+         titleCase, empty, refreshView } from '/static/assets/core.js';
 
 export async function render({ id }) {
   if (!id) return empty('No screening selected', 'Choose a screening from the list.');
@@ -74,6 +74,15 @@ export async function render({ id }) {
       el('p', { text: screening.review_rationale }),
     ]));
   } else if (can('biosecurity:review')
+      && ['PENDING_REVIEW', 'BLOCKED'].includes(screening.status)
+      && screening.submitted_by === session.read()?.id) {
+    // Four-eyes rule: the API refuses a self-review (409), so do not offer one.
+    parts.push(el('div', { class: 'card' }, [
+      el('h2', { text: 'Biosafety review required' }),
+      el('p', { class: 'hint', text: 'You submitted this screening, so a different biosafety '
+        + 'officer must review it (four-eyes rule).' }),
+    ]));
+  } else if (can('biosecurity:review')
       && ['PENDING_REVIEW', 'BLOCKED'].includes(screening.status)) {
     const rationale = el('textarea', { required: 'required', minlength: '10',
       placeholder: 'Record the reasoning for this decision. It is written to the audit trail.' });
@@ -88,7 +97,7 @@ export async function render({ id }) {
           method: 'POST', body: { decision, rationale: rationale.value.trim() },
         });
         toast(`Screening ${decision === 'APPROVE' ? 'approved' : 'rejected'}`, 'ok');
-        window.location.reload();
+        refreshView();
       } catch (error) { message.textContent = error.message; }
     }
     parts.push(el('div', { class: 'card' }, [

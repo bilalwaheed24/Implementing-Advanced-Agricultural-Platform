@@ -1,6 +1,6 @@
-import { el, api, badge, fmtDate, fmtNum, table, empty, toast, can, reasonList,
-         rowHeader, titleCase } from '/static/assets/core.js';
-import { createPanel, choiceSelect, dateInput, todayIso, atNoon }
+import { session, el, api, badge, fmtDate, fmtNum, table, empty, toast, can, reasonList,
+         rowHeader, titleCase, jurisdictionLabel, refreshView } from '/static/assets/core.js';
+import { createPanel, choiceSelect, dateInput, todayIso, atNoon, remoteSelect }
   from '/static/views/formkit.js';
 
 /* EPCIS business step -> the batch state it moves the batch into. Mirrors
@@ -49,18 +49,34 @@ function recordEventPanel(batch, reload) {
 
   const step = choiceSelect(steps);
   const disposition = choiceSelect(DISPOSITIONS);
+  // The usual disposition for each step, so a shipment is not left marked "in progress".
+  const USUAL = { shipping: 'in_transit', receiving: 'in_storage', storing: 'in_storage',
+    retail_selling: 'sellable_accessible', recalling: 'recalled' };
+  const syncDisposition = () => { disposition.value = USUAL[step.value] || 'in_progress'; };
+  step.addEventListener('change', syncDisposition);
+  syncDisposition();
   const locationName = el('input', { maxlength: '200', placeholder: 'e.g. Ames Processing' });
   const locationGln = el('input', { maxlength: '13', placeholder: 'optional GLN (13 digits)' });
   const quantity = el('input', { type: 'number', step: 'any', min: '0',
     value: String(batch.quantity) });
   const unit = el('input', { maxlength: '12', value: batch.unit });
   const occurred = dateInput(todayIso(), { required: 'required' });
+  // Shipping the batch to another organisation transfers custody to it: the receiver then
+  // sees the batch and records its receipt; this organisation keeps read access only.
+  const handOver = remoteSelect({
+    endpoint: '/admin/organizations/directory', required: false,
+    filter: (org) => org.id !== session.read()?.org_id && org.org_type !== 'REGULATOR',
+    label: (org) => `${org.name} (${titleCase(org.org_type)})`,
+    placeholder: 'Keep custody (no hand-over)',
+    emptyLabel: 'No trading partner registered',
+  });
 
   return createPanel({
     toggleLabel: 'Record a custody event',
     submitLabel: 'Record event',
     hint: `This batch is ${titleCase(batch.state)}. Only the steps it can legally move to are `
-      + 'listed. Quantity may fall but never rise — the server enforces conservation.',
+      + 'listed. Quantity may fall but never rise — the server enforces conservation. To pass '
+      + 'the batch on, choose Shipping and the organisation receiving it.',
     controls: [
       ['Business step', step],
       ['Disposition', disposition],
@@ -69,6 +85,7 @@ function recordEventPanel(batch, reload) {
       ['Quantity', quantity],
       ['Unit', unit],
       ['Occurred on', occurred],
+      ['Hand over to', handOver],
     ],
     submit: async () => {
       await api('/supply-chain/events', { method: 'POST', body: {
@@ -78,11 +95,79 @@ function recordEventPanel(batch, reload) {
         quantity: quantity.value === '' ? null : Number(quantity.value),
         unit: unit.value || null,
         occurred_at: atNoon(occurred.value),
+        to_org_id: handOver.value || null,
       } });
-      return `Event recorded — batch is now ${titleCase(STEP_TO_STATE[step.value])}`;
+      const receiver = handOver.value ? handOver.selectedOptions[0]?.text : null;
+      return receiver
+        ? `Batch handed over to ${receiver} — they now hold it and have been notified`
+        : `Event recorded — batch is now ${titleCase(STEP_TO_STATE[step.value])}`;
     },
     onDone: reload,
   });
+}
+
+/* The certifications issued to this organisation that it may claim on the batch. */
+function claimPanel(batch, claimed, hasGmo, reload) {
+  const me = session.read()?.org_id;
+  const certification = remoteSelect({
+    endpoint: '/supply-chain/certifications',
+    // Organic and non-GMO claims are refused on GMO lineage, so they are not offered there.
+    filter: (row) => row.subject_org_id === me && row.status === 'ACTIVE'
+      && !claimed.has(row.cert_code)
+      && !(hasGmo && ['ORGANIC', 'NON_GMO'].includes(row.cert_type)),
+    label: (row) => `${row.cert_code} — ${titleCase(row.cert_type)}, ${row.standard}`,
+    placeholder: 'Select one of your certifications',
+    emptyLabel: 'No unclaimed active certification issued to your organisation',
+  });
+  return createPanel({
+    toggleLabel: 'Claim a certification',
+    submitLabel: 'Claim on this batch',
+    hint: 'Only a certification issued to your organisation can be claimed. An organic or '
+      + 'non-GMO claim is refused when the batch has GMO lineage.',
+    controls: [['Certification', certification]],
+    submit: async () => {
+      await api(`/supply-chain/certifications/${certification.value}/link`,
+        { method: 'POST', body: { batch_id: batch.id } });
+      return 'Certification claimed — it now appears on the public verification page';
+    },
+    onDone: reload,
+  });
+}
+
+/* A printable product label: the QR a consumer scans, with the code typed underneath. */
+function labelCard(batch, context) {
+  const label = el('div', { class: 'qr-label print-area' }, [
+    el('img', { src: `/api/v1/verify/${batch.verification_code}/qr`, alt: 'Verification QR code',
+      class: 'qr-image' }),
+    el('div', {}, [
+      el('strong', { text: context.product?.name || batch.batch_code }),
+      el('div', { class: 'hint', text: `Batch ${batch.batch_code}` }),
+      el('div', { class: 'mono', text: batch.verification_code }),
+      el('div', { class: 'hint', text: 'Scan to verify origin, GMO status and certifications' }),
+    ]),
+  ]);
+  return el('div', { class: 'card' }, [
+    el('h2', { text: 'Consumer label' }),
+    label,
+    el('div', { class: 'row u-mt-8' }, [
+      el('button', { class: 'primary', text: 'Print label', onClick: () => window.print() }),
+      el('a', { href: `/verify.html?code=${batch.verification_code}`, target: '_blank',
+        rel: 'noopener', text: 'Open what the consumer sees ↗' }),
+    ]),
+  ]);
+}
+
+function gmoCell(gmo) {
+  if (!gmo) return el('td', { text: 'No GMO lineage' });
+  const approvals = gmo.approvals.length
+    ? gmo.approvals.map((a) => `${jurisdictionLabel(a.jurisdiction)}: ${titleCase(a.status)}`
+      + (a.expires_at ? ` until ${fmtDate(a.expires_at)}` : '')).join(' · ')
+    : 'no approval on record';
+  return el('td', {}, [
+    el('div', {}, [el('span', { class: 'mono', text: gmo.event_code }),
+      ` — ${gmo.crop_type}, ${gmo.trait}`]),
+    el('div', { class: 'hint', text: `Developer ${gmo.developer}. ${approvals}` }),
+  ]);
 }
 
 export async function render({ id }) {
@@ -91,15 +176,24 @@ export async function render({ id }) {
     api(`/supply-chain/batches/${id}`),
     api(`/supply-chain/batches/${id}/custody`),
   ]);
+  const context = custody.context || {};
+  const orgName = (orgId) => (context.organisations || {})[orgId] || 'another organisation';
+  const me = session.read()?.org_id;
+  const holdsIt = batch.custodian_org_id === me;
+  const isParty = holdsIt || context.owner?.id === me;
 
   const timeline = el('ul', { class: 'timeline' }, custody.events.map((event) =>
     el('li', { class: event.anchor_status === 'ANCHORED' ? '' : 'unverified' }, [
       el('div', {}, [
         el('strong', { text: titleCase(event.biz_step) }),
-        ' — ', el('span', { class: 'hint', text: event.disposition }),
+        ' — ', el('span', { class: 'hint', text: titleCase(event.disposition) }),
       ]),
       el('div', { class: 'when', text: fmtDate(event.occurred_at) }),
       event.location_name ? el('div', { class: 'hint', text: event.location_name }) : null,
+      event.to_org_id && event.to_org_id !== event.from_org_id
+        ? el('div', { class: 'hint',
+          text: `Handed over: ${orgName(event.from_org_id)} → ${orgName(event.to_org_id)}` })
+        : null,
       el('div', { class: 'row u-mt-4' }, [
         badge(event.anchor_status),
         event.quantity !== null
@@ -150,7 +244,10 @@ export async function render({ id }) {
   return el('div', {}, [
     el('h1', { text: `Batch ${batch.batch_code}` }),
     el('p', { class: 'subtitle' }, [
-      badge(batch.state), ' ', badge(batch.integrity_status), ' ', badge(batch.anchor_status),
+      // Labelled so "Unverified" next to "Anchored" reads as two separate checks.
+      badge(batch.state), ' ', el('span', { class: 'hint', text: 'integrity' }), ' ',
+      badge(batch.integrity_status), ' ', el('span', { class: 'hint', text: 'ledger' }), ' ',
+      badge(batch.anchor_status),
       ' · ', el('a', { href: `/verify.html?code=${batch.verification_code}`, target: '_blank',
         rel: 'noopener', text: 'Public verification page ↗' }),
     ]),
@@ -164,26 +261,45 @@ export async function render({ id }) {
         el('div', { class: 'card' }, [
           el('h2', { text: 'Details' }),
           el('table', {}, [
+            el('tr', {}, [rowHeader('Product'),
+              el('td', { text: context.product
+                ? `${context.product.name} (GTIN ${context.product.gtin})` : '—' })]),
             el('tr', {}, [rowHeader('Quantity'),
               el('td', { text: `${fmtNum(batch.quantity)} ${batch.unit}` })]),
+            el('tr', {}, [rowHeader('Produced by'),
+              el('td', { text: context.owner?.name || '—' })]),
+            el('tr', {}, [rowHeader('Held by'),
+              el('td', {}, [context.custodian?.name || '—',
+                holdsIt ? el('span', { class: 'hint', text: ' (your organisation)' }) : null])]),
+            el('tr', {}, [rowHeader('Grown at'),
+              el('td', { text: context.farm
+                ? `${context.farm.name}, ${context.farm.region} ${context.farm.country}` : '—' })]),
             el('tr', {}, [rowHeader('Origin'),
               el('td', { text: batch.origin_region
                 ? `${batch.origin_region}, ${batch.origin_country}` : '—' })]),
             el('tr', {}, [rowHeader('Harvested'),
               el('td', { text: fmtDate(batch.harvested_at) })]),
-            el('tr', {}, [rowHeader('GMO lineage'),
-              el('td', { text: batch.gmo_event_id ? 'Yes' : 'No' })]),
+            el('tr', {}, [rowHeader('GMO lineage'), gmoCell(context.gmo)]),
             el('tr', {}, [rowHeader('Ledger transaction'),
               el('td', { class: 'mono', text: batch.tx_id ? batch.tx_id.slice(0, 24) + '…' : '—' })]),
           ]),
         ]),
+        labelCard(batch, context),
         el('div', { class: 'card' }, [
           el('h2', { text: 'Certifications' }),
           certifications,
+          can('supply:write') && isParty
+            ? claimPanel(batch, new Set(custody.certifications.map((c) => c.cert_code)),
+              Boolean(context.gmo), () => refreshView())
+            : null,
         ]),
         can('supply:write') ? el('div', { class: 'card' }, [
-          el('h2', { text: 'Chain of custody' }),
-          recordEventPanel(batch, () => window.location.reload()),
+          el('h2', { text: 'Record the next step' }),
+          holdsIt
+            ? recordEventPanel(batch, () => refreshView())
+            : el('p', { class: 'hint', text: `${context.custodian?.name || 'Another organisation'} `
+              + 'holds this batch now, so only they can record its next step. You keep read '
+              + 'access to its history.' }),
         ]) : null,
         can('supply:verify') ? el('div', { class: 'card' }, [
           el('h2', { text: 'Supply-chain integrity and fraud scoring' }),

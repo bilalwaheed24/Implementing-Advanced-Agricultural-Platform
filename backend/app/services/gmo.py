@@ -10,8 +10,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..core.errors import Conflict, NotFound, ValidationFailed
-from ..core.security import content_hash, utcnow
+from ..core.errors import Conflict, NotFound, PermissionDenied, ValidationFailed
+from ..core.security import content_hash, ensure_aware as _aware, utcnow
 from ..models import Batch, GMOApproval, GMOEvent, Organization, SeedLot, SequenceScreening
 from ..repositories import get_or_404
 from . import audit, biosecurity, ledger_client, notifications
@@ -62,18 +62,32 @@ def require_approved_event(db: Session, gmo_event_id: str, actor_role: str,
     regulator has actually approved somewhere (audit P1, §15).
     """
     event = require_registerable_event(db, gmo_event_id, actor_role, org_id)
+    require_live_approval(db, event, "A seed lot")
+    return event
+
+
+def require_live_approval(db: Session, event: GMOEvent, use: str) -> None:
+    """Require an APPROVED, unexpired jurisdictional approval before `use` may carry the event.
+
+    Applies to every downstream use — seed lots, plantings and batches — so a farm or a
+    processor cannot propagate an event the regulator has not approved, or whose approval
+    has lapsed.
+    """
     approvals = list(db.execute(
         select(GMOApproval).where(GMOApproval.gmo_event_id == event.id)).scalars())
     if not approvals:
         raise ValidationFailed(
-            f"GMO event {event.event_code} has no jurisdictional approval on record. A seed lot "
-            f"may only be produced from an approved event.")
-    if not any(a.status in APPROVED_STATUSES for a in approvals):
+            f"GMO event {event.event_code} has no jurisdictional approval on record. {use} "
+            f"may only carry an approved event.")
+    now = utcnow()
+    live = [a for a in approvals if a.status in APPROVED_STATUSES
+            and (a.approved_at is None or _aware(a.approved_at) <= now)
+            and (a.expires_at is None or _aware(a.expires_at) > now)]
+    if not live:
         states = sorted({a.status for a in approvals})
         raise ValidationFailed(
             f"GMO event {event.event_code} is not approved in any jurisdiction "
-            f"(recorded states: {', '.join(states)}).")
-    return event
+            f"(recorded states: {', '.join(states)}; expired approvals do not count).")
 
 
 def register_event(db: Session, org_id: str, actor_id: str, actor_role: str, event_code: str,
@@ -203,7 +217,8 @@ def create_seed_lot(db: Session, org_id: str, actor_id: str, actor_role: str, lo
 
     lot = SeedLot(org_id=org_id, lot_code=lot_code, gmo_event_id=gmo_event_id,
                   crop_type=crop_type, variety=variety, quantity_kg=quantity_kg,
-                  produced_at=produced_at, germination_pct=germination_pct)
+                  produced_at=produced_at, germination_pct=germination_pct,
+                  custodian_org_id=org_id)
     db.add(lot)
     db.flush()
     digest = content_hash({"lot_code": lot_code, "crop_type": crop_type, "variety": variety,
@@ -219,6 +234,32 @@ def create_seed_lot(db: Session, org_id: str, actor_id: str, actor_role: str, lo
     audit.record(db, "gmo.create_seed_lot", actor_id=actor_id, actor_role=actor_role,
                  org_id=org_id, entity_type="SeedLot", entity_id=lot.id,
                  detail={"lot_code": lot_code, "quantity_kg": quantity_kg})
+    return lot
+
+
+def transfer_seed_lot(db: Session, lot: SeedLot, from_org_id: str, to_org_id: str,
+                      actor_id: str, actor_role: str) -> SeedLot:
+    """Supply a seed lot to a farm. Only the current holder may hand it on."""
+    holder = lot.custodian_org_id or lot.org_id
+    if holder != from_org_id:
+        raise PermissionDenied("Only the organisation currently holding the seed lot may "
+                               "transfer it")
+    receiving = db.get(Organization, to_org_id)
+    if receiving is None or not receiving.is_active:
+        raise NotFound("Receiving organisation not found")
+    if receiving.org_type != "FARM":
+        raise ValidationFailed("Seed lots are supplied to farms")
+    if to_org_id == holder:
+        raise ValidationFailed("The seed lot is already held by that organisation")
+    lot.custodian_org_id = to_org_id
+    db.flush()
+    audit.record(db, "gmo.seed_lot_transfer", actor_id=actor_id, actor_role=actor_role,
+                 org_id=from_org_id, entity_type="SeedLot", entity_id=lot.id,
+                 detail={"lot_code": lot.lot_code, "to_org": receiving.msp_id})
+    notifications.notify_org(
+        db, to_org_id, "HANDOVER", f"Seed lot {lot.lot_code} supplied to you",
+        f"{lot.crop_type} {lot.variety}, {lot.quantity_kg:g} kg. You can now plant from it.",
+        "SeedLot", lot.id)
     return lot
 
 

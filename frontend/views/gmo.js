@@ -2,12 +2,14 @@ import { el, api, badge, field, fmtDate, can, toast } from '/static/assets/core.
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, choiceSelect } from '/static/views/formkit.js';
 
+// The same codes the compliance rules and labelling rules evaluate (services/compliance.py,
+// services/gmo.py LABELLING_RULES). A code outside this list would record an approval that
+// no rule ever recognises.
 const JURISDICTIONS = [
+  ['US-USDA', 'United States — USDA'],
+  ['US-FDA', 'United States — FDA'],
   ['EU', 'European Union'],
-  ['US', 'United States'],
-  ['BR', 'Brazil'],
-  ['CA', 'Canada'],
-  ['JP', 'Japan'],
+  ['CODEX', 'Codex Alimentarius (international)'],
 ];
 
 const DECISIONS = [
@@ -29,7 +31,10 @@ function approvalForm(reload) {
   const decision = choiceSelect(DECISIONS);
   const reference = el('input', { maxlength: '120',
     placeholder: 'your decision reference, e.g. EFSA-GMO-2026-004' });
+  const approvedOn = el('input', { type: 'date' });
+  const expiresOn = el('input', { type: 'date' });
   const decided = el('div', { class: 'hint' });
+  const asInstant = (input) => (input.value ? `${input.value}T00:00:00Z` : null);
 
   // Show what is already on record for the chosen event, so a decision is never taken blind.
   event.addEventListener('change', async () => {
@@ -47,17 +52,24 @@ function approvalForm(reload) {
     toggleLabel: 'Record a jurisdictional decision',
     submitLabel: 'Record decision',
     hint: 'A granted approval may later be withdrawn by rejecting it; a rejected one must be '
-      + 'resubmitted as pending rather than flipped straight back to approved.',
+      + 'resubmitted as pending rather than flipped straight back to approved. An approval '
+      + 'stops counting for plantings and batches after its expiry date.',
     controls: [
       ['GMO event', event, decided],
       ['Jurisdiction', jurisdiction],
       ['Decision', decision],
       ['Reference', reference],
+      ['Decision date', approvedOn],
+      ['Expires on', expiresOn],
     ],
     submit: async () => {
+      if (approvedOn.value && expiresOn.value && expiresOn.value <= approvedOn.value) {
+        throw new Error('The expiry date must be after the decision date.');
+      }
       await api(`/gmo/events/${event.value}/approvals`, { method: 'POST', body: {
         jurisdiction: jurisdiction.value, status: decision.value,
         reference: reference.value || null,
+        approved_at: asInstant(approvedOn), expires_at: asInstant(expiresOn),
       } });
       return `Decision recorded: ${jurisdiction.value} ${decision.value}`;
     },
@@ -139,9 +151,10 @@ export const render = listView({
     { label: 'Trait', key: 'trait' },
     { label: 'Developer', key: 'developer' },
     { label: 'Anchor', render: (row) => badge(row.anchor_status) },
+    // Plain text, not a link: the blockchain page has no per-transaction view to land on.
     { label: 'Ledger', render: (row) => row.tx_id
-      ? el('a', { href: `#/blockchain?tx=${row.tx_id}`, class: 'mono',
-        text: row.tx_id.slice(0, 12) }) : '—' },
+      ? el('span', { class: 'mono', title: row.tx_id, text: `${row.tx_id.slice(0, 12)}…` })
+      : '—' },
   ],
   emptyTitle: 'No GMO events registered',
   emptyMessage: 'Screen a sequence first, then register the event against that screening.',

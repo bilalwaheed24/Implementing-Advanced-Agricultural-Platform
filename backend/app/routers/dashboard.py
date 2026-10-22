@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from ..core.deps import CurrentUser, DbSession, rate_limit
 from ..core.permissions import P, has_permission
@@ -17,7 +17,10 @@ router = APIRouter(prefix="/dashboard", tags=["Dashboard"], dependencies=[Depend
 def _count(db, model, org_id: str | None, *conditions) -> int:
     query = select(func.count()).select_from(model)
     if org_id is not None and hasattr(model, "org_id"):
-        query = query.where(model.org_id == org_id)
+        if hasattr(model, "custodian_org_id"):        # a received batch counts for its holder
+            query = query.where(or_(model.org_id == org_id, model.custodian_org_id == org_id))
+        else:
+            query = query.where(model.org_id == org_id)
     if hasattr(model, "deleted_at"):
         query = query.where(model.deleted_at.is_(None))
     for condition in conditions:

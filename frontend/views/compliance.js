@@ -1,16 +1,25 @@
 import { el, api, badge, field, fmtDate, jurisdictionLabel, table, empty, toast, can,
          reasonList, titleCase } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
+import { remoteSelect } from '/static/views/formkit.js';
 
 function evaluateForm(reload) {
-  const batchId = el('input', { required: 'required', placeholder: 'Batch id' });
+  // Chosen from the batches this role can see, so no raw identifier is typed.
+  const batchId = remoteSelect({
+    endpoint: '/supply-chain/batches',
+    label: (row) => `${row.batch_code} — ${row.origin_region || '?'}, ${row.origin_country || '?'}`
+      + ` (${titleCase(row.state)})`,
+    placeholder: 'Select a batch',
+    emptyLabel: 'No batch is visible to your role',
+    requires: 'supply:read',
+  });
   const jurisdiction = el('select', {}, ['US-USDA', 'US-FDA', 'EU', 'CODEX', 'GS1']
-    .map((v) => el('option', { value: v, text: v })));
+    .map((v) => el('option', { value: v, text: jurisdictionLabel(v) })));
   const message = el('div', { class: 'error-text', role: 'alert' });
   const form = el('form', { class: 'u-hidden' }, [
     el('div', { class: 'grid cols-2' }, [
-      field('Batch id', batchId),
-      field('Jurisdiction', jurisdiction),
+      field('Batch', batchId),
+      field('Rule set', jurisdiction),
     ]),
     message,
     el('button', { class: 'primary', type: 'submit', text: 'Evaluate' }),
@@ -20,7 +29,7 @@ function evaluateForm(reload) {
     message.textContent = '';
     try {
       const report = await api('/compliance/evaluate', { method: 'POST', body: {
-        subject_type: 'BATCH', subject_id: batchId.value.trim(),
+        subject_type: 'BATCH', subject_id: batchId.value,
         jurisdiction: jurisdiction.value } });
       toast(`Report ${report.status}`, report.status === 'COMPLIANT' ? 'ok' : 'error');
       form.classList.add('u-hidden');

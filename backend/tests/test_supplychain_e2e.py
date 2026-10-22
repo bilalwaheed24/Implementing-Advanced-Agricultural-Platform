@@ -37,7 +37,15 @@ def gmo_event(client, auth, hazards):
 
 @pytest.fixture
 def traced_batch(client, auth, gmo_event, product, orgs, farm):
-    """A batch carrying GMO lineage with a complete, anchored chain of custody."""
+    """A batch carrying GMO lineage with a complete, anchored chain of custody.
+
+    The event is approved first, because a batch may only carry a GMO event with a live
+    approval. CODEX is used so the US and EU compliance tests still see no approval."""
+    approval = client.post(f"/api/v1/gmo/events/{gmo_event['id']}/approvals",
+                           headers=auth("REGULATOR"),
+                           json={"jurisdiction": "CODEX", "status": "APPROVED",
+                                 "reference": "CODEX-REF-TEST"})
+    assert approval.status_code in (200, 201), approval.text
     batch = client.post("/api/v1/supply-chain/batches",
                         headers=auth("SUPPLY_CHAIN_OPERATOR"), json={
         "batch_code": unique("B"), "product_id": product.id, "quantity": 10000.0,
