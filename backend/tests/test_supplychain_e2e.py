@@ -1,6 +1,7 @@
 """End-to-end traceability, compliance, verification and audit (SC-3, SC-4, FR-B/D/F)."""
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -25,9 +26,10 @@ def gmo_event(client, auth, hazards):
                                   "sequence": benign_sequence(900, 21),
                                   "intent": "drought tolerance"}).json()
     assert screening["status"] == "APPROVED_AUTO"
-    suffix = unique("")[-4:]
+    # Seven random digits: the suite registers hundreds of events, and the earlier four-hex
+    # suffix (65,536 values) collided often enough to fail a run now and then.
     response = client.post("/api/v1/gmo/events", headers=auth("BIOTECH_RESEARCHER"), json={
-        "event_code": f"ABS-{abs(hash(suffix)) % 90000 + 10000}-1", "crop_type": "Maize",
+        "event_code": f"ABS-{secrets.randbelow(9_000_000) + 1_000_000}-1", "crop_type": "Maize",
         "trait": "Drought tolerance", "donor_organism": "Bacillus subtilis",
         "developer": "Test Biotech", "description": "Test event",
         "screening_id": screening["id"]})
