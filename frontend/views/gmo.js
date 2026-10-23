@@ -1,4 +1,5 @@
-import { el, api, badge, field, fmtDate, can, toast } from '/static/assets/core.js';
+import { el, api, badge, field, fmtDate, fmtDay, can, toast, jurisdictionLabel }
+  from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, choiceSelect } from '/static/views/formkit.js';
 
@@ -132,11 +133,35 @@ function registerForm(reload) {
   return el('div', {}, [toggle, form]);
 }
 
+/* Each jurisdictional decision on record, with its expiry. An APPROVED decision that is not
+ * live (expired, or its decision date still ahead) is shown as such rather than as approved,
+ * because it no longer permits seed lots, plantings or batches. */
+function approvalsCell(row) {
+  const approvals = row.approvals || [];
+  if (!approvals.length) {
+    return el('span', { class: 'hint', text: 'Awaiting a decision' });
+  }
+  return el('div', {}, approvals.map((a) => {
+    const lapsed = a.status === 'APPROVED' && a.live === false;
+    const status = lapsed ? 'Not in force' : a.status;
+    return el('div', { class: 'u-mt-6' }, [
+      el('span', { text: `${jurisdictionLabel(a.jurisdiction)} ` }),
+      badge(status, lapsed ? 'warning' : 'neutral'),
+      a.expires_at ? el('span', { class: 'hint',
+        text: ` ${lapsed && new Date(a.expires_at) <= new Date() ? 'expired' : 'expires'} `
+          + fmtDay(a.expires_at) }) : null,
+    ]);
+  }));
+}
+
 export const render = listView({
   title: 'GMO transformation event registry',
   subtitle: 'Every event is anchored to the permissioned ledger with a SHA-256 content hash, '
     + 'endorsed by the biotech developer and the regulator.',
   endpoint: '/gmo/events',
+  // The regulator's queue: events with no decision yet, or one still pending.
+  filters: [{ key: 'awaiting_decision', label: 'Decision', allLabel: 'All events',
+    options: ['true'], optionLabel: () => 'Awaiting a decision' }],
   actions: ({ reload }) => {
     const panels = [
       can('gmo:write') ? registerForm(reload) : null,
@@ -150,6 +175,7 @@ export const render = listView({
     { label: 'Crop', key: 'crop_type' },
     { label: 'Trait', key: 'trait' },
     { label: 'Developer', key: 'developer' },
+    { label: 'Approvals', render: (row) => approvalsCell(row) },
     { label: 'Anchor', render: (row) => badge(row.anchor_status) },
     // Plain text, not a link: the blockchain page has no per-transaction view to land on.
     { label: 'Ledger', render: (row) => row.tx_id

@@ -1,4 +1,4 @@
-import { el, api, badge, fmtDate, toast, can, titleCase } from '/static/assets/core.js';
+import { el, api, badge, fmtDay, toast, can, titleCase } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, choiceSelect, dateInput, todayIso, atNoon }
   from '/static/views/formkit.js';
@@ -82,6 +82,19 @@ function revokeButton(row, reload) {
   ]);
 }
 
+/* The batches a certificate is claimed on. A batch the reader cannot open (the issuer is not
+ * a party to it) comes back without an id and is listed by code only. */
+function claimedCell(row) {
+  const batches = row.claimed_batches || [];
+  if (!batches.length) return el('span', { class: 'hint', text: 'Not claimed' });
+  return el('div', {}, batches.map((b) => el('div', {}, [b.id
+    ? el('a', { class: 'mono', href: `#/batch/${b.id}`, text: b.batch_code })
+    : el('span', { class: 'mono', text: b.batch_code })])));
+}
+
+// EXPIRED is reported by the API once valid_to has passed, even before the expiry sweep runs.
+const statusBadge = (status) => badge(status, status === 'EXPIRED' ? 'warning' : 'neutral');
+
 export const render = listView({
   title: 'Certifications',
   subtitle: 'Organic, non-GMO and specialty claims. Issuance and revocation are anchored, '
@@ -93,10 +106,13 @@ export const render = listView({
     { label: 'Code', render: (row) => el('span', { class: 'mono', text: row.cert_code }) },
     { label: 'Type', render: (row) => titleCase(row.cert_type) },
     { label: 'Standard', key: 'standard' },
+    { label: 'Subject', render: (row) => row.subject_org_name || '—' },
     { label: 'Scope', key: 'scope' },
-    { label: 'Valid to', render: (row) => fmtDate(row.valid_to) },
+    { label: 'Claimed on', render: (row) => claimedCell(row) },
+    // A validity end is a day, not an instant.
+    { label: 'Valid to', render: (row) => fmtDay(row.valid_to) },
     { label: 'Anchor', render: (row) => badge(row.anchor_status) },
-    { label: 'Status', render: (row) => badge(row.status) },
+    { label: 'Status', render: (row) => statusBadge(row.status) },
     { label: 'Action', render: (row, { reload }) => revokeButton(row, reload) },
   ],
   emptyTitle: 'No certifications issued',

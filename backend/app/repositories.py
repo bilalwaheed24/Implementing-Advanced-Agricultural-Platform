@@ -21,6 +21,10 @@ T = TypeVar("T")
 # Models that carry no org_id and are therefore platform-wide by design.
 GLOBAL_MODELS = {"HazardSequence", "Organization", "BlockchainTx", "SchemaVersion", "AuditLog"}
 
+# Columns naming an organisation that is a party to the row and may therefore read it.
+# `org_id` is always first; the others apply only to models that carry them.
+PARTY_COLUMNS = ("org_id", "custodian_org_id", "owner_org_id")
+
 
 def _has_column(model: type, name: str) -> bool:
     return hasattr(model, name)
@@ -30,19 +34,14 @@ def scoped(model: type[T], org_id: str | None, *, include_deleted: bool = False)
     """Base SELECT for a model, filtered to one organisation and excluding soft-deleted rows."""
     query = select(model)
     if org_id is not None and _has_column(model, "org_id"):
-        party_columns = getattr(model, "__party_columns__", None)
-        if party_columns:
-            # A record with more than one party (a shipment's sender and receiver) is
-            # visible to each of them.
-            query = query.where(or_(*(getattr(model, column) == org_id
-                                      for column in party_columns)))
-        elif _has_column(model, "custodian_org_id"):
-            # A batch handed over in a custody transfer is visible to its current custodian
-            # as well as to the organisation that created it.
-            query = query.where(or_(getattr(model, "org_id") == org_id,
-                                    getattr(model, "custodian_org_id") == org_id))
-        else:
-            query = query.where(getattr(model, "org_id") == org_id)
+        # A batch handed over in a custody transfer is visible to its current custodian as well
+        # as to the organisation that created it; a report about a batch is visible to the
+        # batch's owner and custodian as well as to whoever ran it. A model can name its own
+        # parties instead (a shipment's sender and receiver) through `__party_columns__`.
+        columns = getattr(model, "__party_columns__", None) or PARTY_COLUMNS
+        parties = [getattr(model, column) == org_id for column in columns
+                   if _has_column(model, column)]
+        query = query.where(or_(*parties)) if len(parties) > 1 else query.where(parties[0])
     if not include_deleted and _has_column(model, "deleted_at"):
         query = query.where(getattr(model, "deleted_at").is_(None))
     return query

@@ -100,11 +100,15 @@ def assess_crispr(payload: CrisprCreate, db: DbSession,
 def list_crispr(db: DbSession, paging: PagingDep,
                 principal: Annotated[object, Depends(require_permission(P.BIOSECURITY_READ))],
                 risk_level: str | None = Query(default=None),
-                durc_only: bool = Query(default=False)) -> Page[CrisprOut]:
+                durc_only: bool = Query(default=False),
+                status_filter: str | None = Query(default=None, alias="status")
+                ) -> Page[CrisprOut]:
     query = visible(CrisprAssessment, principal.role, principal.org_id).order_by(
         CrisprAssessment.created_at.desc())
     if risk_level:
         query = query.where(CrisprAssessment.risk_level == risk_level.upper())
+    if status_filter:
+        query = query.where(CrisprAssessment.status == status_filter.upper())
     if durc_only:
         query = query.where(CrisprAssessment.durc_flag.is_(True))
     rows, total = paginate(db, query, paging.page, paging.page_size)

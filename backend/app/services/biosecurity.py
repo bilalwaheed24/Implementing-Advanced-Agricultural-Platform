@@ -81,7 +81,37 @@ def submit_screening(db: Session, org_id: str, actor_id: str, actor_role: str, n
             detail="; ".join(result.reasons[:3]), org_id=org_id,
             entity_type="SequenceScreening", entity_id=record.id, reasons=result.reasons)
 
+    notifications.notify_user(
+        db, actor_id, "BIOSECURITY", f"Screening {name}: {SCREENING_OUTCOMES[status]}",
+        "; ".join(result.reasons[:3]) or f"Verdict {result.verdict}.",
+        "SequenceScreening", record.id,
+        severity={STATUS_BLOCKED: "HIGH", STATUS_PENDING_REVIEW: "WARNING"}.get(status, "INFO"))
     return record
+
+
+# What the submitter is told, per screening or gene-edit state.
+SCREENING_OUTCOMES = {
+    STATUS_APPROVED_AUTO: "cleared automatically",
+    STATUS_PENDING_REVIEW: "held for biosafety review",
+    STATUS_BLOCKED: "blocked pending biosafety review",
+    STATUS_APPROVED_REVIEW: "approved by biosafety review",
+    STATUS_REJECTED: "rejected by biosafety review",
+}
+
+
+def _review_closed(db: Session, entity_type: str, entity_id: str, submitted_by: str | None,
+                   what: str, status: str, rationale: str, actor_id: str) -> None:
+    """Tell the submitter the decision and close the alert(s) the submission raised."""
+    approved = status == STATUS_APPROVED_REVIEW
+    notifications.notify_user(
+        db, submitted_by, "BIOSECURITY",
+        f"{what}: {SCREENING_OUTCOMES.get(status, status.lower())}",
+        f"Reviewer's rationale: {rationale[:500]}", entity_type, entity_id,
+        severity="INFO" if approved else "WARNING")
+    notifications.resolve_entity_alerts(
+        db, entity_type, entity_id, actor_id,
+        f"{what} {'approved' if approved else 'rejected'} by biosafety review: "
+        f"{rationale[:300]}")
 
 
 def _durc_flag(intent: str, hazard_classes: list[str]) -> bool:
@@ -126,6 +156,8 @@ def review_screening(db: Session, screening: SequenceScreening, actor_id: str, a
                  entity_id=screening.id,
                  detail={"decision": decision, "previous_verdict": screening.verdict,
                          "rationale": rationale[:500]})
+    _review_closed(db, "SequenceScreening", screening.id, screening.submitted_by,
+                   f"Screening {screening.name}", screening.status, rationale, actor_id)
     return screening
 
 
@@ -182,6 +214,13 @@ def assess_crispr(db: Session, org_id: str, actor_id: str, actor_role: str, targ
             f"Gene-edit proposal requires review: {target_gene} in {organism}",
             detail="; ".join(result.reasons[:3]), org_id=org_id,
             entity_type="CrisprAssessment", entity_id=record.id, reasons=result.reasons)
+    notifications.notify_user(
+        db, actor_id, "BIOSECURITY",
+        f"Gene-edit {target_gene} in {organism}: {SCREENING_OUTCOMES[status]}",
+        f"Risk {result.risk_level} ({result.risk_score})"
+        + ("; flagged as dual-use research of concern" if result.durc_flag else "") + ".",
+        "CrisprAssessment", record.id,
+        severity="WARNING" if status == STATUS_PENDING_REVIEW else "INFO")
     return record
 
 
@@ -200,6 +239,9 @@ def review_crispr(db: Session, assessment: CrisprAssessment, actor_id: str, acto
                  entity_id=assessment.id,
                  detail={"decision": decision, "risk_level": assessment.risk_level,
                          "rationale": rationale[:500]})
+    _review_closed(db, "CrisprAssessment", assessment.id, assessment.submitted_by,
+                   f"Gene-edit {assessment.target_gene} in {assessment.organism}",
+                   assessment.status, rationale, actor_id)
     return assessment
 
 

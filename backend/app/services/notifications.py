@@ -312,3 +312,114 @@ def add_incident_event(db: Session, incident_id: str, action: str, detail: str,
     db.add(event)
     db.flush()
     return event
+
+
+# --------------------------------------------------------------------------- #
+# Targeted notifications: the people a record concerns, not only a category's roles
+# --------------------------------------------------------------------------- #
+def _active_users():
+    return select(User).where(User.status == "ACTIVE", User.deleted_at.is_(None))
+
+
+def _send(db: Session, recipients: Iterable[User], category: str, title: str, body: str,
+          entity_type: str | None, entity_id: str | None, severity: str) -> int:
+    sent = 0
+    seen: set[str] = set()
+    for user in recipients:
+        if user.id in seen:
+            continue
+        seen.add(user.id)
+        db.add(Notification(user_id=user.id, severity=severity, category=category,
+                            title=title[:255], body=body, entity_type=entity_type,
+                            entity_id=entity_id))
+        sent += 1
+    db.flush()
+    return sent
+
+
+def notify_user(db: Session, user_id: str | None, category: str, title: str, body: str,
+                entity_type: str | None, entity_id: str | None, severity: str = "INFO") -> int:
+    """Notify one person, e.g. the researcher whose submission was decided."""
+    if not user_id:
+        return 0
+    user = db.execute(_active_users().where(User.id == user_id)).scalar_one_or_none()
+    return _send(db, [user] if user else [], category, title, body, entity_type, entity_id,
+                 severity)
+
+
+def notify_roles(db: Session, roles: Iterable[Role | str], category: str, title: str, body: str,
+                 entity_type: str | None, entity_id: str | None, severity: str = "INFO") -> int:
+    """Notify every active holder of the given roles, in any organisation (e.g. regulators)."""
+    names = [r.value if isinstance(r, Role) else str(r) for r in roles]
+    recipients = db.execute(_active_users().where(User.role.in_(names))).scalars()
+    return _send(db, recipients, category, title, body, entity_type, entity_id, severity)
+
+
+def notify_parties(db: Session, org_ids: Iterable[str | None], category: str, title: str,
+                   body: str, entity_type: str | None, entity_id: str | None,
+                   severity: str = "INFO", *, include_oversight: bool = False) -> int:
+    """Notify every active user of each party organisation, once per user.
+
+    `fan_out` reaches only the roles that own an alert category, inside the alert's single
+    organisation. A record about a batch concerns its owner and its current custodian — a farm
+    and a processor whose users often hold none of those roles — so the category route alone
+    left the people who must act uninformed. `include_oversight` also notifies the
+    platform-wide roles that own the category, as `fan_out` would.
+    """
+    parties = {org_id for org_id in org_ids if org_id}
+    recipients: list[User] = []
+    if parties:
+        recipients += list(db.execute(
+            _active_users().where(User.org_id.in_(parties))).scalars())
+    if include_oversight:
+        platform = {r.value for r in CROSS_TENANT_ROLES}
+        roles = [r.value for r in CATEGORY_ROLES.get(category, (Role.ADMIN,))
+                 if r.value in platform]
+        if roles:
+            recipients += list(db.execute(
+                _active_users().where(User.role.in_(roles))).scalars())
+    return _send(db, recipients, category, title, body, entity_type, entity_id, severity)
+
+
+def alert_parties(db: Session, category: str, severity: str, title: str, *,
+                  party_org_ids: Iterable[str | None], detail: str = "",
+                  org_id: str | None = None, entity_type: str | None = None,
+                  entity_id: str | None = None, reasons: Iterable[Any] = (),
+                  open_incident: bool | None = None) -> Alert:
+    """Raise an alert owned by `org_id` and notify every party organisation plus the
+    platform oversight roles for the category, each user once."""
+    alert = raise_alert(db, category, severity, title, detail=detail, org_id=org_id,
+                        entity_type=entity_type, entity_id=entity_id, reasons=reasons,
+                        notify=False, open_incident=open_incident)
+    notify_parties(db, [org_id, *party_org_ids], category, title, detail, entity_type,
+                   entity_id, severity, include_oversight=True)
+    return alert
+
+
+def resolve_entity_alerts(db: Session, entity_type: str, entity_id: str, actor_id: str | None,
+                          note: str) -> list[Alert]:
+    """Resolve the open alerts raised for one record once its cause has been dealt with, and
+    record the resolution on any incident opened from them.
+
+    The incident moves to RESOLVED when none of its alerts remain open; an analyst can still
+    reopen it from there (security_ops.INCIDENT_TRANSITIONS)."""
+    alerts = list(db.execute(select(Alert).where(
+        Alert.entity_type == entity_type, Alert.entity_id == entity_id,
+        Alert.status.in_(("OPEN", "ACKNOWLEDGED")))).scalars())
+    incidents: set[str] = set()
+    for alert in alerts:
+        resolve(db, alert)
+        if alert.incident_id:
+            incidents.add(alert.incident_id)
+    for incident_id in sorted(incidents):
+        add_incident_event(db, incident_id, "RESOLVED", note, actor_id)
+        incident = db.get(Incident, incident_id)
+        still_open = db.execute(select(Alert.id).where(
+            Alert.incident_id == incident_id,
+            Alert.status.in_(("OPEN", "ACKNOWLEDGED"))).limit(1)).first()
+        if incident is not None and still_open is None \
+                and incident.status in {"OPEN", "TRIAGED", "CONTAINED"}:
+            incident.status = "RESOLVED"
+            incident.closed_at = utcnow()
+    db.flush()
+    return alerts

@@ -129,8 +129,13 @@ export const render = listView({
   subtitle: 'Every score component is returned as a citable reason, because the output can '
     + 'block a research proposal and must withstand challenge.',
   endpoint: '/biosecurity/crispr',
-  filters: [{ key: 'risk_level', label: 'Risk level',
-    options: ['LOW', 'MODERATE', 'HIGH', 'PROHIBITED'] }],
+  filters: [
+    { key: 'risk_level', label: 'Risk level',
+      options: ['LOW', 'MODERATE', 'HIGH', 'PROHIBITED'] },
+    // PENDING_REVIEW is the biosafety officer's queue (linked from the review queue).
+    { key: 'status', label: 'Status',
+      options: ['PENDING_REVIEW', 'APPROVED_AUTO', 'APPROVED_BY_REVIEW', 'REJECTED'] },
+  ],
   actions: () => (can('biosecurity:submit') ? assessForm() : null),
   columns: [
     { label: 'Assessed', render: (row) => fmtDate(row.created_at) },
