@@ -87,6 +87,7 @@ def transition(db: Session, device: Device, new_status: str, actor_id: str, acto
     audit.record(db, f"device.{new_status.lower()}", actor_id=actor_id, actor_role=actor_role,
                  org_id=device.org_id, entity_type="Device", entity_id=device.id,
                  detail={"from": current, "to": new_status, "reason": reason})
+    _clear_health_alerts(db, device, new_status, actor_id)
     if new_status == "QUARANTINED":
         # raise_alert attaches this to the incident already active for the device (the one
         # whose anomaly prompted the quarantine) rather than opening a second one.
@@ -104,6 +105,31 @@ def transition(db: Session, device: Device, new_status: str, actor_id: str, acto
                 actor_id)
             notifications.sync_alerts_from_incident(db, incident, actor_id)
     return device
+
+
+# Health alerts that stop describing anything once a device leaves service. A suspended,
+# quarantined or retired device is expected to be silent (the sweep only watches ACTIVE ones),
+# so its "stopped reporting" alert and offline flag are cleared. A retired device's battery is
+# nobody's concern any more either.
+_CLEARED_ON_LEAVING_SERVICE = {
+    "SUSPENDED": ("silent",),
+    "QUARANTINED": ("silent",),
+    "RETIRED": ("silent", "low_battery"),
+}
+
+
+def _clear_health_alerts(db: Session, device: Device, new_status: str,
+                         actor_id: str | None) -> None:
+    kinds = _CLEARED_ON_LEAVING_SERVICE.get(new_status)
+    if not kinds:
+        return
+    device.offline_since = None
+    state = new_status.lower()
+    for kind in kinds:
+        notifications.resolve_alerts(db, "DEVICE_HEALTH", device.id, kind=kind,
+                                     actor_id=actor_id,
+                                     note=f"The device was {state}, so this no longer applies")
+    db.flush()
 
 
 def load_secret(device: Device) -> str | None:
@@ -250,7 +276,9 @@ def add_vulnerability(db: Session, device: Device, actor_id: str, actor_role: st
     if severity in {"HIGH", "CRITICAL"}:
         notifications.raise_alert(
             db, "DEVICE_HEALTH", severity,
-            f"{severity} vulnerability {cve_id} on device {device.id[:8]}",
+            # Filed under DEVICE_HEALTH; the title says what it is, so it does not read as a
+            # battery or connectivity problem.
+            f"Vulnerability {cve_id} ({severity.lower()} severity) on device {device.id[:8]}",
             detail=title, org_id=device.org_id, entity_type="Device", entity_id=device.id,
             kind=f"vulnerability:{cve_id}"[:80])
     return vulnerability

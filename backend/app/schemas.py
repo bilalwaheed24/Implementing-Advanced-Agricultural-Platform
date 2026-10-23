@@ -425,6 +425,9 @@ class AlertOut(ORMModel):
     occurrences: int = 1
     last_seen_at: datetime | None = None
     created_at: datetime
+    # The record the alert is about, named for people ("Field North 40"); set by the list
+    # route, None where the record has no readable name.
+    source_label: str | None = None
 
 
 class IncidentOut(ORMModel):

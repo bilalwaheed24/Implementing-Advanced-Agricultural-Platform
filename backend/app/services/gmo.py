@@ -230,7 +230,7 @@ def record_approval(db: Session, event: GMOEvent, actor_id: str, actor_role: str
                          "anchored": bool(receipt.get("ok"))})
 
     # The developer is told every decision on its event.
-    expiry = f", expires {_aware(expires_at).date().isoformat()}" if expires_at else ""
+    expiry = f", expires {notifications.human_date(expires_at)}" if expires_at else ""
     notifications.notify_org(
         db, event.org_id, "GMO",
         f"GMO event {event.event_code}: {jurisdiction} decision {status}",
@@ -242,6 +242,10 @@ def record_approval(db: Session, event: GMOEvent, actor_id: str, actor_role: str
     if previous_status in APPROVED_STATUSES and status not in APPROVED_STATUSES:
         approval_lost(db, event, approval, "withdrawn", actor_id=actor_id,
                       already_notified={event.org_id})
+    elif previous_status is not None and is_live(approval):
+        # Re-approved after a withdrawal, or renewed after it expired: the lapse alerts on the
+        # approval and on every batch carrying the event no longer describe anything.
+        approval_restored(db, event, approval, actor_id)
     return approval
 
 
@@ -272,6 +276,27 @@ def affected_holdings(db: Session, event: GMOEvent) -> tuple[list[SeedLot], list
     return lots, list(found.values())
 
 
+def approval_lost_kind(approval: GMOApproval) -> str:
+    """Alert kind for "this batch's GMO approval lapsed", one per approval (event and
+    jurisdiction), so it is matched for dedupe and resolved when the approval is restored."""
+    return f"approval_lost:{approval.id}"
+
+
+def approval_restored(db: Session, event: GMOEvent, approval: GMOApproval,
+                      actor_id: str | None) -> int:
+    """Resolve the alerts a lapse of this approval raised, now that it is live again.
+    Returns how many were resolved."""
+    note = f"The {approval.jurisdiction} approval for {event.event_code} is in force again"
+    resolved = notifications.resolve_entity_alerts(db, "GMOApproval", approval.id, actor_id,
+                                                   note)
+    _, batches = affected_holdings(db, event)
+    for batch in batches:
+        resolved += notifications.resolve_alerts(
+            db, "COMPLIANCE", batch.id, kind=approval_lost_kind(approval), actor_id=actor_id,
+            note=note)
+    return len(resolved)
+
+
 def approval_lost(db: Session, event: GMOEvent, approval: GMOApproval, how: str, *,
                   actor_id: str | None = None,
                   already_notified: set[str] | None = None) -> dict[str, Any]:
@@ -291,12 +316,16 @@ def approval_lost(db: Session, event: GMOEvent, approval: GMOApproval, how: str,
 
     # One record of the lapse itself, owned by the developer, so a regulator scanning alerts
     # sees it and the expiry sweep can tell it has already been handled.
+    # No kind on the approval's own alert: sweep_expired_approvals reads its created_at to
+    # tell a lapse already handled from a new one, so a later lapse must raise a new row.
     notifications.raise_alert(
         db, "COMPLIANCE", "HIGH", title,
         detail=f"{len(lots)} seed lot(s) and {len(batches)} batch(es) carry the event. "
                f"{remaining}",
         org_id=event.org_id, entity_type="GMOApproval", entity_id=approval.id,
         notify=False, open_incident=False)
+    # One alert per batch and approval (kind): a second lapse of the same approval folds into
+    # the alert still open, and restoring the approval resolves it (approval_restored).
     for batch in batches:
         notifications.raise_alert(
             db, "COMPLIANCE", "HIGH",
@@ -305,7 +334,8 @@ def approval_lost(db: Session, event: GMOEvent, approval: GMOApproval, how: str,
             detail=f"The batch's lineage carries {event.event_code}. Re-evaluate its compliance "
                    f"before releasing it into {approval.jurisdiction}. {remaining}",
             org_id=batch.org_id, entity_type="Batch", entity_id=batch.id,
-            notify=False, open_incident=False)
+            notify=False, open_incident=False, kind=approval_lost_kind(approval),
+            party_org_id=batch.custodian_org_id)
 
     # One notification per organisation concerned, saying what of theirs is affected.
     parties: dict[str, list[str]] = {event.org_id: []}
@@ -520,15 +550,23 @@ def check_release(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
                  outcome="SUCCESS" if result["compliant"] else "FAILURE",
                  detail={"jurisdiction": jurisdiction, "compliant": result["compliant"],
                          "requires_label": result["requires_label"]})
+    # One alert per batch and jurisdiction (kind): a repeated blocked release check folds
+    # into it, and a later check that permits the release resolves it.
+    kind = f"labelling:{jurisdiction.upper()}"[:80]
     if not result["compliant"]:
         # The holder trying to release it and the owner both need to know.
         notifications.alert_parties(
             db, "COMPLIANCE", "HIGH",
-            f"Labelling non-compliance on batch {batch.batch_code}",
+            f"Labelling non-compliance on batch {batch.batch_code} in {jurisdiction.upper()}",
             detail=f"Release into {jurisdiction} blocked: "
                    + "; ".join(f["detail"] for f in result["findings"] if not f["passed"]),
             org_id=batch.org_id, party_org_ids=[batch.custodian_org_id],
-            entity_type="Batch", entity_id=batch.id)
+            entity_type="Batch", entity_id=batch.id, kind=kind,
+            party_org_id=batch.custodian_org_id)
+    else:
+        notifications.resolve_alerts(
+            db, "COMPLIANCE", batch.id, kind=kind, actor_id=actor_id,
+            note=f"A later release check permits release into {jurisdiction.upper()}")
     return result
 
 

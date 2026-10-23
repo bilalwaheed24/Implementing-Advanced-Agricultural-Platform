@@ -204,7 +204,9 @@ class TestResolveSync:
         assert response.json()["assignee_id"] == analyst.id
         bogus = client.patch(f"/api/v1/security/incidents/{incident.id}",
                              headers=auth("SECURITY_ANALYST"),
-                             json={"assignee_id": users["SUPPLY_CHAIN_OPERATOR"].id})
+                             # AGRONOMIST, not SUPPLY_CHAIN_OPERATOR: round 3 gave the
+                             # operator incident:read (it works custodian batch alerts).
+                             json={"assignee_id": users["AGRONOMIST"].id})
         assert bogus.status_code == 422, "a role that cannot read incidents is not assignable"
 
 

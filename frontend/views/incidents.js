@@ -11,7 +11,8 @@ export const render = listView({
   filters: [
     { key: 'status', label: 'Status',
       options: ['OPEN', 'TRIAGED', 'CONTAINED', 'RESOLVED', 'CLOSED'] },
-    { key: 'severity', label: 'Severity', options: ['WARNING', 'HIGH', 'CRITICAL'] },
+    // Incidents open only from HIGH and CRITICAL alerts, so those are the only severities.
+    { key: 'severity', label: 'Severity', options: ['HIGH', 'CRITICAL'] },
   ],
   columns: [
     { label: 'Opened', render: (row) => fmtDate(row.created_at) },

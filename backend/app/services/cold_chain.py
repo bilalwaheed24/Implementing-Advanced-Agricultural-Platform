@@ -76,21 +76,39 @@ def record_reading(db: Session, shipment: Shipment, record: Telemetry) -> None:
     low, high = storage_limits(db, shipment)
     if not outside(temperature, low, high):
         return
-    if notifications.has_open_alert(db, "COMPLIANCE", shipment.id):
+    if notifications.has_open_alert(db, "COMPLIANCE", shipment.id, kind=EXCURSION_KIND):
         return                                   # one open excursion alert per shipment
     batch = db.get(Batch, shipment.batch_id)
     batch_code = batch.batch_code if batch else shipment.batch_id
-    limits = f"{'' if low is None else f'{low:g}'}..{'' if high is None else f'{high:g}'} °C"
+    limits = _limits_text(low, high)
+    when = _aware(record.recorded_at)
     title = f"Cold-chain excursion on shipment {shipment.sscc} (batch {batch_code})"
-    detail = (f"Sensor {record.device_id[:8]} read {temperature:g} °C at "
-              f"{_aware(record.recorded_at).isoformat()}; the product must stay within {limits}.")
+    detail = (f"Sensor {record.device_id[:8]} read {temperature:g} °C on "
+              f"{notifications.human_date(when)} at {when:%H:%M} UTC. The product must stay "
+              f"{limits}.")
+    receiver = shipment.to_org_id if shipment.to_org_id != shipment.org_id else None
     notifications.raise_alert(db, "COMPLIANCE", "HIGH", title, detail=detail,
                               org_id=shipment.org_id, entity_type="Shipment",
-                              entity_id=shipment.id, reasons=["cold_chain_excursion"])
-    if shipment.to_org_id and shipment.to_org_id != shipment.org_id:
-        # The receiver is about to take the goods: it has to know before it accepts them.
-        notifications.notify_org(db, shipment.to_org_id, "COMPLIANCE", title, detail,
-                                 "Shipment", shipment.id, severity="HIGH")
+                              entity_id=shipment.id, reasons=["Temperature out of range"],
+                              notify=False, kind=EXCURSION_KIND, party_org_id=receiver)
+    # Both ends of the leg are told, whatever their roles: the sender (often a farm, whose
+    # users hold none of the COMPLIANCE roles the category fan-out reaches) is responsible for
+    # the goods in transit, and the receiver is about to take them and has to know before it
+    # accepts them. Platform oversight roles for the category are told as well.
+    notifications.notify_parties(db, [shipment.org_id, receiver], "COMPLIANCE", title, detail,
+                                 "Shipment", shipment.id, severity="HIGH",
+                                 include_oversight=True)
+
+
+EXCURSION_KIND = "cold_chain_excursion"
+
+
+def _limits_text(low: float | None, high: float | None) -> str:
+    if low is not None and high is not None:
+        return f"between {low:g} and {high:g} °C"
+    if low is not None:
+        return f"at or above {low:g} °C"
+    return f"at or below {high:g} °C"
 
 
 def summary(db: Session, shipment: Shipment, telemetry_summary: dict[str, Any]) -> dict[str, Any]:

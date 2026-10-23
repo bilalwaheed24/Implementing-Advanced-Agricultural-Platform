@@ -19,7 +19,7 @@ function timelineList(events) {
     el('li', {}, [
       el('strong', { text: titleCase(event.action) }),
       el('div', { class: 'when', text: [fmtDate(event.created_at),
-        event.actor_name ? `by ${event.actor_name}` : 'automatic'].join(' · ') }),
+        `by ${event.actor_name || event.actor_label || 'system'}`].join(' · ') }),
       event.detail ? el('div', { class: 'hint', text: humanizeText(event.detail) }) : null,
     ])));
 }
@@ -149,8 +149,9 @@ function readOnlyCard(incident) {
       parts.push(el('a', { href: `#/screening/${incident.entity_id}`, text: 'Open screening' }));
     }
   } else {
-    parts.push(el('p', { class: 'hint', text: 'Updating incidents requires the incident:write '
-      + 'permission held by security analysts. You can still act on the source record.' }));
+    parts.push(el('p', { class: 'hint', text: 'Only security analysts can update incidents'
+      + (bio ? ' (biosafety officers can also update biosecurity incidents)' : '')
+      + '. You can still act on the source record.' }));
   }
   return el('div', { class: 'card' }, parts);
 }

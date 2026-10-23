@@ -77,7 +77,7 @@ def submit_screening(db: Session, org_id: str, actor_id: str, actor_role: str, n
         severity = "CRITICAL" if status == STATUS_BLOCKED else "HIGH"
         notifications.raise_alert(
             db, "DURC" if durc else "BIOSECURITY", severity,
-            f"Sequence screening {result.verdict}: {name}",
+            f"Sequence {name} {SCREENING_ALERT_TITLES.get(status, 'needs review')}",
             detail="; ".join(result.reasons[:3]), org_id=org_id,
             entity_type="SequenceScreening", entity_id=record.id, reasons=result.reasons)
 
@@ -88,6 +88,13 @@ def submit_screening(db: Session, org_id: str, actor_id: str, actor_role: str, n
         severity={STATUS_BLOCKED: "HIGH", STATUS_PENDING_REVIEW: "WARNING"}.get(status, "INFO"))
     return record
 
+
+# How the alert raised for a screening reads ("Sequence X blocked by screening"); the
+# verdict codes BLOCK and FLAG used to be shown as they are.
+SCREENING_ALERT_TITLES = {
+    STATUS_BLOCKED: "blocked by screening, awaiting biosafety review",
+    STATUS_PENDING_REVIEW: "flagged by screening for biosafety review",
+}
 
 # What the submitter is told, per screening or gene-edit state.
 SCREENING_OUTCOMES = {
