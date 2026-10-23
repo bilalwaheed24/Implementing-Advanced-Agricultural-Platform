@@ -478,7 +478,40 @@ def issue_certification(db: Session, issuer_org_id: str, actor_id: str, actor_ro
                  entity_type="Certification", entity_id=certification.id,
                  detail={"cert_code": cert_code, "cert_type": cert_type,
                          "subject_org_id": subject_org_id})
+    notifications.notify_org(
+        db, subject_org_id, "CERTIFICATION",
+        f"Certification {cert_code} issued to you",
+        f"{issuer.name} issued a {cert_type} certification ({standard}) for: {scope}. "
+        f"Valid {valid_from.date().isoformat()} to {valid_to.date().isoformat()}. You can now "
+        f"claim it on batches you own or hold.", "Certification", certification.id)
     return certification
+
+
+def effective_status(certification: Certification, now: datetime | None = None) -> str:
+    """The status a reader should see. A certificate stored ACTIVE but past its valid_to is
+    EXPIRED even before the scheduled sweep has persisted that."""
+    if certification.status == "ACTIVE" \
+            and _aware(certification.valid_to) < (now or utcnow()):
+        return "EXPIRED"
+    return certification.status
+
+
+def linked_batches(db: Session, certification: Certification) -> list[Batch]:
+    return list(db.execute(select(Batch).join(
+        CertificationLink, CertificationLink.batch_id == Batch.id).where(
+        CertificationLink.certification_id == certification.id)
+        .order_by(Batch.batch_code.asc())).scalars())
+
+
+def certification_parties(db: Session, certification: Certification,
+                          batches: list[Batch] | None = None) -> set[str]:
+    """Everyone a change to the certificate concerns: the issuer, the certified organisation,
+    and the owner and holder of every batch it is claimed on."""
+    batches = linked_batches(db, certification) if batches is None else batches
+    parties = {certification.issuer_org_id, certification.subject_org_id}
+    for batch in batches:
+        parties |= {batch.org_id, batch.custodian_org_id}
+    return {p for p in parties if p}
 
 
 def revoke_certification(db: Session, certification: Certification, actor_id: str,
@@ -498,15 +531,89 @@ def revoke_certification(db: Session, certification: Certification, actor_id: st
                  entity_id=certification.id,
                  detail={"reason": reason, "anchored": bool(receipt.get("ok"))})
 
-    for link in db.execute(select(CertificationLink).where(
-            CertificationLink.certification_id == certification.id)).scalars():
-        batch = db.get(Batch, link.batch_id)
-        if batch:
-            notifications.raise_alert(
-                db, "CERTIFICATION", "HIGH",
-                f"Certification {certification.cert_code} revoked; batch {batch.batch_code} affected",
-                detail=reason, org_id=batch.org_id, entity_type="Batch", entity_id=batch.id)
+    batches = linked_batches(db, certification)
+    for batch in batches:
+        # A VERIFIED verdict was reached while this certificate was valid, so it no longer
+        # stands. UNVERIFIED rather than SUSPECT: a revocation is not evidence that the batch
+        # itself was tampered with, and SUSPECT is the fraud model's verdict, which drives fraud
+        # alerts and dashboards. UNVERIFIED says "re-verify"; the next integrity check sees the
+        # revoked claim and reaches an evidence-based verdict. A worse verdict is left alone.
+        if batch.integrity_status == "VERIFIED":
+            batch.integrity_status = "UNVERIFIED"
+        notifications.raise_alert(
+            db, "CERTIFICATION", "HIGH",
+            f"Certification {certification.cert_code} revoked; batch {batch.batch_code} affected",
+            detail=reason, org_id=batch.org_id, entity_type="Batch", entity_id=batch.id,
+            notify=False)
+    db.flush()
+    claimed = ", ".join(b.batch_code for b in batches[:20]) or "no batch"
+    notifications.notify_parties(
+        db, certification_parties(db, certification, batches), "CERTIFICATION",
+        f"Certification {certification.cert_code} revoked",
+        f"Reason: {reason}. Claimed on: {claimed}. Those batches must be re-verified and may "
+        f"no longer carry the {certification.cert_type} claim.",
+        "Certification", certification.id, severity="HIGH", include_oversight=True)
     return certification
+
+
+def sweep_certification_expiry(db: Session, warn_days: int = 30) -> dict[str, int]:
+    """Expire certificates past valid_to and warn about those expiring within `warn_days`.
+
+    Both reach the certified organisation and every holder of a batch the certificate is
+    claimed on, not only the issuer. Safe to run repeatedly: an expiry happens once (the status
+    leaves ACTIVE) and a warning is skipped while one is still open for the certificate.
+    """
+    from datetime import timedelta
+
+    now = utcnow()
+    horizon = now + timedelta(days=warn_days)
+    expired = warned = 0
+    for certification in list(db.execute(select(Certification).where(
+            Certification.status == "ACTIVE",
+            Certification.valid_to <= horizon)).scalars()):
+        valid_to = _aware(certification.valid_to)
+        batches = linked_batches(db, certification)
+        claimed = ", ".join(b.batch_code for b in batches[:20]) or "no batch"
+        if valid_to < now:
+            certification.status = "EXPIRED"
+            db.flush()
+            audit.record(db, "cert.expire", actor_id=None, actor_role=None,
+                         org_id=certification.issuer_org_id, entity_type="Certification",
+                         entity_id=certification.id,
+                         detail={"cert_code": certification.cert_code,
+                                 "valid_to": valid_to.isoformat()})
+            # The "expires soon" warning has been overtaken by the expiry itself.
+            notifications.resolve_entity_alerts(db, "Certification", certification.id, None,
+                                                "Superseded: the certificate has expired")
+            notifications.raise_alert(
+                db, "CERTIFICATION", "WARNING",
+                f"Certification {certification.cert_code} has expired",
+                detail=f"Valid until {valid_to.date().isoformat()}. Claimed on: {claimed}.",
+                org_id=certification.subject_org_id, entity_type="Certification",
+                entity_id=certification.id, notify=False, open_incident=False)
+            notifications.notify_parties(
+                db, certification_parties(db, certification, batches), "CERTIFICATION",
+                f"Certification {certification.cert_code} has expired",
+                f"It was valid until {valid_to.date().isoformat()} and no longer authenticates. "
+                f"Claimed on: {claimed}.", "Certification", certification.id,
+                severity="WARNING")
+            expired += 1
+            continue
+        if notifications.has_open_alert(db, "CERTIFICATION", certification.id):
+            continue
+        notifications.raise_alert(
+            db, "CERTIFICATION", "WARNING",
+            f"Certification {certification.cert_code} expires soon",
+            detail=f"Valid until {valid_to.date().isoformat()}. Claimed on: {claimed}.",
+            org_id=certification.issuer_org_id, entity_type="Certification",
+            entity_id=certification.id, notify=False, open_incident=False)
+        notifications.notify_parties(
+            db, certification_parties(db, certification, batches), "CERTIFICATION",
+            f"Certification {certification.cert_code} expires soon",
+            f"Valid until {valid_to.date().isoformat()}. Claimed on: {claimed}.",
+            "Certification", certification.id, severity="WARNING")
+        warned += 1
+    return {"expired": expired, "expiring": warned}
 
 
 def link_certification(db: Session, certification: Certification, batch: Batch, actor_id: str,
@@ -522,9 +629,10 @@ def link_certification(db: Session, certification: Certification, batch: Batch, 
         raise PermissionDenied(
             f"Certification {certification.cert_code} was issued to a different "
             f"organisation and cannot be claimed on this batch")
-    if certification.status != "ACTIVE":
+    status = effective_status(certification)
+    if status != "ACTIVE":
         raise ValidationFailed(
-            f"Certification {certification.cert_code} is {certification.status}, not ACTIVE, "
+            f"Certification {certification.cert_code} is {status}, not ACTIVE, "
             f"and cannot be linked")
     if db.execute(select(CertificationLink).where(
             CertificationLink.certification_id == certification.id,
@@ -566,7 +674,8 @@ def authenticate_certifications(db: Session, batch: Batch,
         scope_ok = True     # scope is free text in this implementation; see Known Limitations
         results.append({
             "cert_code": certification.cert_code, "cert_type": certification.cert_type,
-            "standard": certification.standard, "status": certification.status,
+            "standard": certification.standard,
+            "status": effective_status(certification, now),
             "issuer": issuer.name if issuer else "unknown", "issuer_trusted": trusted,
             "valid_from": valid_from, "valid_to": valid_to, "within_validity": in_window,
             "scope_matches": scope_ok,
@@ -657,7 +766,10 @@ def verify_batch(db: Session, batch: Batch, actor_id: str | None = None,
 
     integrity = {"VERIFIED": "VERIFIED", "SUSPECT": "SUSPECT", "FAILED": "FAILED"}[verdict["level"]]
     batch.integrity_status = integrity
-    db.add(FraudAssessment(batch_id=batch.id, org_id=batch.org_id, score=verdict["score"],
+    # Stored for both parties to the batch: the owner, and the custodian — usually the
+    # processor that ran the check, which otherwise could not read its own result.
+    db.add(FraudAssessment(batch_id=batch.id, org_id=batch.org_id,
+                           custodian_org_id=batch.custodian_org_id, score=verdict["score"],
                            level=verdict["level"], reasons=verdict["reasons"],
                            ledger_status=ledger_status, model_version=verdict["model_version"]))
     db.flush()
@@ -671,11 +783,12 @@ def verify_batch(db: Session, batch: Batch, actor_id: str | None = None,
                              "rules": verdict["rules_triggered"]})
 
     if integrity != "VERIFIED":
-        notifications.raise_alert(
+        notifications.alert_parties(
             db, "FRAUD", "CRITICAL" if integrity == "FAILED" else "HIGH",
             f"Supply-chain integrity {integrity} for batch {batch.batch_code}",
             detail="; ".join(r["detail"] for r in verdict["reasons"][:3]),
-            org_id=batch.org_id, entity_type="Batch", entity_id=batch.id,
+            org_id=batch.org_id, party_org_ids=[batch.custodian_org_id],
+            entity_type="Batch", entity_id=batch.id,
             reasons=[r["rule"] for r in verdict["reasons"]])
 
     return {

@@ -395,8 +395,11 @@ def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now) -> 
 
     for jurisdiction in ("US-USDA", "EU"):
         try:
+            # Run, and anchored, by the regulator's own organisation. The report is still
+            # visible to the batch's owner and custodian (ComplianceReport.owner_org_id /
+            # custodian_org_id), so it no longer has to be filed under the supplier to be seen.
             compliance.evaluate_batch(db, batch, jurisdiction, reg_user.id, reg_user.role,
-                                      supply_org.id)
+                                      regulator.id)
             db.flush()
         except Exception as error:                                  # noqa: BLE001
             print(f"  compliance seed skipped for {jurisdiction}: {error}")

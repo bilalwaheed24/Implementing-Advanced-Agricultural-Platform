@@ -618,6 +618,10 @@ class FraudAssessment(Base):
     id: Mapped[str] = _pk()
     batch_id: Mapped[str] = mapped_column(ForeignKey("batches.id"), nullable=False, index=True)
     org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    # The batch's custodian when the check ran (migration 0006). Usually the processor that ran
+    # it; repositories.scoped() makes the assessment visible to it as well as to the owner.
+    custodian_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"),
+                                                         index=True)
     score: Mapped[float] = mapped_column(Float, nullable=False)
     level: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     reasons: Mapped[list[Any]] = mapped_column(JSON, default=list)
@@ -629,7 +633,14 @@ class FraudAssessment(Base):
 class ComplianceReport(Base):
     __tablename__ = "compliance_reports"
     id: Mapped[str] = _pk()
+    # The organisation that ran the evaluation and anchored the report (often the regulator).
     org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    # The parties to the subject (migration 0006): a batch's owner and custodian, or a GMO
+    # event's developer. A report about a batch is as much theirs as the runner's, so
+    # repositories.scoped() makes it visible to them too.
+    owner_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"), index=True)
+    custodian_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"),
+                                                         index=True)
     report_type: Mapped[str] = mapped_column(String(40), default="COMPLIANCE", nullable=False)
     subject_type: Mapped[str] = mapped_column(String(40), nullable=False)
     subject_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)

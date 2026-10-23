@@ -217,8 +217,43 @@ def list_certifications(db: DbSession, paging: PagingDep,
     if cert_type:
         query = query.where(Certification.cert_type == cert_type.upper())
     rows, total = paginate(db, query, paging.page, paging.page_size)
-    return Page[CertificationOut](items=[CertificationOut.model_validate(r) for r in rows],
+    return Page[CertificationOut](items=_certifications_out(db, rows, principal),
                                   total=total, page=paging.page, page_size=paging.page_size)
+
+
+def _certifications_out(db, rows: list[Certification], principal) -> list[CertificationOut]:
+    """Certificates as a reader needs them: the effective status (EXPIRED once past valid_to,
+    even before the expiry sweep has run), the issuer and subject by name, and the batches the
+    certificate is claimed on. A claimed batch the caller cannot open is listed by code only."""
+    if not rows:
+        return []
+    ids = [r.id for r in rows]
+    org_ids = {r.issuer_org_id for r in rows} | {r.subject_org_id for r in rows}
+    names = {o.id: o.name for o in db.execute(
+        select(Organization).where(Organization.id.in_(org_ids))).scalars()}
+    claims: dict[str, list[Batch]] = {}
+    for link, batch in db.execute(
+            select(CertificationLink, Batch).join(Batch, Batch.id == CertificationLink.batch_id)
+            .where(CertificationLink.certification_id.in_(ids))
+            .order_by(Batch.batch_code.asc())).all():
+        claims.setdefault(link.certification_id, []).append(batch)
+    batch_ids = {b.id for batches in claims.values() for b in batches}
+    readable = set()
+    if batch_ids:
+        readable = set(db.execute(visible(Batch, principal.role, principal.org_id)
+                                  .where(Batch.id.in_(batch_ids))
+                                  .with_only_columns(Batch.id)).scalars())
+    out = []
+    for row in rows:
+        item = CertificationOut.model_validate(row)
+        item.status = service.effective_status(row)
+        item.issuer_org_name = names.get(row.issuer_org_id)
+        item.subject_org_name = names.get(row.subject_org_id)
+        item.claimed_batches = [{"id": b.id if b.id in readable else None,
+                                 "batch_code": b.batch_code}
+                                for b in claims.get(row.id, [])]
+        out.append(item)
+    return out
 
 
 @router.post("/certifications/{certification_id}/revoke", response_model=CertificationOut,
@@ -233,7 +268,7 @@ def revoke_certification(certification_id: str, payload: RevokeRequest, db: DbSe
         raise NotFound("Certification not found")
     service.revoke_certification(db, certification, principal.id, principal.role, payload.reason)
     db.commit()
-    return CertificationOut.model_validate(certification)
+    return _certifications_out(db, [certification], principal)[0]
 
 
 @router.post("/certifications/{certification_id}/link", status_code=201,

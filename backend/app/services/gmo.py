@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.errors import Conflict, NotFound, PermissionDenied, ValidationFailed
+from ..core.permissions import Role
 from ..core.security import content_hash, ensure_aware as _aware, utcnow
 from ..models import Batch, GMOApproval, GMOEvent, Organization, SeedLot, SequenceScreening
 from ..repositories import get_or_404
@@ -41,6 +42,24 @@ APPROVAL_TRANSITIONS: dict[str, frozenset[str]] = {
 
 # Approval states that permit a GMO event to be taken forward into seed lots and batches.
 APPROVED_STATUSES = frozenset({"APPROVED"})
+
+
+def is_live(approval: GMOApproval | None, now: datetime | None = None) -> bool:
+    """True when an approval currently permits the event: APPROVED, already in force (no
+    future decision date) and not yet expired. The single definition every check uses —
+    seed lots, plantings, batches, labelling and the selectors that offer events."""
+    if approval is None or approval.status not in APPROVED_STATUSES:
+        return False
+    now = now or utcnow()
+    return ((approval.approved_at is None or _aware(approval.approved_at) <= now)
+            and (approval.expires_at is None or _aware(approval.expires_at) > now))
+
+
+def live_event_ids(db: Session, now: datetime | None = None) -> set[str]:
+    """Ids of the GMO events holding at least one live approval."""
+    now = now or utcnow()
+    return {a.gmo_event_id for a in db.execute(select(GMOApproval).where(
+        GMOApproval.status.in_(APPROVED_STATUSES))).scalars() if is_live(a, now)}
 
 
 def require_registerable_event(db: Session, gmo_event_id: str, actor_role: str,
@@ -80,9 +99,7 @@ def require_live_approval(db: Session, event: GMOEvent, use: str) -> None:
             f"GMO event {event.event_code} has no jurisdictional approval on record. {use} "
             f"may only carry an approved event.")
     now = utcnow()
-    live = [a for a in approvals if a.status in APPROVED_STATUSES
-            and (a.approved_at is None or _aware(a.approved_at) <= now)
-            and (a.expires_at is None or _aware(a.expires_at) > now)]
+    live = [a for a in approvals if is_live(a, now)]
     if not live:
         states = sorted({a.status for a in approvals})
         raise ValidationFailed(
@@ -128,6 +145,14 @@ def register_event(db: Session, org_id: str, actor_id: str, actor_role: str, eve
                  org_id=org_id, entity_type="GMOEvent", entity_id=event.id,
                  detail={"event_code": event_code, "anchor_status": event.anchor_status,
                          "tx_id": event.tx_id})
+    # Registration does not make an event usable: a regulator must take a jurisdictional
+    # decision first, so the regulators are told there is one waiting.
+    notifications.notify_roles(
+        db, [Role.REGULATOR], "GMO",
+        f"GMO event {event_code} awaits a jurisdictional decision",
+        f"{developer} registered {crop_type} event {event_code} ({trait}). No jurisdiction has "
+        f"approved it yet, so it cannot be propagated into seed lots or batches.",
+        "GMOEvent", event.id)
     return event
 
 
@@ -203,7 +228,140 @@ def record_approval(db: Session, event: GMOEvent, actor_id: str, actor_role: str
                  detail={"jurisdiction": jurisdiction, "status": status,
                          "previous_status": previous_status,
                          "anchored": bool(receipt.get("ok"))})
+
+    # The developer is told every decision on its event.
+    expiry = f", expires {_aware(expires_at).date().isoformat()}" if expires_at else ""
+    notifications.notify_org(
+        db, event.org_id, "GMO",
+        f"GMO event {event.event_code}: {jurisdiction} decision {status}",
+        f"The regulator recorded {status} for {jurisdiction}"
+        + (f" (previously {previous_status})" if previous_status else "")
+        + f"{expiry}. Reference: {reference or 'none'}.",
+        "GMOEvent", event.id, severity="WARNING" if status == "REJECTED" else "INFO")
+
+    if previous_status in APPROVED_STATUSES and status not in APPROVED_STATUSES:
+        approval_lost(db, event, approval, "withdrawn", actor_id=actor_id,
+                      already_notified={event.org_id})
     return approval
+
+
+def affected_holdings(db: Session, event: GMOEvent) -> tuple[list[SeedLot], list[Batch]]:
+    """Every seed lot and batch whose lineage carries `event`.
+
+    Seed lots name the event directly. Batches carry it directly, through their seed lot, or
+    through a parent batch, so the walk descends from those roots and keeps a descendant only
+    while `lineage_gmo_event` still resolves to this event (a child naming another event of its
+    own is not affected).
+    """
+    lots = list(db.execute(select(SeedLot).where(SeedLot.gmo_event_id == event.id)).scalars())
+    lot_ids = [lot.id for lot in lots]
+    roots = select(Batch).where(Batch.gmo_event_id == event.id)
+    if lot_ids:
+        roots = select(Batch).where((Batch.gmo_event_id == event.id)
+                                    | Batch.seed_lot_id.in_(lot_ids))
+    found: dict[str, Batch] = {}
+    frontier = [b for b in db.execute(roots).scalars()
+                if (_lineage_gmo_event(db, b) or event).id == event.id]
+    while frontier:
+        for batch in frontier:
+            found[batch.id] = batch
+        children = db.execute(select(Batch).where(
+            Batch.parent_batch_id.in_([b.id for b in frontier]))).scalars()
+        frontier = [c for c in children if c.id not in found
+                    and (_lineage_gmo_event(db, c) or event).id == event.id]
+    return lots, list(found.values())
+
+
+def approval_lost(db: Session, event: GMOEvent, approval: GMOApproval, how: str, *,
+                  actor_id: str | None = None,
+                  already_notified: set[str] | None = None) -> dict[str, Any]:
+    """Propagate a withdrawn or expired approval to everyone carrying the event.
+
+    The approval gate only stops *new* seed lots and batches. Material already produced still
+    carries the event, and whoever owns or holds it may now be unable to plant, sell or release
+    it in that jurisdiction — so each party is told, and each affected batch gets a COMPLIANCE
+    alert in its owner's organisation that a compliance re-evaluation will confirm or clear.
+    """
+    lots, batches = affected_holdings(db, event)
+    still_live = sorted(a.jurisdiction for a in db.execute(select(GMOApproval).where(
+        GMOApproval.gmo_event_id == event.id)).scalars() if is_live(a))
+    remaining = (f"Still approved in: {', '.join(still_live)}." if still_live
+                 else "It is no longer approved in any jurisdiction.")
+    title = f"GMO approval {how}: {event.event_code} in {approval.jurisdiction}"
+
+    # One record of the lapse itself, owned by the developer, so a regulator scanning alerts
+    # sees it and the expiry sweep can tell it has already been handled.
+    notifications.raise_alert(
+        db, "COMPLIANCE", "HIGH", title,
+        detail=f"{len(lots)} seed lot(s) and {len(batches)} batch(es) carry the event. "
+               f"{remaining}",
+        org_id=event.org_id, entity_type="GMOApproval", entity_id=approval.id,
+        notify=False, open_incident=False)
+    for batch in batches:
+        notifications.raise_alert(
+            db, "COMPLIANCE", "HIGH",
+            f"Batch {batch.batch_code}: GMO approval {how} for {event.event_code} "
+            f"in {approval.jurisdiction}",
+            detail=f"The batch's lineage carries {event.event_code}. Re-evaluate its compliance "
+                   f"before releasing it into {approval.jurisdiction}. {remaining}",
+            org_id=batch.org_id, entity_type="Batch", entity_id=batch.id,
+            notify=False, open_incident=False)
+
+    # One notification per organisation concerned, saying what of theirs is affected.
+    parties: dict[str, list[str]] = {event.org_id: []}
+    for lot in lots:
+        for org_id in {lot.org_id, lot.custodian_org_id or lot.org_id}:
+            parties.setdefault(org_id, []).append(f"seed lot {lot.lot_code}")
+    for batch in batches:
+        for org_id in {batch.org_id, batch.custodian_org_id}:
+            parties.setdefault(org_id, []).append(f"batch {batch.batch_code}")
+    skip = already_notified or set()
+    for org_id, items in parties.items():
+        if org_id in skip and not items:
+            continue
+        held = (f"Affected: {', '.join(sorted(set(items))[:20])}"
+                + (" and more." if len(set(items)) > 20 else ".")) if items else \
+            "No seed lot or batch carries the event yet."
+        notifications.notify_org(
+            db, org_id, "COMPLIANCE", title, f"{held} {remaining}", "GMOEvent", event.id,
+            severity="HIGH")
+
+    audit.record(db, f"gmo.approval_{how}", actor_id=actor_id, actor_role=None,
+                 org_id=event.org_id, entity_type="GMOEvent", entity_id=event.id,
+                 detail={"jurisdiction": approval.jurisdiction, "seed_lots": len(lots),
+                         "batches": len(batches), "organisations": len(parties)})
+    return {"event_code": event.event_code, "jurisdiction": approval.jurisdiction,
+            "seed_lots": [lot.id for lot in lots], "batches": [b.id for b in batches],
+            "organisations": sorted(parties)}
+
+
+def sweep_expired_approvals(db: Session) -> list[dict[str, Any]]:
+    """Propagate every approval that has expired since it was last handled.
+
+    Idempotent without extra state: an expired approval counts as handled once a COMPLIANCE
+    alert for it exists that was raised at or after its expiry. A renewed approval has a new
+    expiry date, so its later lapse is handled again.
+    """
+    from ..models import Alert
+
+    now = utcnow()
+    results = []
+    for approval in db.execute(select(GMOApproval).where(
+            GMOApproval.status.in_(APPROVED_STATUSES),
+            GMOApproval.expires_at.is_not(None))).scalars():
+        expires_at = _aware(approval.expires_at)
+        if expires_at > now:
+            continue
+        handled = any(_aware(created) >= expires_at for created in db.execute(
+            select(Alert.created_at).where(Alert.category == "COMPLIANCE",
+                                           Alert.entity_type == "GMOApproval",
+                                           Alert.entity_id == approval.id)).scalars())
+        if handled:
+            continue
+        event = db.get(GMOEvent, approval.gmo_event_id)
+        if event is not None:
+            results.append(approval_lost(db, event, approval, "expired"))
+    return results
 
 
 def create_seed_lot(db: Session, org_id: str, actor_id: str, actor_role: str, lot_code: str,
@@ -296,12 +454,18 @@ def validate_labelling(db: Session, batch: Batch, jurisdiction: str,
         approval = db.execute(select(GMOApproval).where(
             GMOApproval.gmo_event_id == lineage_event.id,
             GMOApproval.jurisdiction == jurisdiction.upper())).scalar_one_or_none()
-        approved = approval.status == "APPROVED" if approval else False
+        # The same predicate as the seed-lot and batch gates: an expired approval, or one
+        # whose decision date is still in the future, does not permit release.
+        approved = is_live(approval)
         if not approved:
+            state = approval.status if approval else "NOT_SUBMITTED"
+            if approval is not None and approval.status in APPROVED_STATUSES:
+                state = ("expired" if approval.expires_at
+                         and _aware(approval.expires_at) <= utcnow() else "not yet in force")
             findings.append({
                 "rule": "approval_required", "passed": False, "citation": rule["citation"],
                 "detail": f"GMO event {lineage_event.event_code} is not approved in "
-                          f"{jurisdiction} (status: {approval.status if approval else 'NOT_SUBMITTED'})"})
+                          f"{jurisdiction} (status: {state})"})
         else:
             findings.append({"rule": "approval_required", "passed": True,
                              "citation": rule["citation"],
@@ -356,12 +520,14 @@ def check_release(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
                  detail={"jurisdiction": jurisdiction, "compliant": result["compliant"],
                          "requires_label": result["requires_label"]})
     if not result["compliant"]:
-        notifications.raise_alert(
+        # The holder trying to release it and the owner both need to know.
+        notifications.alert_parties(
             db, "COMPLIANCE", "HIGH",
             f"Labelling non-compliance on batch {batch.batch_code}",
             detail=f"Release into {jurisdiction} blocked: "
                    + "; ".join(f["detail"] for f in result["findings"] if not f["passed"]),
-            org_id=batch.org_id, entity_type="Batch", entity_id=batch.id)
+            org_id=batch.org_id, party_org_ids=[batch.custodian_org_id],
+            entity_type="Batch", entity_id=batch.id)
     return result
 
 

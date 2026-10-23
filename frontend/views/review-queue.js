@@ -2,7 +2,9 @@ import { el, api, badge, fmtDate, fmtPct, table, empty, titleCase } from '/stati
 
 export async function render() {
   const queue = await api('/biosecurity/screenings/queue');
-  const crispr = await api('/biosecurity/crispr?durc_only=true&page_size=25')
+  // Every gene-edit proposal still awaiting a decision (high or prohibited risk, or dual-use),
+  // not every dual-use proposal ever flagged: reviewed ones have left the queue.
+  const crispr = await api('/biosecurity/crispr?status=PENDING_REVIEW&page_size=100')
     .catch(() => ({ items: [] }));
 
   return el('div', {}, [
@@ -20,18 +22,26 @@ export async function render() {
         { label: 'Identity', numeric: true, render: (row) => fmtPct(row.max_identity, 1) },
         { label: 'DURC', render: (row) => row.durc_flag ? badge('CRITICAL') : '—' },
         { label: 'Status', render: (row) => badge(row.status) },
+        { label: 'Action', render: (row) => el('a', { href: `#/screening/${row.id}`,
+          text: 'Review' }) },
       ], queue) : empty('Queue is empty', 'No screening currently requires review.'),
     ]),
     el('div', { class: 'card' }, [
-      el('h2', { text: `Gene-edit proposals flagged as dual-use (${crispr.items.length})` }),
+      el('h2', { text: `Gene-edit proposals awaiting review (${crispr.items.length})` }),
       crispr.items.length ? table([
+        { label: 'Submitted', render: (row) => fmtDate(row.created_at) },
         { label: 'Target gene', key: 'target_gene' },
         { label: 'Organism', key: 'organism' },
         { label: 'Edit type', render: (row) => titleCase(row.edit_type) },
         { label: 'Risk', render: (row) => badge(row.risk_level) },
         { label: 'Score', numeric: true, render: (row) => row.risk_score },
+        { label: 'DURC', render: (row) => row.durc_flag ? badge('CRITICAL') : '—' },
         { label: 'Status', render: (row) => badge(row.status) },
-      ], crispr.items) : empty('No dual-use proposals', 'Nothing has been flagged.'),
+        // The CRISPR register carries the review control (four-eyes aware).
+        { label: 'Action', render: () => el('a', {
+          href: '#/crispr?status=PENDING_REVIEW', text: 'Review' }) },
+      ], crispr.items) : empty('No proposals awaiting review',
+        'No gene-edit proposal currently requires a decision.'),
     ]),
   ]);
 }

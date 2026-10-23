@@ -21,8 +21,10 @@ export async function render({ id }) {
     ]),
     el('div', { class: 'tile' }, [
       el('div', { class: 'label', text: 'Dual-use flag' }),
+      // A green "Verified" tick here sat next to a FLAG or BLOCK verdict and read as if the
+      // screening had been cleared. No flag is a neutral fact, not a verification.
       el('div', { class: 'u-mt-6' }, [screening.durc_flag
-        ? badge('CRITICAL') : badge('VERIFIED')]),
+        ? badge('CRITICAL') : badge('NOT_FLAGGED', 'neutral')]),
     ]),
   ]);
 
@@ -102,8 +104,11 @@ export async function render({ id }) {
     }
     parts.push(el('div', { class: 'card' }, [
       el('h2', { text: 'Biosafety review required' }),
-      el('p', { class: 'hint', text: 'Only a biosafety officer can release a blocked record, '
-        + 'and the decision is audit-logged with its rationale.' }),
+      el('p', { class: 'hint', text: screening.status === 'BLOCKED'
+        ? 'Only a biosafety officer can release a blocked record, and the decision is '
+          + 'audit-logged with its rationale.'
+        : 'The screening engine flagged this sequence for human judgement. Approve or reject '
+          + 'it; the decision is audit-logged with its rationale and the submitter is told.' }),
       field('Rationale', rationale),
       message,
       el('div', { class: 'row' }, [

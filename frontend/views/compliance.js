@@ -1,4 +1,4 @@
-import { el, api, badge, field, fmtDate, jurisdictionLabel, table, empty, toast, can,
+import { el, api, badge, field, fmtDate, fmtPct, jurisdictionLabel, toast, can,
          reasonList, titleCase } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { remoteSelect } from '/static/views/formkit.js';
@@ -42,6 +42,77 @@ function evaluateForm(reload) {
   return el('div', {}, [toggle, form]);
 }
 
+/* Release check (labelling + live GMO approval) for a batch the caller holds. Releasing is
+ * the holder's act, so the API requires supply:write and current custody. */
+function releaseForm() {
+  const batchId = remoteSelect({
+    endpoint: '/supply-chain/batches',
+    label: (row) => `${row.batch_code} — ${titleCase(row.state)}`,
+    placeholder: 'Select a batch you hold',
+    emptyLabel: 'No batch is visible to your role',
+    requires: 'supply:read',
+  });
+  const jurisdiction = el('select', {}, ['US-USDA', 'US-FDA', 'EU', 'CODEX']
+    .map((v) => el('option', { value: v, text: jurisdictionLabel(v) })));
+  const message = el('div', { class: 'error-text', role: 'alert' });
+  const result = el('div');
+  const form = el('form', { class: 'u-hidden' }, [
+    el('p', { class: 'hint', text: 'Checks GMO labelling and that the lineage event holds a '
+      + 'live approval in the destination. A failed check is recorded and alerts the batch '
+      + 'owner and holder.' }),
+    el('div', { class: 'grid cols-2' }, [
+      field('Batch', batchId),
+      field('Destination', jurisdiction),
+    ]),
+    message, result,
+    el('button', { class: 'primary', type: 'submit', text: 'Check release' }),
+  ]);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    message.textContent = '';
+    result.replaceChildren();
+    try {
+      const check = await api(`/gmo/labelling/${batchId.value}/check-release`
+        + `?jurisdiction=${encodeURIComponent(jurisdiction.value)}`, { method: 'POST' });
+      toast(check.compliant ? 'Release permitted' : 'Release blocked',
+        check.compliant ? 'ok' : 'error');
+      result.replaceChildren(el('div', { class: 'u-mt-12' }, [
+        badge(check.compliant ? 'COMPLIANT' : 'NON_COMPLIANT'),
+        check.required_label_text
+          ? el('p', { class: 'hint', text: `Label required: "${check.required_label_text}"` })
+          : null,
+        reasonList((check.findings || []).map((f) => ({ rule: f.rule, detail: f.detail }))),
+      ]));
+    } catch (error) { message.textContent = error.message; }
+  });
+  const toggle = el('button', { text: 'Check a release', onClick: () => {
+    form.classList.toggle('u-hidden');
+  } });
+  return el('div', {}, [toggle, form]);
+}
+
+/* Pass rate as a percentage everywhere, with the counts behind it. An environmental-impact
+ * assessment records findings rather than pass/fail rules, so it has no rate. */
+function passRate(row) {
+  const total = row.summary?.rules_evaluated;
+  if (total === undefined || total === null) return '—';
+  const passed = row.summary?.passed;
+  if (passed === undefined || passed === null) {
+    return el('span', { class: 'hint', text: `${total} finding${total === 1 ? '' : 's'}` });
+  }
+  const rate = total ? passed / total : 0;
+  return el('span', { title: `${passed} of ${total} rules passed` },
+    [`${fmtPct(rate, 0)} `, el('span', { class: 'hint', text: `(${passed}/${total})` })]);
+}
+
+function subjectCell(row) {
+  if (row.subject_type === 'BATCH') {
+    return el('a', { class: 'mono', href: `#/batch/${row.subject_id}`,
+      text: row.summary?.batch_code || String(row.subject_id).slice(0, 8) });
+  }
+  return el('span', { class: 'mono', text: row.summary?.event_code || '—' });
+}
+
 export function render(context) {
   return listView({
     title: 'Regulatory compliance',
@@ -53,22 +124,20 @@ export function render(context) {
         options: ['US-USDA', 'US-FDA', 'EU', 'CODEX', 'GS1'] },
       { key: 'report_type', label: 'Type', options: ['COMPLIANCE', 'ENVIRONMENTAL_IMPACT'] },
     ],
-    actions: ({ reload }) => (can('compliance:run') ? evaluateForm(reload) : null),
+    actions: ({ reload }) => {
+      const panels = [
+        can('compliance:run') ? evaluateForm(reload) : null,
+        can('supply:write') ? releaseForm() : null,
+      ].filter(Boolean);
+      return panels.length ? el('div', { class: 'row u-toolbar' }, panels) : null;
+    },
     columns: [
       { label: 'Generated', render: (row) => fmtDate(row.created_at) },
       { label: 'Type', render: (row) => titleCase(row.report_type) },
+      { label: 'Batch / event', render: (row) => subjectCell(row) },
       { label: 'Jurisdiction', render: (row) => jurisdictionLabel(row.jurisdiction) },
       { label: 'Status', render: (row) => badge(row.status) },
-      // An environmental-impact assessment records findings, not pass/fail rules, so it has
-      // no `passed` count — rendering it as "—/4" read like a broken number.
-      { label: 'Pass rate', numeric: true, render: (row) => {
-        const total = row.summary?.rules_evaluated;
-        if (total === undefined || total === null) return '—';
-        const passed = row.summary?.passed;
-        return passed === undefined || passed === null
-          ? `${total} finding${total === 1 ? '' : 's'}`
-          : `${passed}/${total}`;
-      } },
+      { label: 'Pass rate', numeric: true, render: (row) => passRate(row) },
       { label: 'Anchor', render: (row) => badge(row.anchor_status) },
       { label: 'Detail', render: (row) => el('details', {}, [
         el('summary', { class: 'hint', text: 'Rule results' }),

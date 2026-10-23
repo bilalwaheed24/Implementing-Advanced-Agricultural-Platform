@@ -15,6 +15,7 @@ from ..core.errors import NotFound, PermissionDenied, ValidationFailed
 from ..core.security import ensure_aware as _aware, content_hash, utcnow
 from ..models import (Batch, ComplianceReport, GMOApproval, GMOEvent, Organization, Product,
                       SequenceScreening, SupplyChainEvent)
+from ..repositories import scoped
 from . import audit, gmo as gmo_service, ledger_client, notifications, supplychain
 
 DISCLAIMER = ("Automated evaluation of publicly published regulatory requirements. "
@@ -83,8 +84,8 @@ def rule_gmo_approval(db: Session, batch: Batch, ctx: dict) -> dict[str, Any]:
         GMOApproval.gmo_event_id == event.id,
         GMOApproval.jurisdiction == jurisdiction)).scalar_one_or_none()
     status = approval.status if approval else "NOT_SUBMITTED"
-    expired = bool(approval and approval.expires_at and _aware(approval.expires_at) < utcnow())
-    passed = status == "APPROVED" and not expired
+    expired = bool(approval and approval.expires_at and _aware(approval.expires_at) <= utcnow())
+    passed = gmo_service.is_live(approval)
     return _result(
         "GMO-001", "GMO approval in the destination jurisdiction",
         "EU 1829/2003 / USDA APHIS 7 CFR 340", passed, "CRITICAL",
@@ -262,8 +263,11 @@ def evaluate_batch(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
         "disclaimer": DISCLAIMER,
     }
 
+    # org_id is the organisation that ran and anchors the report; the batch's owner and
+    # custodian are parties to it too and read it through repositories.scoped().
     report = ComplianceReport(
-        org_id=org_id, report_type="COMPLIANCE", subject_type="BATCH", subject_id=batch.id,
+        org_id=org_id, owner_org_id=batch.org_id, custodian_org_id=batch.custodian_org_id,
+        report_type="COMPLIANCE", subject_type="BATCH", subject_id=batch.id,
         jurisdiction=jurisdiction, status=status, results=results, summary=summary,
         generated_by=actor_id)
     db.add(report)
@@ -285,13 +289,22 @@ def evaluate_batch(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
                  detail={"batch_code": batch.batch_code, "jurisdiction": jurisdiction,
                          "status": status, "failed_rules": [r["rule_id"] for r in failed]})
 
+    # The alert belongs to the batch's owner (it is about their batch), and the owner, the
+    # custodian and the runner are all told. Previously it was filed under the runner — usually
+    # the regulator — so neither party to the batch saw it.
+    parties = [batch.custodian_org_id, org_id]
     if status != "COMPLIANT":
-        notifications.raise_alert(
+        notifications.alert_parties(
             db, "COMPLIANCE", "CRITICAL" if critical_failures else "HIGH",
             f"Batch {batch.batch_code} is {status} in {jurisdiction}",
-            detail="; ".join(r["detail"] for r in failed[:3]), org_id=org_id,
-            entity_type="Batch", entity_id=batch.id,
+            detail="; ".join(r["detail"] for r in failed[:3]), org_id=batch.org_id,
+            party_org_ids=parties, entity_type="Batch", entity_id=batch.id,
             reasons=[r["rule_id"] for r in failed])
+    else:
+        notifications.notify_parties(
+            db, [batch.org_id, *parties], "COMPLIANCE",
+            f"Batch {batch.batch_code} is COMPLIANT in {jurisdiction}",
+            f"All {len(results)} rules passed.", "Batch", batch.id)
     return report
 
 
@@ -377,7 +390,8 @@ def environmental_impact(db: Session, event: GMOEvent, actor_id: str, actor_role
                "disclaimer": DISCLAIMER}
 
     report = ComplianceReport(
-        org_id=org_id, report_type="ENVIRONMENTAL_IMPACT", subject_type="GMO_EVENT",
+        org_id=org_id, owner_org_id=event.org_id,
+        report_type="ENVIRONMENTAL_IMPACT", subject_type="GMO_EVENT",
         subject_id=event.id, jurisdiction="US-USDA", status=status, results=findings,
         summary=summary, generated_by=actor_id)
     db.add(report)
@@ -398,9 +412,8 @@ def environmental_impact(db: Session, event: GMOEvent, actor_id: str, actor_role
 
 
 def dashboard(db: Session, org_id: str | None) -> dict[str, Any]:
-    query = select(ComplianceReport)
-    if org_id:
-        query = query.where(ComplianceReport.org_id == org_id)
+    # The same visibility as the report list: reports run by, or about batches of, the org.
+    query = scoped(ComplianceReport, org_id) if org_id else select(ComplianceReport)
     reports = list(db.execute(query).scalars())
     by_status: dict[str, int] = {}
     for report in reports:

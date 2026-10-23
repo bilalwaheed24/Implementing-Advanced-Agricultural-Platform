@@ -599,6 +599,9 @@ class GMOEventOut(ORMModel):
     block_number: int | None = None
     anchor_status: str
     created_at: datetime
+    # Current jurisdictional decisions (jurisdiction, status, expires_at, live), filled in by
+    # the list endpoint so the registry shows where each event may actually be used.
+    approvals: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class GMOApprovalCreate(BaseModel):
@@ -626,6 +629,7 @@ class GMOApprovalOut(ORMModel):
     approved_at: datetime | None = None
     expires_at: datetime | None = None
     tx_id: str | None = None
+    live: bool | None = None       # APPROVED, in force and unexpired (gmo.is_live)
 
 
 class SeedLotCreate(BaseModel):
@@ -843,6 +847,10 @@ class CertificationOut(ORMModel):
     revoke_reason: str | None = None
     tx_id: str | None = None
     anchor_status: str
+    # Filled in by the list endpoint: who holds the certificate and where it is claimed.
+    issuer_org_name: str | None = None
+    subject_org_name: str | None = None
+    claimed_batches: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CertificationLinkCreate(BaseModel):
