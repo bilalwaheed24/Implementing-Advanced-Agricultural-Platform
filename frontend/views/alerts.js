@@ -68,5 +68,6 @@ export const render = listView({
     { label: 'Actions', render: (row, ctx) => actionButtons(row, ctx.reload) },
   ],
   emptyTitle: 'No alerts',
-  emptyMessage: 'Nothing has triggered an alert. Try: python3 iot/simulator.py --mode spoof',
+  emptyMessage: 'Nothing has triggered an alert. Alerts appear here when a device, screening '
+    + 'or supply-chain check needs attention.',
 });
