@@ -152,17 +152,25 @@ class TestHandoverCounts:
 
     def test_a_handover_without_a_shipment_is_booked_in_by_storing(self, client, auth, orgs,
                                                                    farm_batch):
-        handed = _event(client, auth, "FARM_OPERATOR", farm_batch["id"], "harvesting",
-                        "in_progress", to_org_id=orgs["SUPPLY"].id)
+        """Only a shipping event may hand a batch over (round-4 release gate), so a hand-over
+        made by a bare shipping event, with no shipment record, leaves the batch in transit:
+        it is not yet the receiver's to book in, and the receiver's first own step books it."""
+        refused = _event(client, auth, "FARM_OPERATOR", farm_batch["id"], "harvesting",
+                         "in_progress", to_org_id=orgs["SUPPLY"].id)
+        assert refused.status_code == 422, refused.text
+        handed = _event(client, auth, "FARM_OPERATOR", farm_batch["id"], "shipping",
+                        "in_transit", to_org_id=orgs["SUPPLY"].id)
         assert handed.status_code == 201, handed.text
-        assert farm_batch["id"] in _awaiting_receipt(client, auth)
-        # Not the originator's to book in.
-        assert farm_batch["id"] not in _awaiting_receipt(client, auth, "FARM_OPERATOR")
-        tiles = _supply_tiles(client, auth)
-        assert _event(client, auth, "SUPPLY_CHAIN_OPERATOR", farm_batch["id"], "storing",
-                      "in_storage").status_code == 201
+        # In transit: counted as awaiting arrival, not as a hand-over to book in.
         assert farm_batch["id"] not in _awaiting_receipt(client, auth)
-        assert _supply_tiles(client, auth)["pending_handovers"] == tiles["pending_handovers"] - 1
+        assert farm_batch["id"] not in _awaiting_receipt(client, auth, "FARM_OPERATOR")
+        stored = _event(client, auth, "SUPPLY_CHAIN_OPERATOR", farm_batch["id"], "storing",
+                        "in_storage")
+        assert stored.status_code == 201, stored.text
+        assert farm_batch["id"] not in _awaiting_receipt(client, auth)
+        batch = client.get(f"/api/v1/supply-chain/batches/{farm_batch['id']}",
+                           headers=auth("SUPPLY_CHAIN_OPERATOR")).json()
+        assert batch["state"] == "STORED"
 
 
 # --------------------------------------------------------------------------- #
