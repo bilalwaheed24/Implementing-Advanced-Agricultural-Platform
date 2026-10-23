@@ -233,19 +233,14 @@ def record_approval(db: Session, event: GMOEvent, actor_id: str, actor_role: str
                          "previous_status": previous_status,
                          "anchored": bool(receipt.get("ok"))})
 
-    # The developer is told every decision on its event.
-    expiry = f", expires {notifications.human_date(expires_at)}" if expires_at else ""
-    notifications.notify_org(
-        db, event.org_id, "GMO",
-        f"GMO event {event.event_code}: {jurisdiction} decision {status}",
-        f"The regulator recorded {status} for {jurisdiction}"
-        + (f" (previously {previous_status})" if previous_status else "")
-        + f"{expiry}. Reference: {reference or 'none'}.",
-        "GMOEvent", event.id, severity="WARNING" if status == "REJECTED" else "INFO")
-
+    # The developer is told every decision on its event, in one notification. A decision that
+    # withdraws or restores the approval also tells every holder; the developer is left out of
+    # that round (already_notified) and what of its own is affected is added here instead, so
+    # one decision no longer reaches the developer twice (round 4).
+    follow_up: dict[str, Any] | None = None
     if previous_status in APPROVED_STATUSES and status not in APPROVED_STATUSES:
-        approval_lost(db, event, approval, "withdrawn", actor_id=actor_id,
-                      already_notified={event.org_id})
+        follow_up = approval_lost(db, event, approval, "withdrawn", actor_id=actor_id,
+                                  already_notified={event.org_id})
     elif not was_live and is_live(approval):
         # Re-approved after a withdrawal, or renewed after it expired: the lapse alerts on
         # the approval and on every batch carrying the event no longer describe anything,
@@ -253,8 +248,27 @@ def record_approval(db: Session, event: GMOEvent, actor_id: str, actor_role: str
         announced = _loss_was_announced(db, approval)
         resolve_lapse_alerts(db, event, approval, actor_id)
         if announced:
-            approval_restored(db, event, approval, actor_id=actor_id,
-                              already_notified={event.org_id})
+            follow_up = approval_restored(db, event, approval, actor_id=actor_id,
+                                          already_notified={event.org_id})
+    held = (follow_up or {}).get("developer_holdings") or []
+    affected = ""
+    if held:
+        affected = (f" Affected: {', '.join(held[:20])}" + (" and more." if len(held) > 20
+                                                            else "."))
+    expiry = f", expires {notifications.human_date(expires_at)}" if expires_at else ""
+    notifications.notify_org(
+        db, event.org_id, "GMO",
+        # A withdrawal or restoration keeps the title the holders' notices carry, so the
+        # developer's inbox reads the same as everyone else's, and adds the decision.
+        f"{follow_up['title']} (decision {status})" if follow_up is not None
+        else f"GMO event {event.event_code}: {jurisdiction} decision {status}",
+        f"The regulator recorded {status} for {jurisdiction}"
+        + (f" (previously {previous_status})" if previous_status else "")
+        + f"{expiry}. Reference: {reference or 'none'}.{affected}"
+        + (f" {follow_up['summary']}" if follow_up is not None else ""),
+        "GMOEvent", event.id,
+        severity=("HIGH" if follow_up is not None and status not in APPROVED_STATUSES
+                  else "WARNING" if status == "REJECTED" else "INFO"))
     return approval
 
 
@@ -363,8 +377,8 @@ def _notify_holders(db: Session, event: GMOEvent, parties: dict[str, list[tuple[
     affected batch, seed lot or farm: a farm or a processor cannot open the developer's event.
     """
     for org_id, items in parties.items():
-        if org_id in skip and not items:
-            continue
+        if org_id in skip:
+            continue                     # told already, with its holdings (record_approval)
         labels = sorted({label for label, _, _ in items})
         held = (f"Affected: {', '.join(labels[:20])}"
                 + (" and more." if len(labels) > 20 else ".")) if items else empty
@@ -374,6 +388,10 @@ def _notify_holders(db: Session, event: GMOEvent, parties: dict[str, list[tuple[
             _, entity_type, entity_id = items[0]
         notifications.notify_org(db, org_id, "COMPLIANCE", title, f"{held} {tail}",
                                  entity_type, entity_id, severity=severity)
+
+
+def _labels(items: list[tuple[str, str, str]]) -> list[str]:
+    return sorted({label for label, _, _ in items})
 
 
 def _loss_was_announced(db: Session, approval: GMOApproval) -> bool:
@@ -395,18 +413,19 @@ def approval_restored(db: Session, event: GMOEvent, approval: GMOApproval, *,
     parties = _holdings_by_party(db, event, lots, batches, crops)
     expiry = (f" until {_aware(approval.expires_at).date().isoformat()}"
               if approval.expires_at else "")
+    title = f"GMO approval restored: {event.event_code} in {approval.jurisdiction}"
+    summary = (f"{event.event_code} is approved again in {approval.jurisdiction}{expiry}. "
+               f"Re-run the compliance check before releasing affected stock there.")
     _notify_holders(
-        db, event, parties,
-        f"GMO approval restored: {event.event_code} in {approval.jurisdiction}",
-        f"{event.event_code} is approved again in {approval.jurisdiction}{expiry}. Re-run the "
-        f"compliance check before releasing affected stock there.",
+        db, event, parties, title, summary,
         "No seed lot, crop or batch carries the event.", "INFO",
         already_notified or set())
     audit.record(db, "gmo.approval_restored", actor_id=actor_id, actor_role=None,
                  org_id=event.org_id, entity_type="GMOEvent", entity_id=event.id,
                  detail={"jurisdiction": approval.jurisdiction, "organisations": len(parties)})
     return {"event_code": event.event_code, "jurisdiction": approval.jurisdiction,
-            "organisations": sorted(parties)}
+            "organisations": sorted(parties), "title": title, "summary": summary,
+            "developer_holdings": _labels(parties.get(event.org_id, []))}
 
 
 def approval_lost(db: Session, event: GMOEvent, approval: GMOApproval, how: str, *,
@@ -465,7 +484,9 @@ def approval_lost(db: Session, event: GMOEvent, approval: GMOApproval, how: str,
                          "organisations": len(parties)})
     return {"event_code": event.event_code, "jurisdiction": approval.jurisdiction,
             "seed_lots": [lot.id for lot in lots], "batches": [b.id for b in batches],
-            "crops": [crop.id for crop, _ in crops], "organisations": sorted(parties)}
+            "crops": [crop.id for crop, _ in crops], "organisations": sorted(parties),
+            "title": title, "summary": remaining,
+            "developer_holdings": _labels(parties.get(event.org_id, []))}
 
 
 def sweep_expired_approvals(db: Session) -> list[dict[str, Any]]:

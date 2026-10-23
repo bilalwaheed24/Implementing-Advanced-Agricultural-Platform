@@ -121,6 +121,9 @@ def readable_batches(role: str, org_id: str | None):
 # --------------------------------------------------------------------------- #
 # Business steps that put a batch in front of a buyer, and how the refusal names them.
 RELEASE_STEPS = {"shipping": "shipped", "retail_selling": "put on sale"}
+# The one step that may carry a receiver (to_org_id) and so move custody. It is a release
+# step, so a hand-over always passes require_releasable.
+HANDOVER_STEP = "shipping"
 
 
 def _recalled_ancestor(db: Session, batch: Batch, max_depth: int = 12) -> Batch | None:
@@ -319,6 +322,13 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
                  quantity: float | None, unit: str | None, to_org_id: str | None,
                  occurred_at: datetime, detail: dict[str, Any]) -> SupplyChainEvent:
     """Append an EPCIS-shaped event, anchor it, and advance the batch state."""
+    if to_org_id and to_org_id != batch.custodian_org_id and biz_step != HANDOVER_STEP:
+        # Custody moves only with a shipping event, which passes the release gate below. Any
+        # other step carrying a receiver handed over a FAILED or recalled batch that
+        # POST /shipments had just refused (round 4).
+        raise ValidationFailed(
+            f"to_org_id hands the batch to another organisation, which only a "
+            f"'{HANDOVER_STEP}' event may do; '{biz_step}' cannot carry a receiver")
     if biz_step in RELEASE_STEPS:
         require_releasable(db, batch, RELEASE_STEPS[biz_step])
     if quantity is not None and quantity > batch.quantity + 1e-9:
@@ -469,12 +479,20 @@ def propagate_recall(db: Session, batch: Batch, actor_id: str | None, actor_role
                                  shipment.id if shipment else None, severity="HIGH")
     # Matched on kind: any other open COMPLIANCE alert on the batch (a failed evaluation, a
     # cold-chain excursion) used to suppress the recall alert entirely.
+    # notify=False: every user of the owner and custodian organisations has just had the
+    # RECALL notification above, so the category fan-out told their supply-chain operators and
+    # regulators twice (round 4). The platform-wide COMPLIANCE oversight roles, which the
+    # RECALL round does not reach, are told here instead.
     if not notifications.has_open_alert(db, "COMPLIANCE", batch.id, kind="recall"):
         notifications.raise_alert(
             db, "COMPLIANCE", "HIGH", title,
             detail=f"{len(descendants)} derived batch(es) flagged.", org_id=batch.org_id,
-            entity_type="Batch", entity_id=batch.id, reasons=["Batch recalled"], notify=True,
+            entity_type="Batch", entity_id=batch.id, reasons=["Batch recalled"], notify=False,
             kind="recall", party_org_id=batch.custodian_org_id)
+        notifications.notify_parties(
+            db, [], "COMPLIANCE", title, f"{len(descendants)} derived batch(es) flagged.",
+            "Batch", batch.id, "HIGH", include_oversight=True,
+            exclude_org_ids=set(recipients) | set(handlers))
     for child in descendants:
         if child.integrity_status != "FAILED":
             child.integrity_status = "SUSPECT"
@@ -612,6 +630,9 @@ def transfer_custody(db: Session, batch: Batch, from_org_id: str, to_org_id: str
     # asynchronously, so the hand-over takes effect and the ledger status is audited.
     batch.custodian_org_id = to_org_id
     db.flush()
+    # The batch's open alerts and active incidents follow it to the new holder, and the
+    # previous holder, which can no longer open the batch, stops seeing them (round 4).
+    notifications.sync_custodian(db, "Batch", batch.id, batch.org_id, to_org_id)
     if not receipt.get("ok"):
         audit.record(db, "supply.custody_transfer_unanchored", actor_id=None, actor_role=None,
                      org_id=from_org_id, entity_type="Batch", entity_id=batch.id,

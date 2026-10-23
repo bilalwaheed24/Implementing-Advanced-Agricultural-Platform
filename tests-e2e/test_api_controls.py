@@ -330,11 +330,10 @@ class TestNineRoleMatrix:
             status, _ = call("GET", path)
             assert status == 401, f"{path} answered {status} unauthenticated"
 
-    def test_a_sweep_is_scoped_for_a_tenant_role_and_broad_for_oversight(self, tokens):
+    def test_the_data_theft_sweep_is_for_security_operations_only(self, tokens):
+        # Round 4: tenant roles were able to run the sweep and read colleagues' scores.
         status, tenant = call("POST", "/security/data-theft/sweep", tokens["FARM_OPERATOR"])
-        assert status == 200, tenant
+        assert status == 403, tenant
         status, oversight = call("POST", "/security/data-theft/sweep",
                                  tokens["SECURITY_ANALYST"])
         assert status == 200, oversight
-        assert oversight["count"] >= tenant["count"], \
-            "a tenant sweep returned more than the platform-wide one"

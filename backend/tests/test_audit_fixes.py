@@ -30,9 +30,11 @@ class TestCustodyTransferVisibility:
         assert client.get(f"/api/v1/supply-chain/batches/{batch['id']}",
                           headers=auth("FARM_OPERATOR")).status_code == 404
 
+        # Round 4: only a `shipping` event may carry a receiver (it passes the release gate);
+        # this used to hand the batch over on a `harvesting` event.
         handed_over = client.post("/api/v1/supply-chain/events",
                                   headers=auth("SUPPLY_CHAIN_OPERATOR"), json={
-            "batch_id": batch["id"], "biz_step": "harvesting", "disposition": "in_progress",
+            "batch_id": batch["id"], "biz_step": "shipping", "disposition": "in_transit",
             "quantity": 1000.0, "unit": "kg", "to_org_id": orgs["FARM"].id,
             "occurred_at": iso(now() - timedelta(days=1))})
         assert handed_over.status_code == 201, handed_over.text
@@ -46,16 +48,18 @@ class TestCustodyTransferVisibility:
         assert batch["id"] in {row["id"] for row in listed}
 
         continued = client.post("/api/v1/supply-chain/events", headers=auth("FARM_OPERATOR"),
-                                json={"batch_id": batch["id"], "biz_step": "transforming",
-                                      "disposition": "in_progress", "quantity": 950.0,
+                                # IN_TRANSIT -> RECEIVED is the receiver's next legal step
+                                # (round 4; was "transforming" after a harvesting hand-over).
+                                json={"batch_id": batch["id"], "biz_step": "receiving",
+                                      "disposition": "in_storage", "quantity": 950.0,
                                       "unit": "kg", "occurred_at": iso(now())})
         assert continued.status_code == 201, continued.text
 
     def test_an_uninvolved_organisation_still_gets_404(self, client, auth, product, orgs):
         batch = _batch(client, auth, product).json()
         client.post("/api/v1/supply-chain/events", headers=auth("SUPPLY_CHAIN_OPERATOR"), json={
-            "batch_id": batch["id"], "biz_step": "harvesting", "disposition": "in_progress",
-            "to_org_id": orgs["FARM"].id, "occurred_at": iso(now())})
+            "batch_id": batch["id"], "biz_step": "shipping", "disposition": "in_transit",
+            "to_org_id": orgs["FARM"].id, "occurred_at": iso(now())})     # round 4: shipping
         assert client.get(f"/api/v1/supply-chain/batches/{batch['id']}",
                           headers=auth("BIOTECH_RESEARCHER")).status_code == 404
 

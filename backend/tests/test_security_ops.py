@@ -235,12 +235,19 @@ class TestDataTheftSweepIsTenantScoped:
         db.commit()
         return principals
 
-    def test_a_tenant_sweep_returns_only_its_own_principals(self, client, auth,
-                                                            access_records):
-        response = client.post("/api/v1/security/data-theft/sweep",
-                               headers=auth("FARM_OPERATOR"))
-        assert response.status_code == 200, response.text
-        found = {f["principal_id"] for f in response.json()["findings"]}
+    def test_a_tenant_sweep_returns_only_its_own_principals(self, client, auth, db,
+                                                            access_records, orgs):
+        # Round 4: a tenant role may no longer trigger the sweep over HTTP at all (it named
+        # colleagues and their scores, and raised alerts the tenant could then clear), so the
+        # tenant scoping this test guards is exercised at the service level instead.
+        from app.services import security_ops
+
+        refused = client.post("/api/v1/security/data-theft/sweep",
+                              headers=auth("FARM_OPERATOR"))
+        assert refused.status_code == 403, refused.text
+        findings = security_ops.sweep_data_theft(db, 24, org_id=orgs["FARM"].id)
+        db.commit()
+        found = {f["principal_id"] for f in findings}
 
         assert access_records["rival"] not in found, \
             "a tenant sweep disclosed a principal from another organisation"
