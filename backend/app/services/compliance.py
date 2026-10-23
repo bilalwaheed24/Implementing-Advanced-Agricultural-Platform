@@ -345,10 +345,10 @@ def report_digest(db: Session, report: ComplianceReport) -> str:
                                             report.results))
 
 
-# Identities the compliance_anchor.AnchorReport chaincode function accepts
-# (ledger/contracts.py SUBMIT_RIGHTS). Kept in one place so the application and the
-# chaincode cannot drift apart silently.
-ANCHOR_RIGHTS = frozenset({"RegulatorMSP", "SupplyMSP"})
+# Organisation types the compliance_anchor.AnchorReport chaincode function accepts
+# (ledger/contracts.py, rights by organisation type). By type rather than MSP name, so an
+# organisation an administrator adds later — a second processor, a retailer — can anchor too.
+ANCHOR_RIGHTS = frozenset({"REGULATOR", "SUPPLY"})
 
 
 def _reporting_msp(db: Session, org_id: str) -> str:
@@ -363,10 +363,11 @@ def _reporting_msp(db: Session, org_id: str) -> str:
     organization = db.get(Organization, org_id)
     if organization is None:
         raise NotFound("Organisation not found")
-    if organization.msp_id not in ANCHOR_RIGHTS:
+    if organization.org_type not in ANCHOR_RIGHTS:
         raise PermissionDenied(
             f"{organization.name} ({organization.msp_id}) is not permitted to anchor compliance "
-            f"reports on the ledger. Permitted identities: {', '.join(sorted(ANCHOR_RIGHTS))}.")
+            f"reports on the ledger. Permitted organisation types: "
+            f"{', '.join(sorted(ANCHOR_RIGHTS))}.")
     return organization.msp_id
 
 
