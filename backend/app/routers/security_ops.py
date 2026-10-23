@@ -32,7 +32,10 @@ def list_alerts(db: DbSession, paging: PagingDep,
         query = query.where(Alert.severity == severity.upper())
     if category:
         query = query.where(Alert.category == category.upper())
-    if status_filter:
+    if status_filter and status_filter.upper() == "UNRESOLVED":
+        # OPEN or ACKNOWLEDGED: what the dashboard's "Open alerts" tile counts.
+        query = query.where(Alert.status.in_(("OPEN", "ACKNOWLEDGED")))
+    elif status_filter:
         query = query.where(Alert.status == status_filter.upper())
     if entity_id:
         query = query.where(Alert.entity_id == entity_id)

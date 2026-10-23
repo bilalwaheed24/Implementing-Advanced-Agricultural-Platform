@@ -104,7 +104,29 @@ export function render(context) {
       + 'so a revoked certificate cannot later be presented as valid.',
     endpoint: '/supply-chain/certifications',
     actions: ({ reload }) => (can('cert:issue') ? issueForm(reload) : null),
-    filters: [{ key: 'cert_type', label: 'Type', options: ['ORGANIC', 'NON_GMO', 'SPECIALTY'] }],
+    // The dashboard's certifier tiles open this list with these filters set, so each list
+    // shows what its tile counts (the server applies the tile's rules).
+    filters: [
+      { key: 'cert_type', label: 'Type', options: ['ORGANIC', 'NON_GMO', 'SPECIALTY'] },
+      { key: 'status', label: 'Status', options: ['ACTIVE', 'EXPIRED', 'REVOKED'] },
+      { key: 'expiring_within_days', label: 'Expiring', allLabel: 'Any time',
+        options: [['30', 'Within 30 days'], ['90', 'Within 90 days']] },
+      { key: 'claimed', label: 'Claimed', allLabel: 'Any',
+        options: [['true', 'Claimed on a batch'], ['false', 'Not claimed']] },
+      can('cert:issue') ? { key: 'issued_by_me', label: 'Issuer', allLabel: 'Any issuer',
+        options: [['true', 'Issued by my organisation']] } : null,
+    ].filter(Boolean),
+    emptyFor: (active) => {
+      if (active.expiring_within_days) {
+        return { title: 'Nothing expiring soon', message: 'No valid certificate ends within '
+          + `${active.expiring_within_days} days.` };
+      }
+      if (active.claimed === 'true') {
+        return { title: 'Not claimed on any batch',
+          message: 'No batch cites one of these certificates yet.' };
+      }
+      return null;
+    },
     columns: [
       { label: 'Code', render: (row) => el('span', { class: 'mono', text: row.cert_code }) },
       { label: 'Type', render: (row) => titleCase(row.cert_type) },

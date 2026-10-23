@@ -151,12 +151,33 @@ function recallControl(batch) {
   ]);
 }
 
-/* Every shipment of this batch this organisation is party to, with the receiver's action. */
-function shipmentsCard(batch, shipments, holdsIt) {
+/* Where "back" goes. A certifier reaches a batch from Certifications, Compliance or a
+ * notification and has no Batches page in its menu, so it goes back where it came from. */
+function backLink(readOnly) {
+  if (!readOnly) return el('a', { href: '#/batches', text: '← All batches' });
+  return el('a', { href: '#/certifications', text: '← Back',
+    onClick: (event) => {
+      if (window.history.length > 1) {
+        event.preventDefault();
+        window.history.back();
+      }
+    } });
+}
+
+/* Every shipment of this batch the reader may see (the API lists all of them to anyone who
+ * can read the batch), with the receiver's action. */
+function shipmentsCard(batch, shipments, holdsIt, { readOnly, shipped }) {
+  let none = empty('No shipments', 'This batch has not been shipped yet.');
+  if (shipped) {
+    // The chain of custody records a shipping event, so "not shipped" would be false.
+    none = empty('No shipment details', 'The chain of custody records this batch being '
+      + 'shipped, but the shipment details are not shared with your organisation.');
+  }
   const rows = shipments.length
     ? table([
-      { label: 'SSCC', render: (row) => el('a', { href: '#/shipments', class: 'mono',
-        text: row.sscc }) },
+      { label: 'SSCC', render: (row) => (readOnly
+        ? el('span', { class: 'mono', text: row.sscc })
+        : el('a', { href: '#/shipments', class: 'mono', text: row.sscc })) },
       { label: 'Route', render: (row) => `${row.origin_name} → ${row.destination_name}` },
       { label: 'Departed', render: (row) => fmtDate(row.departed_at) },
       { label: 'Status', render: (row) => el('div', {}, [badge(row.status),
@@ -164,8 +185,8 @@ function shipmentsCard(batch, shipments, holdsIt) {
           : arriveControl(row, () => refreshView())]) },
       { label: 'Cold chain', render: (row) => coldChainCell(row) },
     ], shipments)
-    : empty('No shipments', 'This batch has not been shipped yet.');
-  const canShip = holdsIt && can('supply:write')
+    : none;
+  const canShip = !readOnly && holdsIt && can('supply:write')
     && (BATCH_TRANSITIONS[batch.state] || []).includes('IN_TRANSIT');
   return el('div', { class: 'card' }, [
     el('h2', { text: 'Shipments' }),
@@ -230,7 +251,7 @@ export async function render({ id }) {
     return el('div', {}, [
       empty('Batch not available', 'Your organisation cannot open this batch. It may have '
         + 'been handed on to another organisation since this link was created.'),
-      el('a', { href: '#/batches', text: '← All batches' }),
+      backLink(session.read()?.role === 'CERTIFIER'),
     ]);
   }
   const context = custody.context || {};
@@ -238,7 +259,14 @@ export async function render({ id }) {
   const me = session.read()?.org_id;
   const holdsIt = batch.custodian_org_id === me;
   const isParty = holdsIt || context.owner?.id === me;
+  // Why this reader sees the batch (the API says; inferred for an older server). A reader
+  // who sees it only because it carries their certificate gets no action they cannot
+  // perform: verifying, recording, shipping, claiming and recalling are the parties' (or an
+  // oversight role's) to do, and the API refuses them to anyone else.
+  const access = batch.viewer_access || (isParty ? 'party' : 'certificate');
+  const readOnly = access === 'certificate';
   const recall = isParty ? recallControl(batch) : null;
+  const shipped = custody.events.some((event) => event.biz_step === 'shipping');
 
   const timeline = el('ul', { class: 'timeline' }, custody.events.map((event) =>
     el('li', { class: event.anchor_status === 'ANCHORED' ? '' : 'unverified' }, [
@@ -309,6 +337,8 @@ export async function render({ id }) {
       ' · ', el('a', { href: `/verify.html?code=${batch.verification_code}`, target: '_blank',
         rel: 'noopener', text: 'Public verification page ↗' }),
     ]),
+    readOnly ? el('p', { class: 'hint', text: 'Read-only: you can see this batch because it '
+      + 'carries your certificate.' }) : null,
     el('div', { class: 'grid cols-2' }, [
       el('div', { class: 'card' }, [
         el('h2', { text: 'Chain of custody' }),
@@ -342,17 +372,17 @@ export async function render({ id }) {
               el('td', { class: 'mono', text: batch.tx_id ? batch.tx_id.slice(0, 24) + '…' : '—' })]),
           ]),
         ]),
-        shipmentsCard(batch, shipments, holdsIt),
+        shipmentsCard(batch, shipments, holdsIt, { readOnly, shipped }),
         labelCard(batch, context),
         el('div', { class: 'card' }, [
           el('h2', { text: 'Certifications' }),
           certifications,
-          can('supply:write') && isParty
+          can('supply:write') && isParty && !readOnly
             ? claimPanel(batch, new Set(custody.certifications.map((c) => c.cert_code)),
               Boolean(context.gmo), () => refreshView())
             : null,
         ]),
-        can('supply:write') ? el('div', { class: 'card' }, [
+        can('supply:write') && !readOnly ? el('div', { class: 'card' }, [
           el('h2', { text: 'Record the next step' }),
           holdsIt
             ? recordEventPanel(batch, () => refreshView())
@@ -362,7 +392,8 @@ export async function render({ id }) {
               + `access to its history${recall ? ', and you can still recall it' : ''}.` }),
           recall,
         ]) : null,
-        can('supply:verify') ? el('div', { class: 'card' }, [
+        // The verify endpoint is open to the batch's parties and oversight roles only.
+        can('supply:verify') && !readOnly ? el('div', { class: 'card' }, [
           el('h2', { text: 'Supply-chain integrity and fraud scoring' }),
           el('p', { class: 'hint', text: 'Runs deterministic fraud rules plus an anomaly '
             + 'model, and cross-checks every anchored record against the ledger.' }),
@@ -370,6 +401,6 @@ export async function render({ id }) {
         ]) : null,
       ]),
     ]),
-    el('a', { href: '#/batches', text: '← All batches' }),
+    backLink(readOnly),
   ]);
 }
