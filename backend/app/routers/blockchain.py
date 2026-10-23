@@ -5,14 +5,18 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 
+from sqlalchemy import select
+
 from ..core.deps import DbSession, rate_limit, require_permission
 from ..core.errors import NotFound, ValidationFailed
 from ..core.permissions import P, has_permission
 from ..core.security import content_hash
-from ..models import Batch, Certification, ComplianceReport, GMOEvent, Product, SupplyChainEvent
+from ..models import (Batch, Certification, CertificationLink, ComplianceReport, GMOEvent,
+                      Product, SupplyChainEvent)
+from ..repositories import get_or_404
 from ..schemas import VerifyRecordRequest
-from ..services import (anchoring, audit, fabric_bridge, gmo as gmo_service, ledger_client,
-                        supplychain as supply_service)
+from ..services import (anchoring, audit, compliance as compliance_service, fabric_bridge,
+                        gmo as gmo_service, ledger_client, supplychain as supply_service)
 
 router = APIRouter(prefix="/blockchain", tags=["Blockchain"], dependencies=[Depends(rate_limit)])
 
@@ -83,13 +87,23 @@ def state(key: str,
 def _require_visible(principal, org_ids: set[str | None]) -> None:
     """IDOR/BOLA guard: verifying a record is a read of its content hash and anchor
     status, which is enough to confirm existence and tamper status of another
-    organisation's data. Only that record's own organisation(s), or a platform-wide
+    organisation's data. Only the parties that may read the record, or a platform-wide
     oversight role, may verify it — everyone else gets the same 404 an unknown id
     would give, so existence is not disclosed either."""
     if principal.is_cross_tenant:
         return
     if principal.org_id not in org_ids:
         raise NotFound("Record not found")
+
+
+def _can_read_batch(db, principal, batch_id: str) -> bool:
+    """The read visibility of GET /supply-chain/batches/{id}: owner, custodian, the issuer of
+    a certificate claimed on it, or an oversight role."""
+    try:
+        supply_service.readable_batch(db, batch_id, principal.role, principal.org_id)
+    except NotFound:
+        return False
+    return True
 
 
 @router.post("/verify-record", summary="Verify a stored record against its ledger anchor")
@@ -109,10 +123,10 @@ def verify_record(payload: VerifyRecordRequest, db: DbSession,
         _require_visible(principal, {event.org_id})
         fabric_key = f"gmo:{event.event_code}"
     elif entity_type == "BATCH":
-        batch = db.get(Batch, payload.entity_id)
-        if batch is None:
-            raise NotFound("Batch not found")
-        _require_visible(principal, {batch.org_id})
+        # The same visibility as reading the batch (owner, custodian, certifier, oversight),
+        # not only the creating organisation.
+        batch = supply_service.readable_batch(db, payload.entity_id, principal.role,
+                                              principal.org_id)
         product = db.get(Product, batch.product_id)
         digest, tx_id, stored = content_hash(supply_service.batch_content(batch, product)), \
             batch.tx_id, batch.content_hash
@@ -121,7 +135,10 @@ def verify_record(payload: VerifyRecordRequest, db: DbSession,
         event = db.get(SupplyChainEvent, payload.entity_id)
         if event is None:
             raise NotFound("Event not found")
-        _require_visible(principal, {event.org_id})
+        # Whoever recorded the event, and whoever may read the batch's chain of custody.
+        if not (principal.is_cross_tenant or event.org_id == principal.org_id
+                or _can_read_batch(db, principal, event.batch_id)):
+            raise NotFound("Event not found")
         batch = db.get(Batch, event.batch_id)
         digest, tx_id, stored = content_hash(supply_service.event_content(event, batch)), \
             event.tx_id, event.content_hash
@@ -130,17 +147,23 @@ def verify_record(payload: VerifyRecordRequest, db: DbSession,
         certification = db.get(Certification, payload.entity_id)
         if certification is None:
             raise NotFound("Certification not found")
-        _require_visible(principal, {certification.issuer_org_id, certification.subject_org_id})
+        # As GET /supply-chain/certifications: issuer, subject, and the owner or holder of a
+        # batch the certificate is claimed on.
+        parties = {certification.issuer_org_id, certification.subject_org_id}
+        for batch in db.execute(select(Batch).join(
+                CertificationLink, CertificationLink.batch_id == Batch.id).where(
+                CertificationLink.certification_id == certification.id)).scalars():
+            parties |= {batch.org_id, batch.custodian_org_id}
+        _require_visible(principal, parties)
         digest, tx_id, stored = certification.content_hash or "", certification.tx_id, \
             certification.content_hash
         fabric_key = f"cert:{certification.cert_code}"
     elif entity_type == "COMPLIANCE_REPORT":
-        report = db.get(ComplianceReport, payload.entity_id)
-        if report is None:
-            raise NotFound("Report not found")
-        _require_visible(principal, {report.org_id})
-        digest = content_hash({"subject": report.subject_id, "jurisdiction": report.jurisdiction,
-                               "status": report.status, "results": report.results})
+        # Runner, the batch's owner and custodian, or oversight: the report list's visibility.
+        report = get_or_404(db, ComplianceReport, payload.entity_id, principal.role,
+                            principal.org_id, name="Report")
+        # Exactly what was anchored: the subject's business code, not its id.
+        digest = compliance_service.report_digest(db, report)
         tx_id, stored = report.tx_id, report.content_hash
         fabric_key = f"report:{report.id}"
     else:

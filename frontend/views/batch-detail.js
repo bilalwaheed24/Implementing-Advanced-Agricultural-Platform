@@ -1,4 +1,4 @@
-import { session, el, api, badge, fmtDate, fmtNum, table, empty, toast, can, reasonList,
+import { session, el, api, badge, fmtDate, fmtDay, fmtNum, table, empty, toast, can, reasonList,
          rowHeader, titleCase, jurisdictionLabel, refreshView, confirmDialog }
   from '/static/assets/core.js';
 import { createPanel, choiceSelect, dateInput, todayIso, atNoon, remoteSelect }
@@ -202,7 +202,7 @@ function gmoCell(gmo) {
   if (!gmo) return el('td', { text: 'No GMO lineage' });
   const approvals = gmo.approvals.length
     ? gmo.approvals.map((a) => `${jurisdictionLabel(a.jurisdiction)}: ${titleCase(a.status)}`
-      + (a.expires_at ? ` until ${fmtDate(a.expires_at)}` : '')).join(' · ')
+      + (a.expires_at ? ` until ${fmtDay(a.expires_at)}` : '')).join(' · ')
     : 'no approval on record';
   return el('td', {}, [
     el('div', {}, [el('span', { class: 'mono', text: gmo.event_code }),
@@ -213,17 +213,32 @@ function gmoCell(gmo) {
 
 export async function render({ id }) {
   if (!id) return empty('No batch selected', 'Choose a batch from the list.');
-  const [batch, custody, shipments] = await Promise.all([
-    api(`/supply-chain/batches/${id}`),
-    api(`/supply-chain/batches/${id}/custody`),
-    api(`/supply-chain/shipments?batch_id=${encodeURIComponent(id)}&page_size=50`)
-      .then((page) => page.items || []).catch(() => []),
-  ]);
+  let batch;
+  let custody;
+  let shipments;
+  try {
+    [batch, custody, shipments] = await Promise.all([
+      api(`/supply-chain/batches/${id}`),
+      api(`/supply-chain/batches/${id}/custody`),
+      api(`/supply-chain/shipments?batch_id=${encodeURIComponent(id)}&page_size=50`)
+        .then((page) => page.items || []).catch(() => []),
+    ]);
+  } catch (error) {
+    // A link from a notification or a report can outlive the reader's access (the batch has
+    // been handed on since): say so plainly rather than showing a raw error.
+    if (error.status !== 404) throw error;
+    return el('div', {}, [
+      empty('Batch not available', 'Your organisation cannot open this batch. It may have '
+        + 'been handed on to another organisation since this link was created.'),
+      el('a', { href: '#/batches', text: '← All batches' }),
+    ]);
+  }
   const context = custody.context || {};
   const orgName = (orgId) => (context.organisations || {})[orgId] || 'another organisation';
   const me = session.read()?.org_id;
   const holdsIt = batch.custodian_org_id === me;
   const isParty = holdsIt || context.owner?.id === me;
+  const recall = isParty ? recallControl(batch) : null;
 
   const timeline = el('ul', { class: 'timeline' }, custody.events.map((event) =>
     el('li', { class: event.anchor_status === 'ANCHORED' ? '' : 'unverified' }, [
@@ -251,7 +266,7 @@ export async function render({ id }) {
       { label: 'Type', render: (row) => titleCase(row.cert_type) },
       { label: 'Standard', key: 'standard' },
       { label: 'Issuer', key: 'issuer' },
-      { label: 'Valid to', render: (row) => fmtDate(row.valid_to) },
+      { label: 'Valid to', render: (row) => fmtDay(row.valid_to) },
       { label: 'Authentic', render: (row) => row.authentic
         ? badge('VERIFIED') : badge('FAILED') },
     ], custody.certifications)
@@ -343,8 +358,9 @@ export async function render({ id }) {
             ? recordEventPanel(batch, () => refreshView())
             : el('p', { class: 'hint', text: `${context.custodian?.name || 'Another organisation'} `
               + 'holds this batch now, so only they can record its next step. You keep read '
-              + 'access to its history, and you can still recall it.' }),
-          isParty ? recallControl(batch) : null,
+              // The recall sentence only where the Recall button is actually offered.
+              + `access to its history${recall ? ', and you can still recall it' : ''}.` }),
+          recall,
         ]) : null,
         can('supply:verify') ? el('div', { class: 'card' }, [
           el('h2', { text: 'Supply-chain integrity and fraud scoring' }),

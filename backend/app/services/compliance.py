@@ -273,8 +273,7 @@ def evaluate_batch(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
     db.add(report)
     db.flush()
 
-    digest = content_hash({"subject": batch.batch_code, "jurisdiction": jurisdiction,
-                           "status": status, "results": results})
+    digest = content_hash(_compliance_content(batch.batch_code, jurisdiction, status, results))
     report.content_hash = digest
     receipt = ledger_client.submit(
         "compliance_anchor", "AnchorReport",
@@ -306,6 +305,35 @@ def evaluate_batch(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
             f"Batch {batch.batch_code} is COMPLIANT in {jurisdiction}",
             f"All {len(results)} rules passed.", "Batch", batch.id)
     return report
+
+
+def _compliance_content(subject_code: str, jurisdiction: str, status: str,
+                        results: list[dict[str, Any]]) -> dict[str, Any]:
+    """What a compliance report anchors. The subject is the batch's business code."""
+    return {"subject": subject_code, "jurisdiction": jurisdiction, "status": status,
+            "results": results}
+
+
+def _eia_content(subject_code: str, status: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
+    """What an environmental impact assessment anchors. The subject is the GMO event code."""
+    return {"subject": subject_code, "type": "EIA", "status": status, "results": findings}
+
+
+def report_digest(db: Session, report: ComplianceReport) -> str:
+    """Recompute a stored report's content hash exactly as it was anchored.
+
+    Verification used to hash the subject's database id where the anchor had hashed its
+    business code (batch code, GMO event code), so every report verified as MISMATCH. The
+    code is read back from the subject record; batch and event codes are immutable.
+    """
+    if report.subject_type == "GMO_EVENT" or report.report_type == "ENVIRONMENTAL_IMPACT":
+        event = db.get(GMOEvent, report.subject_id)
+        code = event.event_code if event else (report.summary or {}).get("event_code")
+        return content_hash(_eia_content(code, report.status, report.results))
+    batch = db.get(Batch, report.subject_id)
+    code = batch.batch_code if batch else (report.summary or {}).get("batch_code")
+    return content_hash(_compliance_content(code, report.jurisdiction, report.status,
+                                            report.results))
 
 
 # Identities the compliance_anchor.AnchorReport chaincode function accepts
@@ -396,8 +424,7 @@ def environmental_impact(db: Session, event: GMOEvent, actor_id: str, actor_role
         summary=summary, generated_by=actor_id)
     db.add(report)
     db.flush()
-    digest = content_hash({"subject": event.event_code, "type": "EIA", "status": status,
-                           "results": findings})
+    digest = content_hash(_eia_content(event.event_code, status, findings))
     report.content_hash = digest
     receipt = ledger_client.submit(
         "compliance_anchor", "AnchorReport",

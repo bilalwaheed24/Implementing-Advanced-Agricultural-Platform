@@ -60,7 +60,9 @@ def list_batches(db: DbSession, paging: PagingDep,
                  principal: Annotated[object, Depends(require_permission(P.SUPPLY_READ))],
                  state: str | None = Query(default=None),
                  integrity: str | None = Query(default=None)) -> Page[BatchOut]:
-    query = visible(Batch, principal.role, principal.org_id).order_by(Batch.created_at.desc())
+    # Includes, read-only, the batches carrying a certificate the caller's organisation issued.
+    query = service.readable_batches(principal.role, principal.org_id).order_by(
+        Batch.created_at.desc())
     if state:
         query = query.where(Batch.state == state.upper())
     if integrity:
@@ -73,14 +75,16 @@ def list_batches(db: DbSession, paging: PagingDep,
 @router.get("/batches/{batch_id}", response_model=BatchOut, summary="Get a batch")
 def get_batch(batch_id: str, db: DbSession,
               principal: Annotated[object, Depends(require_permission(P.SUPPLY_READ))]) -> BatchOut:
+    # Owner, custodian, oversight roles, and the issuer of a certificate claimed on the batch
+    # (read-only: the write paths below keep plain get_or_404 and the custodian checks).
     return BatchOut.model_validate(
-        get_or_404(db, Batch, batch_id, principal.role, principal.org_id, name="Batch"))
+        service.readable_batch(db, batch_id, principal.role, principal.org_id))
 
 
 @router.get("/batches/{batch_id}/custody", summary="Chain of custody and lineage for a batch")
 def custody(batch_id: str, db: DbSession,
             principal: Annotated[object, Depends(require_permission(P.SUPPLY_READ))]) -> dict:
-    batch = get_or_404(db, Batch, batch_id, principal.role, principal.org_id, name="Batch")
+    batch = service.readable_batch(db, batch_id, principal.role, principal.org_id)
     events = service.chain_of_custody(db, batch)
     lineage = service.lineage(db, batch, principal.role, principal.org_id)
     return {
@@ -240,8 +244,15 @@ def list_certifications(db: DbSession, paging: PagingDep,
                         cert_type: str | None = Query(default=None)) -> Page[CertificationOut]:
     query = select(Certification).order_by(Certification.created_at.desc())
     if not principal.is_cross_tenant:
+        # The issuer, the certified organisation, and the owner or holder of a batch the
+        # certificate is claimed on: all three are notified when it expires or is revoked, so
+        # all three must be able to find it here.
+        claimed_on_mine = select(CertificationLink.certification_id).join(
+            Batch, Batch.id == CertificationLink.batch_id).where(
+            (Batch.org_id == principal.org_id) | (Batch.custodian_org_id == principal.org_id))
         query = query.where((Certification.issuer_org_id == principal.org_id)
-                            | (Certification.subject_org_id == principal.org_id))
+                            | (Certification.subject_org_id == principal.org_id)
+                            | Certification.id.in_(claimed_on_mine))
     if cert_type:
         query = query.where(Certification.cert_type == cert_type.upper())
     rows, total = paginate(db, query, paging.page, paging.page_size)
@@ -268,7 +279,7 @@ def _certifications_out(db, rows: list[Certification], principal) -> list[Certif
     batch_ids = {b.id for batches in claims.values() for b in batches}
     readable = set()
     if batch_ids:
-        readable = set(db.execute(visible(Batch, principal.role, principal.org_id)
+        readable = set(db.execute(service.readable_batches(principal.role, principal.org_id)
                                   .where(Batch.id.in_(batch_ids))
                                   .with_only_columns(Batch.id)).scalars())
     out = []

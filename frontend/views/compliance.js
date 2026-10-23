@@ -107,8 +107,10 @@ function passRate(row) {
 
 function subjectCell(row) {
   if (row.subject_type === 'BATCH') {
-    return el('a', { class: 'mono', href: `#/batch/${row.subject_id}`,
-      text: row.summary?.batch_code || String(row.subject_id).slice(0, 8) });
+    const code = row.summary?.batch_code || String(row.subject_id).slice(0, 8);
+    // A batch the reader can no longer open (e.g. handed on since) is shown as its code only.
+    if (row.subject_readable === false) return el('span', { class: 'mono', text: code });
+    return el('a', { class: 'mono', href: `#/batch/${row.subject_id}`, text: code });
   }
   return el('span', { class: 'mono', text: row.summary?.event_code || '—' });
 }

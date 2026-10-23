@@ -95,26 +95,32 @@ function claimedCell(row) {
 // EXPIRED is reported by the API once valid_to has passed, even before the expiry sweep runs.
 const statusBadge = (status) => badge(status, status === 'EXPIRED' ? 'warning' : 'neutral');
 
-export const render = listView({
-  title: 'Certifications',
-  subtitle: 'Organic, non-GMO and specialty claims. Issuance and revocation are anchored, '
-    + 'so a revoked certificate cannot later be presented as valid.',
-  endpoint: '/supply-chain/certifications',
-  actions: ({ reload }) => (can('cert:issue') ? issueForm(reload) : null),
-  filters: [{ key: 'cert_type', label: 'Type', options: ['ORGANIC', 'NON_GMO', 'SPECIALTY'] }],
-  columns: [
-    { label: 'Code', render: (row) => el('span', { class: 'mono', text: row.cert_code }) },
-    { label: 'Type', render: (row) => titleCase(row.cert_type) },
-    { label: 'Standard', key: 'standard' },
-    { label: 'Subject', render: (row) => row.subject_org_name || '—' },
-    { label: 'Scope', key: 'scope' },
-    { label: 'Claimed on', render: (row) => claimedCell(row) },
-    // A validity end is a day, not an instant.
-    { label: 'Valid to', render: (row) => fmtDay(row.valid_to) },
-    { label: 'Anchor', render: (row) => badge(row.anchor_status) },
-    { label: 'Status', render: (row) => statusBadge(row.status) },
-    { label: 'Action', render: (row, { reload }) => revokeButton(row, reload) },
-  ],
-  emptyTitle: 'No certifications issued',
-  emptyMessage: 'A certifier can issue an organic, non-GMO or specialty certification.',
-});
+// A function, not a constant, so the columns follow the permissions of the session that is
+// rendering rather than those held when the module was first imported.
+export function render(context) {
+  return listView({
+    title: 'Certifications',
+    subtitle: 'Organic, non-GMO and specialty claims. Issuance and revocation are anchored, '
+      + 'so a revoked certificate cannot later be presented as valid.',
+    endpoint: '/supply-chain/certifications',
+    actions: ({ reload }) => (can('cert:issue') ? issueForm(reload) : null),
+    filters: [{ key: 'cert_type', label: 'Type', options: ['ORGANIC', 'NON_GMO', 'SPECIALTY'] }],
+    columns: [
+      { label: 'Code', render: (row) => el('span', { class: 'mono', text: row.cert_code }) },
+      { label: 'Type', render: (row) => titleCase(row.cert_type) },
+      { label: 'Standard', key: 'standard' },
+      { label: 'Subject', render: (row) => row.subject_org_name || '—' },
+      { label: 'Scope', key: 'scope' },
+      { label: 'Claimed on', render: (row) => claimedCell(row) },
+      // A validity end is a day, not an instant.
+      { label: 'Valid to', render: (row) => fmtDay(row.valid_to) },
+      { label: 'Anchor', render: (row) => badge(row.anchor_status) },
+      { label: 'Status', render: (row) => statusBadge(row.status) },
+      // Only roles that can revoke get the column; for others it would be a column of dashes.
+      can('cert:revoke')
+        ? { label: 'Action', render: (row, { reload }) => revokeButton(row, reload) } : null,
+    ].filter(Boolean),
+    emptyTitle: 'No certifications issued',
+    emptyMessage: 'A certifier can issue an organic, non-GMO or specialty certification.',
+  })(context);
+}

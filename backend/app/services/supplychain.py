@@ -85,6 +85,86 @@ def _msp_for(db: Session, org_id: str) -> str:
     return organization.msp_id
 
 
+# --------------------------------------------------------------------------- #
+# Read access for certifiers
+# --------------------------------------------------------------------------- #
+def certified_by(org_id: str | None) -> Any:
+    """SQL condition: the batch carries a certificate `org_id` issued.
+
+    A certifier is not a party to the batches its certificates are claimed on, yet it is told
+    about them (claims, expiry, revocation, compliance) and must be able to check the claim. It
+    therefore reads those batches, read-only: this widens the read paths only (`readable_batch`,
+    the batch list, verify-record), never the paths that record events, ship or verify.
+    """
+    if org_id is None:
+        return None
+    return Batch.id.in_(
+        select(CertificationLink.batch_id)
+        .join(Certification, Certification.id == CertificationLink.certification_id)
+        .where(Certification.issuer_org_id == org_id))
+
+
+def readable_batch(db: Session, batch_id: str, role: str, org_id: str | None) -> Batch:
+    """A batch the caller may read: its owner, its custodian, a cross-tenant role, or the issuer
+    of a certificate claimed on it. 404 otherwise, as `get_or_404`."""
+    return get_or_404(db, Batch, batch_id, role, org_id, name="Batch",
+                      also=certified_by(org_id))
+
+
+def readable_batches(role: str, org_id: str | None):
+    """SELECT of every batch `readable_batch` would return for the caller."""
+    return visible(Batch, role, org_id, also=certified_by(org_id))
+
+
+# --------------------------------------------------------------------------- #
+# Release gate: what may be shipped or put on sale
+# --------------------------------------------------------------------------- #
+# Business steps that put a batch in front of a buyer, and how the refusal names them.
+RELEASE_STEPS = {"shipping": "shipped", "retail_selling": "put on sale"}
+
+
+def _recalled_ancestor(db: Session, batch: Batch, max_depth: int = 12) -> Batch | None:
+    seen = {batch.id}
+    current, depth = batch, 0
+    while current.parent_batch_id and depth < max_depth:
+        current = db.get(Batch, current.parent_batch_id)
+        if current is None or current.id in seen:
+            return None
+        if current.state == "RECALLED":
+            return current
+        seen.add(current.id)
+        depth += 1
+    return None
+
+
+def require_releasable(db: Session, batch: Batch, action: str) -> None:
+    """Refuse to ship or sell a batch that must not reach a buyer (422 with the reason).
+
+    Recalled, made from a recalled batch (the SUSPECT descendants `propagate_recall` flags),
+    integrity FAILED, or carrying a GMO event with no live approval anywhere (the same
+    `require_live_approval` gate that stops new seed lots and batches). A recall itself is never
+    gated: it is how such a batch is taken out of the chain.
+    """
+    code = batch.batch_code
+    if batch.state == "RECALLED":
+        raise ValidationFailed(f"Batch {code} has been recalled and cannot be {action}.")
+    recalled = _recalled_ancestor(db, batch)
+    if recalled is not None:
+        raise ValidationFailed(
+            f"Batch {code} is made from recalled batch {recalled.batch_code} and cannot be "
+            f"{action}. Quarantine the stock, or recall it too.")
+    if batch.integrity_status == "FAILED":
+        raise ValidationFailed(
+            f"Batch {code} failed integrity verification and cannot be {action}. Investigate "
+            f"the failure and re-run the verification first.")
+    event = gmo_service.lineage_gmo_event(db, batch)
+    if event is not None:
+        try:
+            gmo_service.require_live_approval(db, event, f"A batch {action}")
+        except ValidationFailed as exc:
+            raise ValidationFailed(f"Batch {code} cannot be {action}: {exc.detail}") from exc
+
+
 
 
 # --------------------------------------------------------------------------- #
@@ -239,6 +319,8 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
                  quantity: float | None, unit: str | None, to_org_id: str | None,
                  occurred_at: datetime, detail: dict[str, Any]) -> SupplyChainEvent:
     """Append an EPCIS-shaped event, anchor it, and advance the batch state."""
+    if biz_step in RELEASE_STEPS:
+        require_releasable(db, batch, RELEASE_STEPS[biz_step])
     if quantity is not None and quantity > batch.quantity + 1e-9:
         raise ValidationFailed(
             f"Event quantity {quantity} exceeds the batch quantity {batch.quantity} "
@@ -287,8 +369,10 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
 
     if biz_step == "receiving":
         # Receipt recorded directly closes the shipment that was carrying the batch, so the
-        # shipment and the batch never disagree about whether the goods have arrived.
-        _deliver_open_shipments(db, batch, occurred_at)
+        # shipment and the batch never disagree about whether the goods have arrived, with the
+        # same side effects as marking the shipment arrived (sender told, temperatures, audit).
+        _deliver_open_shipments(db, batch, occurred_at, org_id, actor_id, actor_role,
+                                location_name)
 
     db.flush()
     audit.record(db, "supply.record_event", actor_id=actor_id, actor_role=actor_role,
@@ -335,14 +419,18 @@ def propagate_recall(db: Session, batch: Batch, actor_id: str | None, actor_role
     """Tell every party to a recalled batch, and flag every batch made from it.
 
     The owner, the custodian and the owners and holders of every parent and child batch are
-    notified. Each descendant batch is marked SUSPECT and carries an open COMPLIANCE alert, so
-    product derived from a recalled lot is visible as such wherever it now is.
+    notified, and so is every organisation that handled one of those batches on the way: named
+    as sender or receiver on a custody event, or as either end of a shipment. An intermediate
+    processor that passed the batch on may still hold part of it, or know where it went. Each
+    descendant batch is marked SUSPECT and carries an open COMPLIANCE alert, so product derived
+    from a recalled lot is visible as such wherever it now is.
     """
     ancestors, descendants = _related_batches(db, batch)
     title = f"Batch {batch.batch_code} has been recalled"
+    related_batches = [batch, *ancestors, *descendants]
     # org -> the batch its notification should point at (one the org can open).
     recipients: dict[str, Batch] = {}
-    for related in [batch, *ancestors, *descendants]:
+    for related in related_batches:
         for party in (related.org_id, related.custodian_org_id):
             if party and party not in recipients:
                 recipients[party] = related
@@ -353,6 +441,32 @@ def propagate_recall(db: Session, batch: Batch, actor_id: str | None, actor_role
                    else "Stop distribution and quarantine the stock."))
         notifications.notify_org(db, party, "RECALL", title, body, "Batch", subject.id,
                                  severity="HIGH")
+    # Earlier holders. They can no longer open the batch, so the notification points at a
+    # shipment they were party to where there is one, and otherwise carries the codes only.
+    by_id = {b.id: b for b in related_batches}
+    handlers: dict[str, tuple[Batch, Shipment | None]] = {}
+    for event in db.execute(select(SupplyChainEvent).where(
+            SupplyChainEvent.batch_id.in_(list(by_id)))
+            .order_by(SupplyChainEvent.occurred_at.asc())).scalars():
+        for party in (event.from_org_id, event.to_org_id):
+            if party and party not in recipients and party not in handlers:
+                handlers[party] = (by_id[event.batch_id], None)
+    for shipment in db.execute(select(Shipment).where(
+            Shipment.batch_id.in_(list(by_id))).order_by(Shipment.departed_at.asc())).scalars():
+        for party in (shipment.org_id, shipment.to_org_id):
+            if not party or party in recipients:
+                continue
+            handled, known = handlers.get(party, (by_id[shipment.batch_id], None))
+            handlers[party] = (handled, known or shipment)
+    for party, (handled, shipment) in handlers.items():
+        body = (f"{batch.batch_code} was recalled. Your organisation handled batch "
+                f"{handled.batch_code}"
+                + (" (this batch)" if handled.id == batch.id else ", which is in its lineage")
+                + ". Check whether any of that stock is still with you and tell whoever you "
+                  "passed it to.")
+        notifications.notify_org(db, party, "RECALL", title, body,
+                                 "Shipment" if shipment else None,
+                                 shipment.id if shipment else None, severity="HIGH")
     if not notifications.has_open_alert(db, "COMPLIANCE", batch.id):
         notifications.raise_alert(
             db, "COMPLIANCE", "HIGH", title,
@@ -374,18 +488,38 @@ def propagate_recall(db: Session, batch: Batch, actor_id: str | None, actor_role
                  detail={"batch_code": batch.batch_code,
                          "descendants": [b.batch_code for b in descendants],
                          "ancestors": [b.batch_code for b in ancestors],
-                         "organisations_notified": len(recipients)})
+                         "organisations_notified": len(recipients) + len(handlers)})
     return {"descendants": descendants, "ancestors": ancestors,
-            "organisations": list(recipients)}
+            "organisations": [*recipients, *handlers]}
 
 
-def _deliver_open_shipments(db: Session, batch: Batch, arrived_at: datetime) -> None:
+def _deliver_open_shipments(db: Session, batch: Batch, arrived_at: datetime, org_id: str,
+                            actor_id: str | None, actor_role: str | None,
+                            location_name: str | None = None) -> None:
     arrived = _aware(arrived_at)
-    for shipment in db.execute(select(Shipment).where(
-            Shipment.batch_id == batch.id, Shipment.status == "IN_TRANSIT")).scalars():
+    for shipment in list(db.execute(select(Shipment).where(
+            Shipment.batch_id == batch.id, Shipment.status == "IN_TRANSIT")).scalars()):
         shipment.status = "DELIVERED"
         shipment.arrived_at = max(arrived, _aware(shipment.departed_at))
+        db.flush()
+        _shipment_arrived(db, shipment, org_id, actor_id, actor_role, location_name)
     db.flush()
+
+
+def _shipment_arrived(db: Session, shipment: Shipment, org_id: str, actor_id: str | None,
+                      actor_role: str | None, location_name: str | None) -> None:
+    """Side effects of a shipment arriving, however its arrival was recorded: the shipment's
+    temperature range is fixed from its readings, the arrival is audited, and the sender of a
+    hand-over is told."""
+    refresh_shipment_temperatures(db, shipment)
+    audit.record(db, "supply.shipment_arrived", actor_id=actor_id, actor_role=actor_role,
+                 org_id=org_id, entity_type="Shipment", entity_id=shipment.id,
+                 detail={"sscc": shipment.sscc, "batch_id": shipment.batch_id})
+    if shipment.to_org_id and shipment.org_id != org_id:
+        notifications.notify_org(
+            db, shipment.org_id, "SHIPMENT", f"Shipment {shipment.sscc} arrived",
+            f"Received at {location_name or shipment.destination_name}.", "Shipment",
+            shipment.id)
 
 
 def transfer_custody(db: Session, batch: Batch, from_org_id: str, to_org_id: str,
@@ -509,6 +643,7 @@ def create_shipment(db: Session, org_id: str, actor_id: str, actor_role: str, *,
     batch = get_or_404(db, Batch, kwargs["batch_id"], actor_role, org_id, name="Batch")
     if not _is_cross_tenant(actor_role) and batch.custodian_org_id != org_id:
         raise PermissionDenied("Only the organisation currently holding this batch may ship it")
+    require_releasable(db, batch, "shipped")
     arrived = _aware(kwargs.get("arrived_at"))
     departed = _aware(kwargs["departed_at"])
     if arrived and arrived < departed:
@@ -584,15 +719,7 @@ def arrive_shipment(db: Session, shipment: Shipment, org_id: str, actor_id: str,
                      location_name or shipment.destination_name, shipment.destination_lat,
                      shipment.destination_lon, None, None, None, arrived,
                      {"sscc": shipment.sscc})
-    refresh_shipment_temperatures(db, shipment)
-    audit.record(db, "supply.shipment_arrived", actor_id=actor_id, actor_role=actor_role,
-                 org_id=org_id, entity_type="Shipment", entity_id=shipment.id,
-                 detail={"sscc": shipment.sscc, "batch_id": shipment.batch_id})
-    if shipment.to_org_id and shipment.org_id != org_id:
-        notifications.notify_org(
-            db, shipment.org_id, "SHIPMENT", f"Shipment {shipment.sscc} arrived",
-            f"Received at {location_name or shipment.destination_name}.", "Shipment",
-            shipment.id)
+    _shipment_arrived(db, shipment, org_id, actor_id, actor_role, location_name)
     return shipment
 
 
@@ -790,6 +917,13 @@ def sweep_certification_expiry(db: Session, warn_days: int = 30) -> dict[str, in
         claimed = ", ".join(b.batch_code for b in batches[:20]) or "no batch"
         if valid_to < now:
             certification.status = "EXPIRED"
+            # Treated as revocation treats it (see revoke_certification): a VERIFIED verdict
+            # reached while the certificate was valid no longer stands, so the batch reads
+            # UNVERIFIED until it is re-verified. Not SUSPECT: an expiry is not evidence of
+            # tampering. A worse verdict is left alone.
+            for batch in batches:
+                if batch.integrity_status == "VERIFIED":
+                    batch.integrity_status = "UNVERIFIED"
             db.flush()
             audit.record(db, "cert.expire", actor_id=None, actor_role=None,
                          org_id=certification.issuer_org_id, entity_type="Certification",

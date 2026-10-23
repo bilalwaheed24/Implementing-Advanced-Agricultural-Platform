@@ -13,8 +13,12 @@ function buildTiles(dash) {
   // A processor's day: what it holds, what is on the road, what has arrived unconfirmed.
   if (sc && role === 'SUPPLY_CHAIN_OPERATOR') {
     tiles.push(tile('Batches held', sc.held, 'In your custody now', '#/batches'));
-    tiles.push(tile('Shipments in transit', sc.shipments_in_transit, 'Dispatched, not yet arrived',
-      '#/shipments'));
+    tiles.push(tile('Shipments in transit', sc.shipments_in_transit,
+      'Sent or coming to you, not yet arrived', '#/shipments'));
+    if (sc.awaiting_arrival) {
+      tiles.push(tile('Awaiting your arrival', sc.awaiting_arrival,
+        'In transit to you — mark them arrived when they reach you', '#/shipments'));
+    }
     tiles.push(tile('Hand-overs to book in', sc.pending_handovers,
       'Received batches with no receiving event yet', '#/batches'));
   }
