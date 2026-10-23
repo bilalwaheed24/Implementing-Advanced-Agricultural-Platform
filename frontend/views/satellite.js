@@ -80,5 +80,6 @@ export const render = listView({
       ? badge('ANCHORED') : '—') },
   ],
   emptyTitle: 'No imagery scenes',
-  emptyMessage: 'Ingest a drone flight with scripts/odm_ingest.py, or satellite scenes through the API.',
+  emptyMessage: 'Satellite scenes and drone orthophotos appear here once they are uploaded '
+    + 'for your fields.',
 });

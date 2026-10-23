@@ -1,5 +1,53 @@
-import { el, api, badge, fmtDate, table, toast, can } from '/static/assets/core.js';
+import { el, api, badge, fmtDate, toast, can, roleLabel, entityLabel, entityHref, session }
+  from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
+
+/* "crop.status" -> "Crop status": the code stays available as the cell's tooltip. */
+function actionLabel(action) {
+  const words = String(action || '').replace(/[._]/g, ' ').trim().toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/* People's names, where the role may read accounts: one request per page load, shared by
+ * every row. Without user:read the role is shown instead of a bare id. */
+let usersPromise = null;
+let usersFor = null;
+function userNames() {
+  const me = session.read()?.id || null;
+  if (me !== usersFor) { usersPromise = null; usersFor = me; }
+  if (!can('user:read')) return Promise.resolve({});
+  if (!usersPromise) {
+    usersPromise = api('/admin/users?page=1&page_size=200')
+      .then((page) => Object.fromEntries((page.items || []).map((u) => [u.id, u.full_name])))
+      .catch(() => ({}));
+  }
+  return usersPromise;
+}
+
+function actorCell(row) {
+  if (!row.actor_id) return 'System';
+  const role = row.actor_role ? roleLabel(row.actor_role) : '';
+  const name = el('div', { text: role || 'User' });
+  const cell = el('div', {}, [name]);
+  userNames().then((names) => {
+    if (!names[row.actor_id]) return;
+    name.textContent = names[row.actor_id];
+    if (role) cell.appendChild(el('div', { class: 'hint', text: role }));
+  });
+  return cell;
+}
+
+function entityCell(row) {
+  if (!row.entity_type) return '—';
+  const label = entityLabel(row.entity_type);
+  const href = entityHref(row.entity_type, row.entity_id);
+  const short = row.entity_id ? ` ${row.entity_id.slice(0, 8)}` : '';
+  return href
+    ? el('a', { href, title: row.entity_id || '' }, [label,
+      el('span', { class: 'hint mono', text: short })])
+    : el('span', { title: row.entity_id || '' }, [label,
+      el('span', { class: 'hint mono', text: short })]);
+}
 
 async function verifyCard() {
   try {
@@ -9,7 +57,8 @@ async function verifyCard() {
       el('div', { class: 'row' }, [
         result.valid ? badge('VERIFIED') : badge('FAILED'),
         el('span', { class: 'hint', text: `${result.entries} entries, head sequence ${result.head_seq}` }),
-        result.anchor_matches ? badge('ANCHORED') : badge('WARNING'),
+        result.anchor_matches ? badge('ANCHORED')
+          : el('span', { class: 'badge warning', text: 'Latest entries not yet anchored' }),
       ]),
       !result.valid ? el('p', { class: 'error-text',
         text: `First divergence: ${JSON.stringify(result.first_divergence)}` }) : null,
@@ -68,11 +117,10 @@ export const render = listView({
   columns: [
     { label: 'Seq', numeric: true, key: 'seq' },
     { label: 'When', render: (row) => fmtDate(row.created_at) },
-    { label: 'Action', render: (row) => el('span', { class: 'mono', text: row.action }) },
-    { label: 'Actor', render: (row) => row.actor_id
-      ? el('span', { class: 'mono', text: row.actor_id.slice(0, 8) }) : 'system' },
-    { label: 'Entity', render: (row) => row.entity_type
-      ? `${row.entity_type} ${row.entity_id ? row.entity_id.slice(0, 8) : ''}` : '—' },
+    { label: 'Action', render: (row) => el('span', { title: row.action,
+      text: actionLabel(row.action) }) },
+    { label: 'Actor', render: (row) => actorCell(row) },
+    { label: 'Record', render: (row) => entityCell(row) },
     { label: 'Outcome', render: (row) => badge(row.outcome) },
     { label: 'Hash', render: (row) => el('span', { class: 'mono',
       text: row.entry_hash.slice(0, 16) + '…' }) },

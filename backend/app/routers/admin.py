@@ -23,12 +23,22 @@ router = APIRouter(prefix="/admin", tags=["Administration"],
 def list_users(db: DbSession, paging: PagingDep,
                principal: Annotated[object, Depends(require_permission(P.USER_READ))],
                role: str | None = Query(default=None),
-               status_filter: str | None = Query(default=None, alias="status")) -> Page[UserOut]:
+               status_filter: str | None = Query(default=None, alias="status"),
+               q: str | None = Query(default=None, max_length=100,
+                                     description="Matches email or name")) -> Page[UserOut]:
     query = visible(User, principal.role, principal.org_id).order_by(User.created_at.desc())
     if role:
         query = query.where(User.role == role)
     if status_filter:
         query = query.where(User.status == status_filter)
+    if q and q.strip():
+        from sqlalchemy import or_
+
+        # LIKE wildcards in the term are matched literally, not as patterns.
+        term = q.strip().lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{term}%"
+        query = query.where(or_(User.email.ilike(pattern, escape="\\"),
+                                User.full_name.ilike(pattern, escape="\\")))
     rows, total = paginate(db, query, paging.page, paging.page_size)
     return Page[UserOut](items=[UserOut.model_validate(r) for r in rows], total=total,
                          page=paging.page, page_size=paging.page_size)

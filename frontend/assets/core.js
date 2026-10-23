@@ -143,7 +143,82 @@ export function termLabel(value) {
 const ENUM_TOKEN = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g;
 
 export function humanizeText(value) {
-  return String(value ?? '').replace(ENUM_TOKEN, (match) => termLabel(match));
+  return String(value ?? '').replace(ENUM_TOKEN, (match) => humanize(match));
+}
+
+/* Status and outcome codes whose plain reading is not just the words of the enum. */
+const STATUS_LABELS = {
+  APPROVED_AUTO: 'Approved automatically', APPROVED_BY_REVIEW: 'Approved after review',
+  PENDING_REVIEW: 'Pending review', IN_TRANSIT: 'In transit', NON_COMPLIANT: 'Not compliant',
+  RETAIL_SELLING: 'On sale', NOT_SUBMITTED: 'Not submitted',
+};
+
+/* One enum value (APPROVED_AUTO, KNOCK_IN, PLANT_PATHOGEN) as a reader would say it:
+ * "Approved automatically", "Knock-in", "Plant pathogen". Anything that is not
+ * enum-shaped is returned unchanged, so it is safe on free text. */
+export function humanize(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const text = String(value);
+  const key = text.toUpperCase();
+  if (STATUS_LABELS[key]) return STATUS_LABELS[key];
+  if (!/^[A-Z0-9_]+$/.test(text)) return text;
+  return termLabel(text);
+}
+
+/* Record types as stored in audit and notification rows (CrisprAssessment, SeedLot). */
+const ENTITY_LABELS = {
+  SequenceScreening: 'Sequence screening', CrisprAssessment: 'CRISPR assessment',
+  SeedLot: 'Seed lot', GMOEvent: 'GMO event', GmoEvent: 'GMO event',
+  GMOApproval: 'GMO approval', SupplyChainEvent: 'Supply-chain event',
+  FraudAssessment: 'Fraud assessment', ComplianceReport: 'Compliance report',
+  AIAnalysis: 'AI analysis', SatelliteScene: 'Imagery scene', HazardSequence: 'Hazard sequence',
+  Organization: 'Organisation', AuditLog: 'Audit record', BlockchainTx: 'Ledger transaction',
+  RefreshToken: 'Session',
+};
+
+/* Where a record of a given type can be opened, and the permission that screen needs.
+ * A type with a detail route gets the record itself; otherwise its list. */
+const ENTITY_ROUTES = {
+  Device: [(id) => `#/device/${id}`, 'device:read'],
+  Batch: [(id) => `#/batch/${id}`, 'supply:read'],
+  SeedLot: [() => '#/seed-lots', 'gmo:read'],
+  SequenceScreening: [(id) => `#/screening/${id}`, 'biosecurity:read'],
+  CrisprAssessment: [() => '#/crispr', 'biosecurity:read'],
+  Certification: [() => '#/certifications', 'cert:read'],
+  Farm: [(id) => `#/farm/${id}`, 'farm:read'],
+  Field: [() => '#/farms', 'farm:read'],
+  Crop: [() => '#/farms', 'farm:read'],
+  Incident: [(id) => `#/incident/${id}`, 'incident:read'],
+  Alert: [() => '#/alerts', 'alert:read'],
+  GMOEvent: [() => '#/gmo', 'gmo:read'],
+  Shipment: [() => '#/shipments', 'supply:read'],
+  Product: [() => '#/products', 'supply:read'],
+  FraudAssessment: [() => '#/fraud', 'supply:read'],
+  ComplianceReport: [() => '#/compliance', 'compliance:read'],
+  User: [() => '#/users', 'user:read'],
+  SatelliteScene: [() => '#/satellite', 'telemetry:read'],
+  DeviceVulnerability: [() => '#/devices', 'device:read'],
+};
+
+/* The in-app link for a record, or null when it has no screen or the role cannot open it. */
+export function entityHref(type, id) {
+  const route = ENTITY_ROUTES[type];
+  if (!route || !id) return null;
+  const [href, permission] = route;
+  return !permission || can(permission) ? href(id) : null;
+}
+
+export function entityLabel(value) {
+  if (!value) return '';
+  if (ENTITY_LABELS[value]) return ENTITY_LABELS[value];
+  // CamelCase to words, sentence case: "DeviceVulnerability" -> "Device vulnerability".
+  const words = String(value).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/_/g, ' ')
+    .split(' ').filter(Boolean);
+  return words.map((word, index) => {
+    if (ACRONYMS.has(word.toUpperCase())) return word.toUpperCase();
+    const lower = word.toLowerCase();
+    return index === 0 ? lower.charAt(0).toUpperCase() + lower.slice(1) : lower;
+  }).join(' ');
 }
 
 /* ---------------- severity ---------------- */
@@ -170,7 +245,7 @@ export function badge(value, fallback = 'neutral') {
   const kind = SEVERITY_CLASS[key] || fallback;
   return el('span', { class: `badge ${kind}` }, [
     el('span', { class: 'icon', 'aria-hidden': 'true', text: SEVERITY_ICON[kind] || '·' }),
-    titleCase(value || 'unknown'),
+    STATUS_LABELS[key] || titleCase(value || 'unknown'),
   ]);
 }
 
@@ -245,8 +320,11 @@ export async function api(path, { method = 'GET', body, retry = true, raw = fals
   const headers = { 'Content-Type': 'application/json' };
   if (current?.access_token) headers.Authorization = `Bearer ${current.access_token}`;
 
+  // no-store: counts and lists must reflect a change made a moment ago, never a cached copy
+  // (the server also sends Cache-Control: no-store; this covers an intermediary that ignores it).
   const response = await fetch(path.startsWith('/api') ? path : API + path, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body),
+    cache: 'no-store',
   });
 
   if (response.status === 401 && retry && current?.refresh_token) {
@@ -269,7 +347,16 @@ export async function api(path, { method = 'GET', body, retry = true, raw = fals
 /* Names of the active organisations, fetched once per page load and shared by every view
  * that has to say who holds a record or offer whom to hand it to. */
 let directoryPromise = null;
+let directoryUser = null;
+/* The server offers the directory only to roles that hand records over (or administer
+ * users); for any other role the call is a predictable 403, so it is not made. */
+const DIRECTORY_PERMISSIONS = ['supply:write', 'gmo:write', 'user:read'];
 export function orgDirectory() {
+  const user = session.read()?.id || null;
+  if (user !== directoryUser) { directoryPromise = null; directoryUser = user; }
+  if (!DIRECTORY_PERMISSIONS.some((permission) => can(permission))) {
+    return Promise.resolve([]);
+  }
   if (!directoryPromise) {
     directoryPromise = api('/admin/organizations/directory').catch(() => {
       directoryPromise = null;
@@ -279,14 +366,19 @@ export function orgDirectory() {
   return directoryPromise;
 }
 
-/* A span that shows an organisation's name once the directory has loaded. */
+/* A span that shows an organisation's name once the directory has loaded. The caller's own
+ * organisation is named from the session, so it reads correctly even for a role that has
+ * no directory access. */
 export function orgName(orgId, fallback = '—') {
   const span = el('span', { text: orgId ? '…' : fallback });
   if (orgId) {
     orgDirectory().then((rows) => {
+      const current = session.read();
       const found = rows.find((row) => row.id === orgId);
-      span.textContent = found ? found.name : fallback;
-      if (orgId === session.read()?.org_id) span.textContent += ' (you)';
+      const own = orgId === current?.org_id;
+      span.textContent = found ? found.name
+        : (own ? (current?.org_name || 'Your organisation') : fallback);
+      if (own && (found || current?.org_name)) span.textContent += ' (you)';
     });
   }
   return span;
@@ -345,8 +437,9 @@ export function errorBox(error) {
   return el('div', { class: 'card', role: 'alert' }, parts);
 }
 
-export function tile(label, value, hint) {
-  return el('div', { class: 'tile' }, [
+/* A count tile. With `href` the whole tile is a link to the list it counts. */
+export function tile(label, value, hint, href = null) {
+  return el(href ? 'a' : 'div', { class: href ? 'tile tile-link' : 'tile', href }, [
     el('div', { class: 'label', text: label }),
     el('div', { class: 'value', text: value === undefined || value === null ? '—' : String(value) }),
     hint ? el('div', { class: 'hint', text: hint }) : null,

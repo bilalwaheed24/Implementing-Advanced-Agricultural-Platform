@@ -1,6 +1,10 @@
-import { el, api, badge, can, fmtDate, fmtNum, orgName } from '/static/assets/core.js';
+import { el, api, badge, can, fmtDay, fmtNum, orgName } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, dateInput, todayIso, atNoon } from '/static/views/formkit.js';
+
+function wantedCrop() {
+  return new URLSearchParams(window.location.hash.split('?')[1] || '').get('crop');
+}
 
 function createForm(reload) {
   const code = el('input', { required: 'required', minlength: '3', maxlength: '60',
@@ -23,7 +27,9 @@ function createForm(reload) {
   const crop = remoteSelect({
     endpoint: '/crops', required: false, requires: 'farm:read',
     label: (row) => `${row.crop_type}${row.variety ? ` ${row.variety}` : ''} — planted `
-      + `${fmtDate(row.planted_at)}${row.gmo_event_id ? ' (GMO)' : ''}`,
+      + `${fmtDay(row.planted_at)}${row.gmo_event_id ? ' (GMO)' : ''}`,
+    // A crop already marked harvested (or failed) cannot be harvested into a batch again.
+    filter: (row) => !['HARVESTED', 'FAILED'].includes(row.status),
     placeholder: 'Not harvested from one of your crops',
     emptyLabel: 'No crop planted yet',
   });
@@ -107,7 +113,7 @@ function createForm(reload) {
   // before reading, so it sees the reset values.
   panel.querySelector('form')?.addEventListener('reset', lockLineage);
   // Arriving from a farm's "Create harvest batch" link: open the form with that crop chosen.
-  const wanted = new URLSearchParams(window.location.hash.split('?')[1] || '').get('crop');
+  const wanted = wantedCrop();
   if (wanted) {
     crop.whenReady.then(() => {
       crop.value = wanted;
@@ -124,6 +130,9 @@ export const render = listView({
     + 'verification code a consumer can scan.',
   endpoint: '/supply-chain/batches',
   actions: ({ reload }) => (can('supply:write') ? createForm(reload) : null),
+  // Client-side: the batch list endpoint has no text search parameter.
+  search: { placeholder: 'Batch code, product or verification code',
+    fields: (row) => `${row.batch_code} ${row.product_name || ''} ${row.verification_code}` },
   filters: [
     { key: 'state', label: 'State', options: ['CREATED', 'HARVESTED', 'PROCESSED', 'PACKAGED',
       'IN_TRANSIT', 'RECEIVED', 'STORED', 'RETAILED', 'RECALLED'] },
@@ -133,11 +142,14 @@ export const render = listView({
   columns: [
     { label: 'Batch', render: (row) => el('a', { href: `#/batch/${row.id}`, class: 'mono',
       text: row.batch_code }) },
+    { label: 'Product', render: (row) => row.product_name || '—' },
     { label: 'State', render: (row) => badge(row.state) },
     { label: 'Quantity', numeric: true, render: (row) => `${fmtNum(row.quantity, 0)} ${row.unit}` },
     { label: 'Origin', render: (row) => row.origin_region
       ? `${row.origin_region}, ${row.origin_country}` : '—' },
-    { label: 'GMO lineage', render: (row) => row.gmo_event_id ? badge('GMO') : '—' },
+    // A GMO lineage is a fact to disclose, not a fault: a neutral label, not a warning.
+    { label: 'GMO lineage', render: (row) => (row.gmo_event_id
+      ? el('span', { class: 'badge neutral', text: 'GMO' }) : 'None recorded') },
     { label: 'Held by', render: (row) => orgName(row.custodian_org_id) },
     { label: 'Anchor', render: (row) => badge(row.anchor_status) },
     { label: 'Integrity', render: (row) => badge(row.integrity_status) },
