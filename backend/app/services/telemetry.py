@@ -146,7 +146,7 @@ def _score_and_persist(db: Session, device: Device, record: Telemetry,
         # new alert and incident — a faulty sensor otherwise produced ~96 of each a day.
         notifications.raise_alert(
             db, "DEVICE_ANOMALY", verdict["level"],
-            f"Anomalous telemetry from {device.device_type} {device.id[:8]}",
+            f"Anomalous telemetry from {device_service.device_label(device)}",
             detail="; ".join(verdict["reasons"][:3]), org_id=device.org_id,
             entity_type="Device", entity_id=device.id, reasons=verdict["reasons"],
             kind="anomaly")

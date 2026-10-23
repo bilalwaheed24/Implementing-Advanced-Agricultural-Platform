@@ -15,18 +15,32 @@ from ..repositories import get_or_404, paginate, visible
 from ..schemas import AlertOut, IncidentOut, IncidentUpdate, Page
 from ..services import audit, notifications, security_ops as service
 
+
+class AlertListOut(AlertOut):
+    # The incident the alert joined, named by its title ("Incident 948f7fea" told nobody
+    # anything). None when the alert has no incident.
+    incident_label: str | None = None
+
+
+class IncidentListOut(IncidentOut):
+    # The record the incident is about, named for people ("pw-f74f8f", "GW2 in wheat");
+    # None where it has no readable name.
+    entity_label: str | None = None
+
+
 router = APIRouter(prefix="/security", tags=["Security Operations"],
                    dependencies=[Depends(rate_limit)])
 
 
-@router.get("/alerts", response_model=Page[AlertOut], summary="List alerts")
+@router.get("/alerts", response_model=Page[AlertListOut], summary="List alerts")
 def list_alerts(db: DbSession, paging: PagingDep,
                 principal: Annotated[object, Depends(require_permission(P.ALERT_READ))],
                 severity: str | None = Query(default=None),
                 category: str | None = Query(default=None),
                 status_filter: str | None = Query(default=None, alias="status"),
                 entity_id: str | None = Query(default=None, max_length=36),
-                incident_id: str | None = Query(default=None, max_length=36)) -> Page[AlertOut]:
+                incident_id: str | None = Query(default=None, max_length=36)
+                ) -> Page[AlertListOut]:
     query = visible(Alert, principal.role, principal.org_id).order_by(Alert.created_at.desc())
     if severity:
         query = query.where(Alert.severity == severity.upper())
@@ -40,8 +54,31 @@ def list_alerts(db: DbSession, paging: PagingDep,
         query = query.where(Alert.incident_id == incident_id)
     rows, total = paginate(db, query, paging.page, paging.page_size)
     labels = _source_labels(db, rows)
-    return Page[AlertOut](items=[_alert_out(r, labels) for r in rows], total=total,
-                          page=paging.page, page_size=paging.page_size)
+    incident_titles = _incident_titles(db, {r.incident_id for r in rows})
+    items = []
+    for row in rows:
+        out = AlertListOut.model_validate(_alert_out(row, labels).model_dump())
+        out.incident_label = incident_titles.get(row.incident_id)
+        items.append(out)
+    return Page[AlertListOut](items=items, total=total, page=paging.page,
+                              page_size=paging.page_size)
+
+
+def _incident_title(title: str | None) -> str | None:
+    # Incidents opened from an alert were titled "Incident: <alert title>"; the prefix only
+    # repeats what the link already says.
+    text = (title or "").strip()
+    if text.lower().startswith("incident:"):
+        text = text[len("incident:"):].strip()
+    return text[:120] or None
+
+
+def _incident_titles(db, incident_ids: set[str | None]) -> dict[str, str]:
+    ids = [i for i in incident_ids if i]
+    if not ids:
+        return {}
+    return {i.id: _incident_title(i.title) or i.id[:8]
+            for i in db.execute(select(Incident).where(Incident.id.in_(ids))).scalars()}
 
 
 def _alert_out(alert: Alert, labels: dict[tuple[str, str], str]) -> AlertOut:
@@ -53,9 +90,11 @@ def _alert_out(alert: Alert, labels: dict[tuple[str, str], str]) -> AlertOut:
 # How the record an alert is about is named on screen ("Field North 40", "Batch B-1024")
 # instead of a type and an id prefix. Only rows the caller can already see are listed, and
 # naming the record they are about discloses nothing the alert's own title does not.
-def _source_labels(db, alerts: list[Alert]) -> dict[tuple[str, str], str]:
+def _source_labels(db, alerts) -> dict[tuple[str, str], str]:
+    # Works on any rows carrying entity_type/entity_id (alerts and incidents alike).
     from ..models import (Batch, Certification, CrisprAssessment, Device, Farm, Field,
-                          GMOApproval, GMOEvent, SequenceScreening, Shipment)
+                          GMOApproval, GMOEvent, SeedLot, SequenceScreening, Shipment)
+    from ..services.devices import device_label
 
     namers = {
         "Field": (Field, lambda r: r.name),
@@ -65,9 +104,10 @@ def _source_labels(db, alerts: list[Alert]) -> dict[tuple[str, str], str]:
         "Certification": (Certification, lambda r: r.cert_code),
         "SequenceScreening": (SequenceScreening, lambda r: r.name),
         "CrisprAssessment": (CrisprAssessment, lambda r: f"{r.target_gene} in {r.organism}"),
+        "SeedLot": (SeedLot, lambda r: r.lot_code),
+        "Incident": (Incident, lambda r: _incident_title(r.title) or r.id[:8]),
         "GMOEvent": (GMOEvent, lambda r: r.event_code),
-        "Device": (Device, lambda r: (f"{r.device_type.replace('_', ' ').title()} "
-                                      f"{r.serial_number or r.id[:8]}")),
+        "Device": (Device, device_label),
         "User": (User, lambda r: r.full_name or r.email),
     }
     wanted: dict[str, set[str]] = {}
@@ -125,13 +165,13 @@ def resolve(alert_id: str, db: DbSession,
     return _alert_out(alert, _source_labels(db, [alert]))
 
 
-@router.get("/incidents", response_model=Page[IncidentOut], summary="List incidents")
+@router.get("/incidents", response_model=Page[IncidentListOut], summary="List incidents")
 def list_incidents(db: DbSession, paging: PagingDep,
                    principal: Annotated[object, Depends(require_permission(P.INCIDENT_READ))],
                    status_filter: str | None = Query(default=None, alias="status"),
                    severity: str | None = Query(default=None),
                    entity_id: str | None = Query(default=None, max_length=36)
-                   ) -> Page[IncidentOut]:
+                   ) -> Page[IncidentListOut]:
     query = visible(Incident, principal.role, principal.org_id).order_by(
         Incident.created_at.desc())
     if status_filter:
@@ -141,8 +181,14 @@ def list_incidents(db: DbSession, paging: PagingDep,
     if entity_id:
         query = query.where(Incident.entity_id == entity_id)
     rows, total = paginate(db, query, paging.page, paging.page_size)
-    return Page[IncidentOut](items=[IncidentOut.model_validate(r) for r in rows], total=total,
-                             page=paging.page, page_size=paging.page_size)
+    labels = _source_labels(db, rows)
+    items = []
+    for row in rows:
+        out = IncidentListOut.model_validate(row)
+        out.entity_label = labels.get((row.entity_type or "", row.entity_id or ""))
+        items.append(out)
+    return Page[IncidentListOut](items=items, total=total, page=paging.page,
+                                 page_size=paging.page_size)
 
 
 @router.get("/incidents/{incident_id}", summary="Incident detail with its timeline")
@@ -152,12 +198,16 @@ def get_incident(incident_id: str, db: DbSession,
                           name="Incident")
     events = service.timeline(db, incident.id)
     people = _user_names(db, {incident.assignee_id} | {e.actor_id for e in events})
-    return {"incident": IncidentOut.model_validate(incident).model_dump(),
+    linked = notifications.linked_alerts(db, incident.id)
+    labels = _source_labels(db, [incident, *linked])
+    incident_out = IncidentListOut.model_validate(incident)
+    incident_out.entity_label = labels.get((incident.entity_type or "",
+                                            incident.entity_id or ""))
+    return {"incident": incident_out.model_dump(),
             "assignee": ({"id": incident.assignee_id, "name": people.get(incident.assignee_id)}
                          if incident.assignee_id else None),
             "can_update": _may_update_incident(principal, incident),
-            "alerts": [AlertOut.model_validate(a).model_dump()
-                       for a in notifications.linked_alerts(db, incident.id)],
+            "alerts": [_alert_out(a, labels).model_dump() for a in linked],
             # An entry without an actor was written by the platform itself (an alert opening
             # or joining the incident, a sweep, a resolved check), and is labelled so.
             "timeline": [{"action": e.action, "detail": e.detail, "actor_id": e.actor_id,

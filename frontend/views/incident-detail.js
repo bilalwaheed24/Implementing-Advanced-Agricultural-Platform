@@ -166,7 +166,8 @@ export async function render({ id }) {
 
   const facts = el('table', {}, [
     el('tr', {}, [rowHeader('About'),
-      el('td', {}, [entityLink(incident.entity_type, incident.entity_id) || '—'])]),
+      el('td', {}, [entityLink(incident.entity_type, incident.entity_id,
+        incident.entity_label) || '—'])]),
     el('tr', {}, [rowHeader('Category'),
       el('td', { text: incident.category ? titleCase(incident.category) : '—' })]),
     el('tr', {}, [rowHeader('Assignee'),

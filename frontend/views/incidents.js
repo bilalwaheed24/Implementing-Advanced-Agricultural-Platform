@@ -20,7 +20,7 @@ export const render = listView({
       text: incidentTitle(row.title) }) },
     { label: 'Severity', render: (row) => badge(row.severity) },
     { label: 'Status', render: (row) => badge(row.status) },
-    { label: 'About', render: (row) => entityLink(row.entity_type, row.entity_id)
+    { label: 'About', render: (row) => entityLink(row.entity_type, row.entity_id, row.entity_label)
       || el('span', { class: 'hint', text: '—' }) },
     { label: 'Summary', render: (row) => el('span', { class: 'hint',
       text: humanizeText(row.summary) }) },

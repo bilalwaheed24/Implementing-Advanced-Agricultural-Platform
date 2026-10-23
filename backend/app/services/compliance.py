@@ -126,7 +126,7 @@ def rule_biosecurity_screening(db: Session, batch: Batch, ctx: dict) -> dict[str
     return _result(
         "BIO-001", "Biosecurity screening before release",
         "Internal biosafety policy / DURC oversight", passed, "CRITICAL",
-        f"Screening {screening.id[:8]} passed with verdict {screening.verdict}" if passed
+        f"Screening {screening.name} passed with verdict {screening.verdict}" if passed
         else "The GMO event has no screening in a passing state",
         screening_status=screening.status if screening else None,
         durc_flag=screening.durc_flag if screening else None)

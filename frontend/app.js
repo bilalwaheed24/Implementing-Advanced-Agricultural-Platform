@@ -310,7 +310,23 @@ async function render() {
   }
 }
 
-window.addEventListener('hashchange', render);
+/* A dialog belongs to the screen that opened it. Views append theirs to <body>, outside the
+ * re-rendered root, so without this a modal (the CRISPR review dialog, say) stayed over the
+ * next screen after Back or a link and blocked every click on it. */
+function closeOpenDialogs() {
+  for (const dialog of document.querySelectorAll('dialog')) {
+    if (dialog.open) dialog.close();
+    dialog.remove();
+  }
+  for (const node of document.querySelectorAll('[aria-modal="true"], .modal-backdrop')) {
+    node.remove();
+  }
+}
+
+window.addEventListener('hashchange', () => {
+  closeOpenDialogs();
+  render();
+});
 // Exactly one initial render: listen only while the document is still parsing.
 if (document.readyState === 'loading') {
   window.addEventListener('DOMContentLoaded', render, { once: true });

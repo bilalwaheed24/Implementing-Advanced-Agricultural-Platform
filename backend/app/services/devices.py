@@ -27,6 +27,18 @@ LIFECYCLE: dict[str, set[str]] = {
 }
 
 
+def device_label(device: Device) -> str:
+    """The one name a device goes by on screen and in alert titles: "<Model> (<serial>)".
+
+    The device list shows the model and serial, so alerts naming the same device by an id
+    prefix or by its type read as a different device. Falls back to the type for a device
+    registered without a model, and to an id prefix for one without a serial number.
+    """
+    name = (device.model or "").strip() or (device.device_type or "device").replace(
+        "_", " ").title()
+    return f"{name} ({(device.serial_number or '').strip() or device.id[:8]})"
+
+
 def register_device(db: Session, org_id: str, actor_id: str, actor_role: str,
                     device_type: str, model: str, firmware_version: str, farm_id: str,
                     field_id: str | None, serial_number: str | None,
@@ -92,7 +104,7 @@ def transition(db: Session, device: Device, new_status: str, actor_id: str, acto
         # raise_alert attaches this to the incident already active for the device (the one
         # whose anomaly prompted the quarantine) rather than opening a second one.
         alert = notifications.raise_alert(
-            db, "DEVICE_AUTH", "HIGH", f"Device {device.id[:8]} quarantined",
+            db, "DEVICE_AUTH", "HIGH", f"{device_label(device)} quarantined",
             detail=f"{device.device_type} quarantined: {reason}. Its credential has been revoked.",
             org_id=device.org_id, entity_type="Device", entity_id=device.id, kind="quarantined")
         incident = db.get(Incident, alert.incident_id) if alert.incident_id else None
@@ -101,7 +113,7 @@ def transition(db: Session, device: Device, new_status: str, actor_id: str, acto
             db.flush()
             notifications.add_incident_event(
                 db, incident.id, "CONTAINED",
-                f"Device {device.id[:8]} quarantined and its credential revoked: {reason}",
+                f"{device_label(device)} quarantined and its credential revoked: {reason}",
                 actor_id)
             notifications.sync_alerts_from_incident(db, incident, actor_id)
     return device
@@ -177,7 +189,7 @@ def record_auth_failure(db: Session, device: Device) -> None:
     if device.auth_failures in (5, 20):
         notifications.raise_alert(
             db, "DEVICE_AUTH", "HIGH" if device.auth_failures >= 20 else "WARNING",
-            f"Repeated authentication failures from device {device.id[:8]}",
+            f"Repeated authentication failures from {device_label(device)}",
             detail=f"{device.auth_failures} consecutive failures. Possible spoofing attempt or "
                    f"a device holding a stale credential.",
             org_id=device.org_id, entity_type="Device", entity_id=device.id,
@@ -205,7 +217,7 @@ def update_health(db: Session, device: Device, readings: dict[str, Any]) -> None
             # One alert per low-battery episode: every later low reading is folded into it
             # (occurrences/last_seen_at) instead of raising and notifying again.
             notifications.raise_alert(
-                db, "DEVICE_HEALTH", "WARNING", f"Low battery on device {device.id[:8]}",
+                db, "DEVICE_HEALTH", "WARNING", f"Low battery on {device_label(device)}",
                 detail=f"Battery at {device.battery_pct:.0f}%.", org_id=device.org_id,
                 entity_type="Device", entity_id=device.id, open_incident=False,
                 kind="low_battery")
@@ -244,7 +256,7 @@ def sweep_silent_devices(db: Session, missed_intervals: int = 3,
             # unresolved (even acknowledged) "stopped reporting" alert absorbs the repeat —
             # its detail is refreshed with the current silence — instead of a new alert.
             notifications.raise_alert(
-                db, "DEVICE_HEALTH", "WARNING", f"Device {device.id[:8]} has stopped reporting",
+                db, "DEVICE_HEALTH", "WARNING", f"{device_label(device)} has stopped reporting",
                 detail=f"No telemetry for {int((now - last_seen).total_seconds() // 60)} minutes "
                        f"(expected every {device.interval_seconds}s).",
                 org_id=device.org_id, entity_type="Device", entity_id=device.id,
@@ -278,7 +290,7 @@ def add_vulnerability(db: Session, device: Device, actor_id: str, actor_role: st
             db, "DEVICE_HEALTH", severity,
             # Filed under DEVICE_HEALTH; the title says what it is, so it does not read as a
             # battery or connectivity problem.
-            f"Vulnerability {cve_id} ({severity.lower()} severity) on device {device.id[:8]}",
+            f"Vulnerability {cve_id} ({severity.lower()} severity) on {device_label(device)}",
             detail=title, org_id=device.org_id, entity_type="Device", entity_id=device.id,
             kind=f"vulnerability:{cve_id}"[:80])
     return vulnerability

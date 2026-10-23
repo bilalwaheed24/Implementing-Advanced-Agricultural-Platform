@@ -29,15 +29,18 @@ function actionButtons(row, reload) {
   return el('div', { class: 'row' }, buttons);
 }
 
-/* The reasons worth a column of their own: those the detail line does not already say.
- * A biosecurity or DURC alert's detail is its first reasons joined, so repeating them under
- * Reasons only doubled the text. */
+/* The reasons worth showing besides the detail line: those it does not already say. Most
+ * alerts' detail is their first reasons joined, so a Reasons column of its own was "—" on
+ * most rows; what is left is shown as one short line under the detail instead. */
 function extraReasons(row) {
   const detail = String(row.detail || '').toLowerCase();
   const reasons = (row.reasons || [])
     .map((r) => (typeof r === 'string' ? r : r.rule || r.detail || ''))
     .filter((r) => r && !detail.includes(String(r).toLowerCase()));
-  return humanizeText(reasons.slice(0, 2).join('; '));
+  if (!reasons.length) return '';
+  const first = humanizeText(String(reasons[0]));
+  const short = first.length > 120 ? `${first.slice(0, 117)}…` : first;
+  return reasons.length > 1 ? `${short} (+${reasons.length - 1} more)` : short;
 }
 
 function occurrenceHint(row) {
@@ -64,16 +67,19 @@ export const render = listView({
       occurrenceHint(row)]) },
     { label: 'Severity', render: (row) => badge(row.severity) },
     { label: 'Category', render: (row) => titleCase(row.category) },
-    { label: 'Title', render: (row) => el('div', {}, [
-        el('strong', { text: row.title }),
-        row.detail ? el('div', { class: 'hint', text: humanizeText(row.detail) }) : null,
-      ]) },
-    { label: 'Reasons', render: (row) => el('span', { class: 'hint',
-        text: extraReasons(row) || '—' }) },
+    { label: 'Title', render: (row) => {
+        const more = extraReasons(row);
+        return el('div', {}, [
+          el('strong', { text: row.title }),
+          row.detail ? el('div', { class: 'hint', text: humanizeText(row.detail) }) : null,
+          more ? el('div', { class: 'hint', text: `Also: ${more}` }) : null,
+        ]);
+      } },
     { label: 'Source', render: (row) => el('div', {}, [
         entityLink(row.entity_type, row.entity_id, row.source_label)
           || el('span', { class: 'hint', text: '—' }),
-        row.incident_id ? el('div', {}, [incidentLink(row.incident_id)]) : null,
+        row.incident_id ? el('div', {}, [incidentLink(row.incident_id,
+          row.incident_label ? `Incident: ${row.incident_label}` : null)]) : null,
       ]) },
     { label: 'Status', render: (row) => badge(row.status) },
     { label: 'Actions', render: (row, ctx) => actionButtons(row, ctx.reload) },

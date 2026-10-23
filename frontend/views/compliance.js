@@ -126,8 +126,12 @@ export function render(context) {
       + 'requirements — an engineering control, not legal advice.',
     endpoint: '/compliance/reports',
     // Client-side: the report list endpoint has no text search parameter.
-    search: { placeholder: 'Batch code or GMO event code',
-      fields: (row) => `${row.summary?.batch_code || ''} ${row.summary?.event_code || ''}` },
+    // The jurisdiction (code and label) and status are searched too, so "EU" or "compliant"
+    // finds the reports the table shows under those words.
+    search: { placeholder: 'Batch, GMO event, jurisdiction or status',
+      fields: (row) => [row.summary?.batch_code, row.summary?.event_code, row.jurisdiction,
+        row.jurisdiction ? jurisdictionLabel(row.jurisdiction) : '', row.status,
+        row.status ? humanize(row.status) : ''].filter(Boolean).join(' ') },
     filters: [
       { key: 'jurisdiction', label: 'Jurisdiction', optionLabel: jurisdictionLabel,
         options: ['US-USDA', 'US-FDA', 'EU', 'CODEX', 'GS1'] },

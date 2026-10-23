@@ -360,10 +360,12 @@ def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now,
                       storage_temp_min_c=0.0, storage_temp_max_c=4.0)
     db.add(product)
     db.flush()
+    # Harvested on the day its harvesting event records (the two disagreed by a day).
+    harvest_days_ago = 8
     batch = supplychain.create_batch(
         db, farm_org.id, farmer.id, farmer.role, "B-2026-0114", product.id,
         1800.0, "kg", None, None, crop.id, None, None, "Iowa", "US",
-        now - timedelta(days=9))
+        now - timedelta(days=harvest_days_ago))
     db.flush()
 
     # Each leg that moves the batch is a shipment: creating it records the shipping event
@@ -409,7 +411,7 @@ def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now,
         except Exception as error:                                  # noqa: BLE001
             print(f"  supply-chain event seed skipped for {biz_step}: {error}")
 
-    step(farm_org, farmer, "harvesting", "in_progress", farm_gate, 8, 1800.0)
+    step(farm_org, farmer, "harvesting", "in_progress", farm_gate, harvest_days_ago, 1800.0)
     ship(farm_org, farmer, supply_org, supply_user, "003123450000001131",
          "Green Valley Haulage", farm_gate, plant, 7.5, 7.2, cold_sensor)
     step(supply_org, supply_user, "transforming", "in_progress", plant, 6, 1750.0)
@@ -465,12 +467,12 @@ def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now,
         db.flush()
         extra = supplychain.create_batch(
             db, farm_org.id, farmer.id, farmer.role, "B-2026-0211", product.id, 2400.0, "kg",
-            None, None, south_crop.id, None, None, "Iowa", "US", now - timedelta(days=5))
+            None, None, south_crop.id, None, None, "Iowa", "US", now - timedelta(days=4))
         db.flush()
         supplychain.record_event(
             db, farm_org.id, farmer.id, farmer.role, extra, "harvesting", "in_progress",
             "OBJECT", None, "Green Valley South", 41.88, -93.41, extra.quantity, "kg", None,
-            now - timedelta(days=4), {"seeded": True})
+            now - timedelta(days=4), {"seeded": True})     # the day harvested_at says
         db.flush()
         supplychain.create_shipment(
             db, farm_org.id, farmer.id, farmer.role, to_org_id=supply_org.id,

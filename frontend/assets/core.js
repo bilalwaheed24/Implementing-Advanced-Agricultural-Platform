@@ -47,19 +47,31 @@ export function field(labelText, control, extras = []) {
 }
 
 /* ---------------- formatting ---------------- */
+/* Dates read "23 Sep 2026" (and "23 Sep 2026, 14:05"), the form the server writes into
+ * alert and notification text. Month names are spelled out here rather than taken from the
+ * locale, which gives "Sept" in some browsers and so mixed two styles on one screen. */
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov',
+  'Dec'];
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+const pad2 = (n) => String(n).padStart(2, '0');
+function dayText(date) {
+  return `${date.getDate()} ${MONTHS[date.getMonth()]} ${date.getFullYear()}`;
+}
 export function fmtDate(value) {
   if (!value) return '—';
+  // A bare date has no time of day to show (and parsing it as UTC midnight would show the
+  // previous day west of Greenwich).
+  if (DATE_ONLY.test(String(value))) return fmtDay(value);
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString(undefined, {
-    year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit',
-  });
+  return `${dayText(date)}, ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
 }
 export function fmtDay(value) {
   if (!value) return '—';
+  const bare = DATE_ONLY.exec(String(value));
+  if (bare) return `${Number(bare[3])} ${MONTHS[Number(bare[2]) - 1]} ${bare[1]}`;
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value)
-    : date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' });
+  return Number.isNaN(date.getTime()) ? String(value) : dayText(date);
 }
 export function fmtNum(value, digits = 2) {
   if (value === null || value === undefined || value === '') return '—';

@@ -24,10 +24,13 @@ const ENTITY_ROUTES = {
   Certification: { permission: 'cert:read', href: () => '#/certifications',
     text: 'Certification' },
   User: { permission: 'user:read', href: () => '#/users', text: 'User' },
+  Incident: { permission: 'incident:read', href: (id) => `#/incident/${id}`,
+    text: 'Incident' },
 };
 
 /* "Device 1a2b3c4d" — or "Field North 40" when the API supplied the record's name — as a
- * link when the role can open it, otherwise as text. */
+ * link when the role can open it, otherwise as text. The list and detail APIs supply the
+ * name as source_label (alerts) or entity_label (incidents); pass it as `name`. */
 export function entityLink(entityType, entityId, name = null) {
   if (!entityType) return null;
   const route = ENTITY_ROUTES[entityType];
