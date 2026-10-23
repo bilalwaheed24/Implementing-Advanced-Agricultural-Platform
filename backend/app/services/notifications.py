@@ -97,9 +97,17 @@ def has_open_alert(db: Session, category: str, entity_id: str,
     return find_open_alert(db, category, entity_id, kind) is not None
 
 
+_UNSET: Any = object()
+
+
 def find_active_incident(db: Session, entity_type: str | None, entity_id: str | None,
-                         org_id: str | None) -> Incident | None:
-    """The incident still being worked for this entity, if there is one."""
+                         org_id: str | None,
+                         custodian_org_id: str | None = _UNSET) -> Incident | None:
+    """The incident still being worked for this entity, if there is one.
+
+    With `custodian_org_id` (None included: the owner holds it), only an incident followed by
+    that same custodian matches, so an alert raised while one organisation holds a batch never
+    joins an incident another holder can see (round 4)."""
     if not entity_id:
         return None
     query = select(Incident).where(Incident.entity_id == entity_id,
@@ -108,7 +116,40 @@ def find_active_incident(db: Session, entity_type: str | None, entity_id: str | 
         query = query.where(Incident.entity_type == entity_type)
     if org_id:
         query = query.where(Incident.org_id == org_id)
+    if custodian_org_id is not _UNSET:
+        query = query.where(Incident.custodian_org_id.is_(None) if custodian_org_id is None
+                            else Incident.custodian_org_id == custodian_org_id)
     return db.execute(query.order_by(Incident.created_at.desc()).limit(1)).scalars().first()
+
+
+def sync_custodian(db: Session, entity_type: str, entity_id: str, owner_org_id: str | None,
+                   custodian_org_id: str | None) -> tuple[int, int]:
+    """Point the unresolved alerts and active incidents about one record at its current
+    custodian, after a hand-over. alerts.custodian_org_id was set when an alert was raised and
+    never again, so the previous holder kept seeing and acknowledging alerts on a batch it can
+    no longer open, and the new holder saw none (round 4). NULL when custody is back with the
+    owner. Returns (alerts, incidents) changed."""
+    party = custodian_org_id if custodian_org_id and custodian_org_id != owner_org_id else None
+    alerts = list(db.execute(select(Alert).where(
+        Alert.entity_type == entity_type, Alert.entity_id == entity_id,
+        Alert.status.in_(UNRESOLVED_ALERT_STATES))).scalars())
+    incident_ids = {a.incident_id for a in alerts if a.incident_id}
+    incidents = list(db.execute(select(Incident).where(
+        Incident.status.in_(ACTIVE_INCIDENT_STATES),
+        (Incident.entity_id == entity_id) | Incident.id.in_(incident_ids or {""}))).scalars())
+    changed_alerts = changed_incidents = 0
+    for alert in alerts:
+        if alert.custodian_org_id != party:
+            alert.custodian_org_id = party
+            changed_alerts += 1
+    for incident in incidents:
+        if incident.entity_type not in (None, entity_type) and incident.id not in incident_ids:
+            continue
+        if incident.custodian_org_id != party:
+            incident.custodian_org_id = party
+            changed_incidents += 1
+    db.flush()
+    return changed_alerts, changed_incidents
 
 
 def raise_alert(db: Session, category: str, severity: str, title: str, *,
@@ -134,8 +175,9 @@ def raise_alert(db: Session, category: str, severity: str, title: str, *,
     if kind is not None and entity_id:
         existing = find_open_alert(db, category, entity_id, kind)
         if existing is not None:
-            if party_org_id and party_org_id != existing.org_id:
-                existing.custodian_org_id = party_org_id     # custody may have moved on
+            if party_org_id:                                 # custody may have moved on,
+                existing.custodian_org_id = (                # or back to the owner
+                    party_org_id if party_org_id != existing.org_id else None)
             return _record_recurrence(db, existing, severity, detail, reasons, notify,
                                       open_incident)
 
@@ -201,7 +243,8 @@ def _record_recurrence(db: Session, alert: Alert, severity: str, detail: str,
 
 
 def _attach_to_incident(db: Session, alert: Alert) -> Incident:
-    incident = find_active_incident(db, alert.entity_type, alert.entity_id, alert.org_id)
+    incident = find_active_incident(db, alert.entity_type, alert.entity_id, alert.org_id,
+                                    alert.custodian_org_id)
     if incident is None:
         incident = open_incident_for(db, alert)
     else:
@@ -303,12 +346,16 @@ def acknowledge(db: Session, alert: Alert, actor_id: str) -> Alert:
 
 
 def resolve(db: Session, alert: Alert, actor_id: str | None = None,
-            note: str | None = None) -> Alert:
+            note: str | None = None, *, close_incident: bool = True) -> Alert:
     """Resolve an alert. When it was the last unresolved alert on an active incident, the
     incident is resolved with it: nothing is left on it to respond to.
 
     `note` says why (a review decision, a passing re-check). It is written once, on the
-    ALERT_RESOLVED entry and as the reason on the incident's RESOLVED entry."""
+    ALERT_RESOLVED entry and as the reason on the incident's RESOLVED entry.
+
+    `close_incident=False` leaves the incident as it is: the router passes it when the user
+    resolving the alert could not update the incident directly (no incident:write), so
+    resolving an alert is never a back door to closing an incident (round 4)."""
     _require_alert_transition(alert, "RESOLVED")
     alert.status = "RESOLVED"
     alert.resolved_at = utcnow()
@@ -322,7 +369,11 @@ def resolve(db: Session, alert: Alert, actor_id: str | None = None,
             remaining = db.execute(select(Alert.id).where(
                 Alert.incident_id == incident.id,
                 Alert.status.in_(UNRESOLVED_ALERT_STATES)).limit(1)).first()
-            if remaining is None:
+            if remaining is None and not close_incident:
+                add_incident_event(db, incident.id, "NOTE",
+                                   "Every linked alert is resolved. The incident stays open "
+                                   "until someone who works incidents closes it.", None)
+            elif remaining is None:
                 incident.status = "RESOLVED"
                 incident.closed_at = utcnow()
                 db.flush()
@@ -411,14 +462,16 @@ def notify_roles(db: Session, roles: Iterable[Role | str], category: str, title:
 
 def notify_parties(db: Session, org_ids: Iterable[str | None], category: str, title: str,
                    body: str, entity_type: str | None, entity_id: str | None,
-                   severity: str = "INFO", *, include_oversight: bool = False) -> int:
+                   severity: str = "INFO", *, include_oversight: bool = False,
+                   exclude_org_ids: Iterable[str] = ()) -> int:
     """Notify every active user of each party organisation, once per user.
 
     `fan_out` reaches only the roles that own an alert category, inside the alert's single
     organisation. A record about a batch concerns its owner and its current custodian — a farm
     and a processor whose users often hold none of those roles — so the category route alone
     left the people who must act uninformed. `include_oversight` also notifies the
-    platform-wide roles that own the category, as `fan_out` would.
+    platform-wide roles that own the category, as `fan_out` would. Users of
+    `exclude_org_ids` are skipped (already told the same thing another way).
     """
     parties = {org_id for org_id in org_ids if org_id}
     recipients: list[User] = []
@@ -432,6 +485,9 @@ def notify_parties(db: Session, org_ids: Iterable[str | None], category: str, ti
         if roles:
             recipients += list(db.execute(
                 _active_users().where(User.role.in_(roles))).scalars())
+    excluded = set(exclude_org_ids)
+    if excluded:
+        recipients = [user for user in recipients if user.org_id not in excluded]
     return _send(db, recipients, category, title, body, entity_type, entity_id, severity)
 
 

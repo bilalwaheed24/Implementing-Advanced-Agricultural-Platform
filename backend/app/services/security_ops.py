@@ -68,10 +68,17 @@ def record_access(db: Session, principal_id: str, org_id: str | None, route: str
         db.rollback()
 
 
-def evaluate_principal(db: Session, principal_id: str, org_id: str | None) -> dict[str, Any]:
-    """Score one principal's recent access pattern for data-exfiltration indicators."""
+def evaluate_principal(db: Session, principal_id: str, org_id: str | None,
+                       not_before: Any = None) -> dict[str, Any]:
+    """Score one principal's recent access pattern for data-exfiltration indicators.
+
+    `not_before` narrows the window further: records older than it are left out (the sweep
+    passes the time an earlier finding was resolved, so it is not raised again from the
+    same records)."""
     now = utcnow()
     since = now - timedelta(hours=BASELINE_WINDOW_HOURS)
+    if not_before is not None and _aware(not_before) > since:
+        since = _aware(not_before)
     records = list(db.execute(
         select(AccessRecord).where(AccessRecord.principal_id == principal_id,
                                    AccessRecord.created_at >= since)
@@ -168,7 +175,8 @@ def sweep_data_theft(db: Session, hours: int = 24,
     `org_id` restricts the sweep to one organisation. A tenant-triggered sweep must pass it:
     the results carry principal ids, scores and signal detail, and without scoping a farm
     operator received that for users of other tenants (audit P1). The scheduled platform-wide
-    task calls this with org_id=None deliberately.
+    task calls this with org_id=None deliberately. Since round 4 only security operations may
+    trigger it over HTTP (routers/security_ops.sweep), and they sweep the whole platform.
     """
     since = utcnow() - timedelta(hours=hours)
     query = (select(AccessRecord.principal_id, AccessRecord.org_id)
@@ -186,19 +194,37 @@ def sweep_data_theft(db: Session, hours: int = 24,
             # Any unresolved alert of this kind counts: an acknowledged one is being looked at
             # already. Matched on kind, so an open account-lockout alert (also DATA_THEFT on
             # the same user) no longer hides an exfiltration finding.
-            if not notifications.has_open_alert(db, "DATA_THEFT", principal_id,
-                                                kind=EXFILTRATION_KIND):
-                notifications.raise_alert(
-                    db, "DATA_THEFT", verdict["level"],
-                    f"Possible data exfiltration by {_principal_label(db, principal_id)}",
-                    detail="; ".join(s["detail"] for s in verdict["signals"][:3]),
-                    org_id=org_id, entity_type="User", entity_id=principal_id,
-                    reasons=[s["label"] for s in verdict["signals"]],
-                    kind=EXFILTRATION_KIND)
+            if notifications.has_open_alert(db, "DATA_THEFT", principal_id,
+                                            kind=EXFILTRATION_KIND):
+                continue
+            # An analyst resolved a finding inside the scoring window: the same records would
+            # raise it again on every sweep (round 4). Only activity since that resolution
+            # counts towards a new alert.
+            resolved_at = _last_resolved(db, principal_id, EXFILTRATION_KIND)
+            if resolved_at is not None and _aware(resolved_at) >= \
+                    utcnow() - timedelta(hours=BASELINE_WINDOW_HOURS):
+                fresh = evaluate_principal(db, principal_id, org_id, not_before=resolved_at)
+                if not fresh["flagged"]:
+                    continue
+                verdict = fresh
+            notifications.raise_alert(
+                db, "DATA_THEFT", verdict["level"],
+                f"Possible data exfiltration by {_principal_label(db, principal_id)}",
+                detail="; ".join(s["detail"] for s in verdict["signals"][:3]),
+                org_id=org_id, entity_type="User", entity_id=principal_id,
+                reasons=[s["label"] for s in verdict["signals"]],
+                kind=EXFILTRATION_KIND)
     return findings
 
 
 EXFILTRATION_KIND = "exfiltration"
+
+
+def _last_resolved(db: Session, principal_id: str, kind: str):
+    """When the latest resolved DATA_THEFT alert of this kind on this principal was resolved."""
+    return db.execute(select(func.max(Alert.resolved_at)).where(
+        Alert.category == "DATA_THEFT", Alert.entity_id == principal_id, Alert.kind == kind,
+        Alert.status == "RESOLVED")).scalar_one_or_none()
 
 
 def _principal_label(db: Session, principal_id: str) -> str:
@@ -302,6 +328,12 @@ def security_dashboard(db: Session, org_id: str | None) -> dict[str, Any]:
                                                   Incident.custodian_org_id == org_id))
         device_query = device_query.where(Device.org_id == org_id)
 
+    # A tenant sees its own organisation's request volume, not the platform's (round 4).
+    access_query = (select(func.count()).select_from(AccessRecord)
+                    .where(AccessRecord.created_at >= utcnow() - timedelta(hours=24)))
+    if org_id:
+        access_query = access_query.where(AccessRecord.org_id == org_id)
+
     alerts = list(db.execute(alert_query).scalars())
     incidents = list(db.execute(incident_query).scalars())
     devices = list(db.execute(device_query).scalars())
@@ -325,7 +357,5 @@ def security_dashboard(db: Session, org_id: str | None) -> dict[str, Any]:
         "incidents_total": len(incidents),
         "devices_quarantined": sum(1 for d in devices if d.status == "QUARANTINED"),
         "devices_total": len(devices),
-        "access_records_24h": int(db.execute(
-            select(func.count()).select_from(AccessRecord)
-            .where(AccessRecord.created_at >= utcnow() - timedelta(hours=24))).scalar_one()),
+        "access_records_24h": int(db.execute(access_query).scalar_one()),
     }

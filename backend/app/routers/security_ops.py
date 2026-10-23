@@ -9,7 +9,8 @@ from sqlalchemy import select
 from ..core.deps import DbSession, PagingDep, rate_limit, require_permission
 from ..core.errors import PermissionDenied
 from ..core.logging_conf import security_event
-from ..core.permissions import P, has_permission
+from ..core.permissions import (OVERSIGHT_ALERT_CATEGORIES, P, has_permission,
+                                is_security_oversight)
 from ..models import Alert, Incident, User
 from ..repositories import get_or_404, paginate, visible
 from ..schemas import AlertOut, IncidentOut, IncidentUpdate, Page
@@ -102,11 +103,34 @@ def _audit_alert(db, principal, alert: Alert, action: str, previous: str) -> Non
                          "incident_id": alert.incident_id})
 
 
+def _require_alert_authority(principal, alert: Alert) -> None:
+    """DATA_THEFT and LEDGER alerts are worked by security operations only (round 4).
+
+    A DATA_THEFT alert is filed under the suspect's own organisation, so alert:write in that
+    tenant let a colleague, or the suspect, clear "Possible data exfiltration by ..." and close
+    the incident with it. The tenant can still read the alert; it cannot dismiss it."""
+    if alert.category in OVERSIGHT_ALERT_CATEGORIES and not is_security_oversight(principal.role):
+        security_event("authorisation denied", actor_id=principal.id, role=principal.role,
+                       required="security oversight", alert_id=alert.id,
+                       category=alert.category)
+        raise PermissionDenied(
+            f"{alert.category.replace('_', ' ').title()} alerts are acknowledged and resolved "
+            f"by security operations (a security analyst or an administrator)")
+
+
+def _require_security_oversight(principal, action: str) -> None:
+    if not is_security_oversight(principal.role):
+        security_event("authorisation denied", actor_id=principal.id, role=principal.role,
+                       required="security oversight", action=action)
+        raise PermissionDenied(f"{action} is restricted to security analysts and administrators")
+
+
 @router.post("/alerts/{alert_id}/acknowledge", response_model=AlertOut,
              summary="Acknowledge an alert")
 def acknowledge(alert_id: str, db: DbSession,
                 principal: Annotated[object, Depends(require_permission(P.ALERT_WRITE))]) -> AlertOut:
     alert = get_or_404(db, Alert, alert_id, principal.role, principal.org_id, name="Alert")
+    _require_alert_authority(principal, alert)
     previous = alert.status
     notifications.acknowledge(db, alert, principal.id)
     _audit_alert(db, principal, alert, "acknowledge", previous)
@@ -118,8 +142,13 @@ def acknowledge(alert_id: str, db: DbSession,
 def resolve(alert_id: str, db: DbSession,
             principal: Annotated[object, Depends(require_permission(P.ALERT_WRITE))]) -> AlertOut:
     alert = get_or_404(db, Alert, alert_id, principal.role, principal.org_id, name="Alert")
+    _require_alert_authority(principal, alert)
     previous = alert.status
-    notifications.resolve(db, alert, principal.id)
+    # Resolving the last alert closes its incident only for someone who may update that
+    # incident; otherwise the incident stays open for the people who work incidents (round 4).
+    incident = db.get(Incident, alert.incident_id) if alert.incident_id else None
+    close_incident = incident is None or _may_update_incident(principal, incident)
+    notifications.resolve(db, alert, principal.id, close_incident=close_incident)
     _audit_alert(db, principal, alert, "resolve", previous)
     db.commit()
     return _alert_out(alert, _source_labels(db, [alert]))
@@ -212,12 +241,11 @@ def update_incident(incident_id: str, payload: IncidentUpdate, db: DbSession,
 def evaluate_principal(db: DbSession,
                        principal: Annotated[object, Depends(require_permission(P.ALERT_READ))],
                        principal_id: str | None = Query(default=None)) -> dict:
+    # Per-user exfiltration scores are an investigation tool. A tenant role, or a regulator or
+    # biosafety officer reading across tenants, has no business scoring colleagues, and a
+    # self-score tells an insider how close to the threshold it is running (round 4).
+    _require_security_oversight(principal, "Data-theft scoring")
     target = principal_id or principal.id
-    if target != principal.id and not principal.is_cross_tenant \
-            and principal.role != "SECURITY_ANALYST":
-        from ..core.errors import PermissionDenied
-
-        raise PermissionDenied("Evaluating another principal requires an analyst role")
     return {"principal_id": target,
             **service.evaluate_principal(db, target, principal.org_id)}
 
@@ -226,9 +254,10 @@ def evaluate_principal(db: DbSession,
 def sweep(db: DbSession,
           principal: Annotated[object, Depends(require_permission(P.ALERT_WRITE))],
           hours: int = Query(default=24, ge=1, le=168)) -> dict:
-    # Oversight roles sweep the platform; a tenant role sweeps only its own organisation.
-    scope = None if principal.is_cross_tenant else principal.org_id
-    findings = service.sweep_data_theft(db, hours, org_id=scope)
+    # Security operations only: the findings name users and their scores, and the alerts it
+    # raises are ones a tenant may not resolve. Both security roles are platform-wide.
+    _require_security_oversight(principal, "The data-theft sweep")
+    findings = service.sweep_data_theft(db, hours, org_id=None)
     db.commit()
     return {"findings": findings, "count": len(findings), "window_hours": hours}
 

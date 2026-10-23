@@ -146,7 +146,9 @@ ROLE_PERMISSIONS: dict[Role, frozenset[P]] = {
     # ALERT_WRITE and INCIDENT_READ: COMPLIANCE and FRAUD alerts are routed to this role and
     # filed against batches it holds as custodian (alerts.custodian_org_id), so it must be able
     # to acknowledge and resolve them and follow the incident a HIGH one opens. Both stay
-    # tenant-scoped through repositories.visible().
+    # tenant-scoped through repositories.visible(). ALERT_WRITE does not reach the alerts in
+    # OVERSIGHT_ALERT_CATEGORIES (a DATA_THEFT alert about the user's own account, say), and
+    # resolving an alert closes its incident only for a holder of INCIDENT_WRITE (round 4).
     Role.SUPPLY_CHAIN_OPERATOR: frozenset({
         P.SUPPLY_READ, P.SUPPLY_WRITE, P.SUPPLY_VERIFY, P.CERT_READ, P.GMO_READ, P.TELEMETRY_READ,
         P.COMPLIANCE_READ, P.COMPLIANCE_RUN, P.BLOCKCHAIN_READ, P.ALERT_READ, P.ALERT_WRITE,
@@ -176,6 +178,23 @@ CROSS_TENANT_ROLES = frozenset({
     Role.SECURITY_ANALYST,    # security operations across all tenants (PRD.md §11)
     Role.BIOSAFETY_OFFICER,   # biosafety oversight across all tenants (PRD.md §11)
 })
+
+# Security operations: the roles that work insider and platform-integrity alerts and run the
+# data-theft detector. Narrower than CROSS_TENANT_ROLES (a regulator or biosafety officer reads
+# across tenants but does not investigate users' access patterns).
+SECURITY_OVERSIGHT_ROLES = frozenset({Role.ADMIN, Role.SECURITY_ANALYST})
+
+# Alert categories only SECURITY_OVERSIGHT_ROLES may acknowledge or resolve, whatever
+# alert:write a tenant role holds. A DATA_THEFT alert is filed under the suspect user's own
+# organisation, so a colleague, or the suspect, could otherwise see it and clear it (round 4:
+# a supply-chain operator resolved "Possible data exfiltration by ..." and the incident closed
+# with it). LEDGER alerts are platform integrity, likewise not a tenant's to dismiss.
+OVERSIGHT_ALERT_CATEGORIES = frozenset({"DATA_THEFT", "LEDGER"})
+
+
+def is_security_oversight(role: str) -> bool:
+    return role in {r.value for r in SECURITY_OVERSIGHT_ROLES}
+
 
 # Roles that must be approved by an administrator before their first login.
 APPROVAL_REQUIRED_ROLES = frozenset({
