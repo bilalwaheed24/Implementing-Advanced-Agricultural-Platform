@@ -221,9 +221,14 @@ and record and batch verification return a second verdict read from Fabric. See
 
 ### Scheduled security sweeps
 
-`scripts/scheduled_tasks.py` (silent devices, data-theft scoring, certification expiry) runs
-every 15 minutes as the Kubernetes CronJob `security-sweeps`, or in Docker with
-`docker compose --profile scheduler up -d`. Repeated runs do not duplicate open alerts.
+`scripts/scheduled_tasks.py` (ledger anchor retry and Fabric re-mirror, silent devices,
+data-theft scoring, certification expiry) runs every 15 minutes as the Kubernetes CronJob
+`security-sweeps`, and every 5 minutes in the compose `scheduler` service, which starts with
+the stack. Repeated runs do not duplicate open alerts. Every ledger write is journalled in
+`ledger_writes` (migration 0004); one left PENDING/FAILED by a ledger outage is replayed in
+order (a batch before its events and custody transfers), and writes that arrive behind it
+are queued rather than rejected. An administrator or security analyst can run the same
+sweep with `POST /api/v1/blockchain/anchors/retry`.
 
 ## 13. Running the full demonstration
 

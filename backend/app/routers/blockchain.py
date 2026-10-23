@@ -11,7 +11,8 @@ from ..core.permissions import P, has_permission
 from ..core.security import content_hash
 from ..models import Batch, Certification, ComplianceReport, GMOEvent, Product, SupplyChainEvent
 from ..schemas import VerifyRecordRequest
-from ..services import fabric_bridge, gmo as gmo_service, ledger_client, supplychain as supply_service
+from ..services import (anchoring, audit, fabric_bridge, gmo as gmo_service, ledger_client,
+                        supplychain as supply_service)
 
 router = APIRouter(prefix="/blockchain", tags=["Blockchain"], dependencies=[Depends(rate_limit)])
 
@@ -157,9 +158,39 @@ def verify_record(payload: VerifyRecordRequest, db: DbSession,
 
 
 @router.get("/fabric", summary="Hyperledger Fabric mirror: connection and recent anchors")
-def fabric_status(principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_READ))]
+def fabric_status(db: DbSession,
+                  principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_READ))]
                   ) -> dict:
-    return fabric_bridge.status()
+    """Counts come from the ledger_writes journal, so they survive a restart; `recent` is
+    this API process's own feed."""
+    body = fabric_bridge.status()
+    if body.get("enabled"):
+        body.update(anchoring.mirror_counts(db))
+    return body
+
+
+@router.get("/anchors", summary="Anchoring journal: writes by anchor status")
+def anchor_status(db: DbSession,
+                  principal: Annotated[object, Depends(require_permission(P.BLOCKCHAIN_EXPLORE))]
+                  ) -> dict:
+    return {"anchors": anchoring.anchor_counts(db), "fabric": anchoring.mirror_counts(db)}
+
+
+@router.post("/anchors/retry", summary="Replay unanchored ledger writes and re-mirror to Fabric")
+def retry_anchors(db: DbSession,
+                  principal: Annotated[object, Depends(require_permission(P.AUDIT_ANCHOR))]
+                  ) -> dict:
+    """The same sweep scripts/scheduled_tasks.py runs: replays PENDING/FAILED writes in
+    order, then mirrors anchored writes whose Fabric copy failed or never happened. Submits
+    ledger transactions, hence AUDIT_ANCHOR (ADMIN, SECURITY_ANALYST)."""
+    retried = anchoring.retry_pending(db)
+    db.commit()
+    mirrored = anchoring.remirror(db)
+    audit.record(db, "blockchain.anchor_retry", actor_id=principal.id, actor_role=principal.role,
+                 org_id=principal.org_id, entity_type="LedgerWrite", entity_id=None,
+                 detail={"retry": retried, "fabric": mirrored})
+    db.commit()
+    return {"retry": retried, "fabric": mirrored, "anchors": anchoring.anchor_counts(db)}
 
 
 @router.get("/fabric/history", summary="Every Fabric version of one anchored key")

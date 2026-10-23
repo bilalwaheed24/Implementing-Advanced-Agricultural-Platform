@@ -258,7 +258,7 @@ def ingest_scene(db: Session, org_id: str, actor_id: str, actor_role: str, scene
             "imagery", "AnchorScene",
             {"scene_id": scene_id, "field": field.name, "source": source,
              "index_name": index_name, "file_sha256": file_sha256, "content_hash": checksum},
-            organization.msp_id if organization else "FarmMSP")
+            organization.msp_id if organization else "FarmMSP", db=db, entity=scene)
         if receipt.get("ok"):
             scene.anchor_tx_id = receipt.get("tx_id")
         else:

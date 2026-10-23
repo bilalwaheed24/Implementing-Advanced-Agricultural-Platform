@@ -276,7 +276,7 @@ def evaluate_batch(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
         "compliance_anchor", "AnchorReport",
         {"report_id": report.id, "subject": batch.batch_code, "jurisdiction": jurisdiction,
          "status": status, "content_hash": digest},
-        _reporting_msp(db, org_id))
+        _reporting_msp(db, org_id), db=db, entity=report)
     gmo_service._apply_receipt(db, report, receipt, "ComplianceReport")
 
     audit.record(db, "compliance.evaluate", actor_id=actor_id, actor_role=actor_role,
@@ -388,7 +388,8 @@ def environmental_impact(db: Session, event: GMOEvent, actor_id: str, actor_role
     receipt = ledger_client.submit(
         "compliance_anchor", "AnchorReport",
         {"report_id": report.id, "subject": event.event_code, "jurisdiction": "US-USDA",
-         "status": status, "content_hash": digest}, _reporting_msp(db, org_id))
+         "status": status, "content_hash": digest}, _reporting_msp(db, org_id),
+        db=db, entity=report)
     gmo_service._apply_receipt(db, report, receipt, "ComplianceReport")
 
     audit.record(db, "compliance.eia", actor_id=actor_id, actor_role=actor_role, org_id=org_id,

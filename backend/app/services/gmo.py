@@ -121,7 +121,7 @@ def register_event(db: Session, org_id: str, actor_id: str, actor_role: str, eve
         {"event_code": event_code, "crop_type": crop_type, "trait": trait,
          "donor_organism": donor_organism, "developer": developer,
          "screening_hash": screening.sequence_hash, "content_hash": digest},
-        _msp_for(db, org_id))
+        _msp_for(db, org_id), db=db, entity=event)
     _apply_receipt(db, event, receipt, "GMOEvent")
 
     audit.record(db, "gmo.register_event", actor_id=actor_id, actor_role=actor_role,
@@ -191,7 +191,7 @@ def record_approval(db: Session, event: GMOEvent, actor_id: str, actor_role: str
     receipt = ledger_client.submit(
         "gmo_registry", "RecordApproval",
         {"event_code": event.event_code, "jurisdiction": jurisdiction, "status": status,
-         "reference": reference or ""}, _msp_for(db, submitter_org_id))
+         "reference": reference or ""}, _msp_for(db, submitter_org_id), db=db, entity=approval)
     if receipt.get("ok"):
         approval.tx_id = receipt["tx_id"]
     elif receipt.get("status") == "REJECTED":
@@ -228,7 +228,8 @@ def create_seed_lot(db: Session, org_id: str, actor_id: str, actor_role: str, lo
     receipt = ledger_client.submit(
         "gmo_registry", "RegisterSeedLot",
         {"lot_code": lot_code, "event_code": event.event_code if event else None,
-         "quantity_kg": quantity_kg, "content_hash": digest}, _msp_for(db, org_id))
+         "quantity_kg": quantity_kg, "content_hash": digest}, _msp_for(db, org_id),
+        db=db, entity=lot)
     _apply_receipt(db, lot, receipt, "SeedLot")
 
     audit.record(db, "gmo.create_seed_lot", actor_id=actor_id, actor_role=actor_role,

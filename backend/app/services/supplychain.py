@@ -209,7 +209,7 @@ def create_batch(db: Session, org_id: str, actor_id: str, actor_role: str, batch
          "parents": [parent.batch_code] if parent else [],
          "gmo_event": lineage_event.event_code if lineage_event else None,
          "content_hash": digest},
-        _msp_for(db, org_id))
+        _msp_for(db, org_id), db=db, entity=batch)
     gmo_service._apply_receipt(db, batch, receipt, "Batch")
 
     audit.record(db, "supply.create_batch", actor_id=actor_id, actor_role=actor_role,
@@ -257,10 +257,12 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
          "disposition": disposition, "location_gln": location_gln or "",
          "quantity": quantity, "occurred_at": _aware(occurred_at).isoformat(),
          "content_hash": event.content_hash},
-        _msp_for(db, org_id))
+        _msp_for(db, org_id), db=db, entity=event)
 
     if receipt.get("status") == "REJECTED":
-        # The contract enforces the lifecycle; surface its reason to the caller.
+        # The contract enforces the lifecycle; surface its reason to the caller. A batch whose
+        # own anchor is still pending does not land here: the event is queued behind it
+        # (services/anchoring.py) and comes back PENDING.
         db.expunge(event)
         raise ValidationFailed(receipt.get("detail", "Ledger rejected the event"))
 
@@ -292,7 +294,7 @@ def transfer_custody(db: Session, batch: Batch, from_org_id: str, to_org_id: str
         "provenance", "TransferCustody",
         {"batch_code": batch.batch_code, "from_org": _msp_for(db, from_org_id),
          "to_org": receiving.msp_id, "occurred_at": _aware(occurred_at).isoformat()},
-        _msp_for(db, from_org_id))
+        _msp_for(db, from_org_id), db=db)
     if receipt.get("status") == "REJECTED":
         # The contract refused the hand-over: fail the whole request (nothing is committed),
         # so the caller is never told a transfer happened when it did not.
@@ -464,7 +466,7 @@ def issue_certification(db: Session, issuer_org_id: str, actor_id: str, actor_ro
         {"cert_code": cert_code, "cert_type": cert_type, "standard": standard,
          "subject": subject_org_id, "valid_from": valid_from.isoformat(),
          "valid_to": valid_to.isoformat(), "content_hash": digest},
-        _msp_for(db, issuer_org_id))
+        _msp_for(db, issuer_org_id), db=db, entity=certification)
     if receipt.get("status") == "REJECTED":
         # The chaincode restricts certification.Issue to RegulatorMSP. Recording the rejection
         # as an anchor_status left an ACTIVE certification in the database that the ledger had
@@ -491,7 +493,7 @@ def revoke_certification(db: Session, certification: Certification, actor_id: st
     db.flush()
     receipt = ledger_client.submit(
         "certification", "Revoke", {"cert_code": certification.cert_code, "reason": reason},
-        _msp_for(db, certification.issuer_org_id))
+        _msp_for(db, certification.issuer_org_id), db=db)
     db.flush()
     audit.record(db, "cert.revoke", actor_id=actor_id, actor_role=actor_role,
                  org_id=certification.issuer_org_id, entity_type="Certification",

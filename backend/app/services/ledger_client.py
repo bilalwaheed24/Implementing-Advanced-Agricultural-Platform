@@ -1,7 +1,14 @@
 """Backend-facing ledger client with retry, circuit breaking and graceful degradation.
 
 An anchoring failure must never lose a business write (NFR-5, Blockchain-integration.md §13):
-the record is stored with anchor_status = PENDING/FAILED and swept later.
+the record is stored with anchor_status = PENDING/FAILED, and when the caller passes its
+session the call is journalled (services/anchoring.py) so the sweep in
+scripts/scheduled_tasks.py, or POST /blockchain/anchors/retry, replays it later in order.
+
+Ledger writes happen inside the request, before its database commit. A request that fails
+after a successful submit rolls back its rows but not the ledger transaction, which can leave
+an orphan anchor with no database record. That is accepted rather than adding a two-phase
+protocol; replay is idempotent, so an anchor that did land is never written twice.
 
 With LEDGER_SERVICE_URL set, every call goes over HTTP to the `ledger` container (ADR-016);
 without it the ledger package runs in-process (tests, run_local.sh). Callers use the
@@ -105,9 +112,18 @@ _breaker = CircuitBreaker()
 
 
 def submit(contract: str, function: str, args: dict[str, Any], submitter_msp: str,
-           retries: int = 2) -> dict[str, Any]:
+           retries: int = 2, *, db: Any = None, entity: Any = None) -> dict[str, Any]:
     """Submit a transaction, then mirror a successful anchor to Hyperledger Fabric when the
-    bridge is configured (background thread: Fabric can never block or fail the write)."""
+    bridge is configured (background thread: Fabric can never block or fail the write).
+
+    With `db` (the request's session) the write is journalled for replay and mirrored once
+    that session commits; `entity` is the stored record whose anchor fields the write fills
+    in, so a later replay can complete them. Without `db` nothing is persisted."""
+    if db is not None:
+        from . import anchoring                                       # noqa: PLC0415
+
+        return anchoring.submit(db, contract, function, args, submitter_msp, entity=entity,
+                                retries=retries)
     receipt = _submit(contract, function, args, submitter_msp, retries)
     if receipt.get("ok"):
         from . import fabric_bridge                                   # noqa: PLC0415
@@ -139,7 +155,8 @@ def _submit(contract: str, function: str, args: dict[str, Any], submitter_msp: s
         try:
             receipt = get_ledger().submit(contract, function, args, submitter_msp)
             _breaker.record_success()
-            return {"ok": True, "status": "ANCHORED", **receipt}
+            return {"ok": True, "status": "ANCHORED", "contract": contract,
+                    "function": function, **receipt}
         except ContractError as exc:
             # Deterministic rejection: do not retry.
             log_event(app_log, logging.WARNING, "ledger contract rejection",
@@ -175,7 +192,8 @@ def _submit_remote(contract: str, function: str, args: dict[str, Any], submitter
             status, response = 503, {"detail": str(exc)}
         if status == 200:
             _breaker.record_success()
-            return {"ok": True, "status": "ANCHORED", **response}
+            return {"ok": True, "status": "ANCHORED", "contract": contract,
+                    "function": function, **response}
         detail = response.get("detail", "") if isinstance(response, dict) else str(response)
         if status == 409:
             log_event(app_log, logging.WARNING, "ledger contract rejection",
