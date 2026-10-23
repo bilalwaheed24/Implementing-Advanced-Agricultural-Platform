@@ -16,7 +16,8 @@ class ContractError(Exception):
 
 
 # Endorsement policies: which MSPs must endorse a function.
-# "AND" = every listed MSP must sign; "OR" = at least one must sign.
+# "AND" = every listed MSP must sign; "OR" = at least one must sign. Under "OR", a submitter
+# of the same organisation type as a listed MSP endorses its own transaction (chain.py).
 ENDORSEMENT_POLICIES: dict[str, dict[str, Any]] = {
     "gmo_registry.RegisterEvent":     {"rule": "AND", "orgs": ["BiotechMSP", "RegulatorMSP"]},
     "gmo_registry.RecordApproval":    {"rule": "AND", "orgs": ["RegulatorMSP"]},
@@ -32,19 +33,24 @@ ENDORSEMENT_POLICIES: dict[str, dict[str, Any]] = {
     "imagery.AnchorScene":            {"rule": "OR",  "orgs": ["FarmMSP"]},
 }
 
-# Which MSPs may *submit* each function (authorisation, distinct from endorsement).
+# Which organisation TYPES may *submit* each function (authorisation, distinct from
+# endorsement). Keyed by type rather than by MSP name because every organisation has its own
+# MSP identity: the four seeded ones (BiotechMSP, FarmMSP, SupplyMSP, RegulatorMSP) and any
+# created later through the admin API (a retailer "RetailMSP" of type SUPPLY, say). The type
+# is registered with the identity (identity.MSPRegistry.ensure); chain.DEFAULT_ORGS types the
+# four seeded identities.
 SUBMIT_RIGHTS: dict[str, set[str]] = {
-    "gmo_registry.RegisterEvent": {"BiotechMSP"},
-    "gmo_registry.RecordApproval": {"RegulatorMSP"},
-    "gmo_registry.RegisterSeedLot": {"BiotechMSP"},
-    "provenance.CreateBatch": {"FarmMSP", "SupplyMSP", "BiotechMSP"},
-    "provenance.RecordEvent": {"FarmMSP", "SupplyMSP"},
-    "provenance.TransferCustody": {"FarmMSP", "SupplyMSP"},
-    "certification.Issue": {"RegulatorMSP"},
-    "certification.Revoke": {"RegulatorMSP"},
-    "compliance_anchor.AnchorReport": {"RegulatorMSP", "SupplyMSP"},
-    "compliance_anchor.AnchorAuditHead": {"RegulatorMSP", "SupplyMSP", "FarmMSP", "BiotechMSP"},
-    "imagery.AnchorScene": {"FarmMSP"},
+    "gmo_registry.RegisterEvent": {"BIOTECH"},
+    "gmo_registry.RecordApproval": {"REGULATOR"},
+    "gmo_registry.RegisterSeedLot": {"BIOTECH"},
+    "provenance.CreateBatch": {"FARM", "SUPPLY", "BIOTECH"},
+    "provenance.RecordEvent": {"FARM", "SUPPLY"},
+    "provenance.TransferCustody": {"FARM", "SUPPLY"},
+    "certification.Issue": {"REGULATOR"},
+    "certification.Revoke": {"REGULATOR"},
+    "compliance_anchor.AnchorReport": {"REGULATOR", "SUPPLY"},
+    "compliance_anchor.AnchorAuditHead": {"REGULATOR", "SUPPLY", "FARM", "BIOTECH"},
+    "imagery.AnchorScene": {"FARM"},
 }
 
 # Legal batch state transitions enforced on-chain.

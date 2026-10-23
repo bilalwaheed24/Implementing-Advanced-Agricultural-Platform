@@ -3,7 +3,9 @@
 scoring, certification and GMO-approval expiry.
 
 Run periodically (cron, Kubernetes CronJob, or a simple loop) against a live deployment.
-Each sweep is independent and safe to run repeatedly.
+Each sweep is independent and safe to run repeatedly: it runs in its own database session
+and commits on its own, and one that fails is logged and rolled back without stopping the
+sweeps after it.
 
 Usage: python3 scripts/scheduled_tasks.py              # one pass (cron / Kubernetes CronJob)
        python3 scripts/scheduled_tasks.py --every 300  # loop (the compose `scheduler` service)
@@ -11,7 +13,9 @@ Usage: python3 scripts/scheduled_tasks.py              # one pass (cron / Kubern
 from __future__ import annotations
 
 import sys
+import traceback
 from pathlib import Path
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -23,6 +27,13 @@ from app.services import anchoring                               # noqa: E402
 from app.services import devices as device_service               # noqa: E402
 from app.services import gmo, security_ops, supplychain        # noqa: E402
 from app.services import telemetry as telemetry_service          # noqa: E402
+
+# Wall-clock budget for one Fabric re-mirror pass. Each bridge call has its own timeout
+# (fabric_bridge._call), but a hanging gateway times out on every row; without a budget a
+# backlog could hold the pass past the Kubernetes job deadline (activeDeadlineSeconds 600)
+# before the expiry sweeps ran. Rows left over are taken by the next pass.
+REMIRROR_BUDGET_SECONDS = 120.0
+REMIRROR_LIMIT_PER_PASS = 100
 
 
 def sweep_expiring_certifications(db, warn_days: int = 30) -> int:
@@ -37,44 +48,89 @@ def sweep_expired_gmo_approvals(db) -> int:
     return len(gmo.sweep_expired_approvals(db))
 
 
-def sweep_anchors(db) -> None:
-    """Replay unanchored ledger writes in order, then re-mirror anchors to Fabric. Committed
-    on their own: the replayed writes are already on the ledger, so a later sweep failing
-    must not roll back their ANCHORED status (a rerun would resolve them idempotently anyway)."""
+def sweep_anchor_retry(db) -> str:
+    """Replay unanchored ledger writes in order (one replay at a time, see anchoring)."""
     retried = anchoring.retry_pending(db)
-    db.commit()
-    print(f"Anchor retry sweep: {retried['anchored']} anchored, "
-          f"{retried['already_anchored']} already on the ledger, {retried['failed']} failed, "
-          f"{retried['blocked']} waiting behind them, {retried['rejected']} rejected, "
-          f"{retried['deferred']} deferred (circuit open)")
-    mirrored = anchoring.remirror(db)
-    db.commit()
-    if mirrored["enabled"]:
-        print(f"Fabric re-mirror sweep: {mirrored['mirrored']} mirrored, "
-              f"{mirrored['already_mirrored']} already on Fabric, {mirrored['failed']} failed")
+    if retried.get("busy"):
+        return "Anchor retry sweep: another replay is in progress, skipped"
+    return (f"Anchor retry sweep: {retried['anchored']} anchored, "
+            f"{retried['already_anchored']} already on the ledger, {retried['failed']} failed, "
+            f"{retried['blocked']} waiting behind them, {retried['rejected']} rejected, "
+            f"{retried['deferred']} deferred (circuit open)")
 
 
-def run_once() -> None:
-    with SessionLocal() as db:
-        sweep_anchors(db)
+def sweep_remirror(db) -> str:
+    mirrored = anchoring.remirror(db, limit=REMIRROR_LIMIT_PER_PASS,
+                                  time_budget_seconds=REMIRROR_BUDGET_SECONDS)
+    if not mirrored["enabled"]:
+        return "Fabric re-mirror sweep: no bridge configured"
+    return (f"Fabric re-mirror sweep: {mirrored['mirrored']} mirrored, "
+            f"{mirrored['already_mirrored']} already on Fabric, {mirrored['failed']} failed, "
+            f"{mirrored['skipped']} left for the next pass")
 
-        silent = device_service.sweep_silent_devices(db)
-        print(f"Silent-device sweep: {len(silent)} device(s) flagged")
 
-        rescored = telemetry_service.rescore_unscored(db)
-        print(f"Telemetry rescore: {rescored} unscored reading(s) scored")
+def sweep_silent(db) -> str:
+    return f"Silent-device sweep: {len(device_service.sweep_silent_devices(db))} device(s) flagged"
 
-        theft = security_ops.sweep_data_theft(db)
-        print(f"Data-theft sweep: {len(theft)} principal(s) flagged")
 
-        expiring = sweep_expiring_certifications(db)
-        print(f"Certification-expiry sweep: {expiring} certification(s) flagged")
+def sweep_rescore(db) -> str:
+    return (f"Telemetry rescore: {telemetry_service.rescore_unscored(db)} "
+            f"unscored reading(s) scored")
 
-        lapsed = sweep_expired_gmo_approvals(db)
-        print(f"GMO-approval expiry sweep: {lapsed} approval(s) lapsed")
 
-        db.commit()
-    print(f"[{utcnow().isoformat(timespec='seconds')}] Scheduled sweeps complete.", flush=True)
+def sweep_theft(db) -> str:
+    return f"Data-theft sweep: {len(security_ops.sweep_data_theft(db))} principal(s) flagged"
+
+
+def sweep_certifications(db) -> str:
+    return f"Certification-expiry sweep: {sweep_expiring_certifications(db)} certification(s) flagged"
+
+
+def sweep_gmo(db) -> str:
+    return f"GMO-approval expiry sweep: {sweep_expired_gmo_approvals(db)} approval(s) lapsed"
+
+
+# Order matters only for the first two: the replay commits before the re-mirror reads, so
+# writes anchored by the replay are mirrored in the same pass.
+SWEEPS: list[tuple[str, Callable]] = [
+    ("anchor-retry", sweep_anchor_retry),
+    ("fabric-remirror", sweep_remirror),
+    ("silent-devices", sweep_silent),
+    ("telemetry-rescore", sweep_rescore),
+    ("data-theft", sweep_theft),
+    ("certification-expiry", sweep_certifications),
+    ("gmo-approval-expiry", sweep_gmo),
+]
+
+
+def run_sweep(name: str, sweep: Callable) -> bool:
+    """One sweep in its own session and transaction. A failure is logged and rolled back;
+    it never stops the sweeps after it. True when the sweep succeeded."""
+    try:
+        with SessionLocal() as db:
+            try:
+                message = sweep(db)
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+        print(message, flush=True)
+        return True
+    except Exception as exc:              # noqa: BLE001 - isolate each sweep
+        print(f"{name} sweep failed: {exc}", flush=True)
+        traceback.print_exc(file=sys.stdout)
+        return False
+
+
+def run_once() -> int:
+    """Run every sweep once. Returns the number that failed."""
+    failed = [name for name, sweep in SWEEPS if not run_sweep(name, sweep)]
+    stamp = utcnow().isoformat(timespec="seconds")
+    if failed:
+        print(f"[{stamp}] Scheduled sweeps complete; failed: {', '.join(failed)}", flush=True)
+    else:
+        print(f"[{stamp}] Scheduled sweeps complete.", flush=True)
+    return len(failed)
 
 
 def main() -> int:
@@ -87,13 +143,12 @@ def main() -> int:
     args = parser.parse_args()
     while True:
         try:
-            run_once()
+            failures = run_once()
         except Exception as exc:              # noqa: BLE001 - a failed pass must not stop the loop
-            print(f"sweep failed: {exc}", flush=True)
-            if not args.every:
-                return 1
+            print(f"sweep pass failed: {exc}", flush=True)
+            failures = 1
         if not args.every:
-            return 0
+            return 1 if failures else 0
         time.sleep(args.every)
 
 

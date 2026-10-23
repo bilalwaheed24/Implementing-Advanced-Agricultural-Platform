@@ -279,12 +279,33 @@ def contracts() -> dict[str, Any]:
     }
 
 
-def ensure_identity(msp_id: str, name: str) -> None:
-    """Give an organisation a ledger signing identity (idempotent)."""
+def ensure_identity(msp_id: str, name: str, org_type: str | None = None) -> None:
+    """Give an organisation a ledger signing identity (idempotent). The organisation type
+    (BIOTECH | FARM | SUPPLY | REGULATOR) is registered with it: the ledger grants submit
+    rights per type, so without it the identity can sign but submit nothing."""
     if _remote():
-        _post("/v1/identities", {"msp_id": msp_id, "name": name})
+        _post("/v1/identities", {"msp_id": msp_id, "name": name, "org_type": org_type})
     else:
-        get_ledger().msp.ensure(msp_id, name)
+        get_ledger().msp.ensure(msp_id, name, org_type)
+
+
+def sync_identities(db: Any) -> int:
+    """Register every organisation's identity and type with the ledger. Run at api start
+    (scripts/start_api.py) so organisations created before types were registered, or while
+    the ledger was down, can submit. Returns how many were synced; never raises."""
+    from sqlalchemy import select                                    # noqa: PLC0415
+
+    from ..models import Organization                                # noqa: PLC0415
+
+    synced = 0
+    for org in db.execute(select(Organization)).scalars():
+        try:
+            ensure_identity(org.msp_id, org.name, org.org_type)
+            synced += 1
+        except Exception as exc:                                     # noqa: BLE001
+            log_event(app_log, logging.WARNING, "ledger identity sync failed",
+                      msp_id=org.msp_id, error=str(exc))
+    return synced
 
 
 def reset_store() -> None:

@@ -79,6 +79,8 @@ class VerifyContentRequest(BaseModel):
 class IdentityRequest(BaseModel):
     msp_id: str
     name: str
+    # BIOTECH | FARM | SUPPLY | REGULATOR: the submit rights the identity gets.
+    org_type: str | None = None
 
 
 @app.get("/health")
@@ -166,8 +168,12 @@ def contracts() -> dict:
 
 @app.post("/v1/identities", dependencies=[Depends(require_token)])
 def ensure_identity(payload: IdentityRequest) -> dict:
-    ledger().msp.ensure(payload.msp_id, payload.name)
-    return {"msp_id": payload.msp_id, "public_key": ledger().msp.public_key(payload.msp_id)}
+    org_type = (payload.org_type or "").upper() or None
+    if org_type is not None and org_type not in {"BIOTECH", "FARM", "SUPPLY", "REGULATOR"}:
+        raise HTTPException(status_code=422, detail="unknown organisation type")
+    identity = ledger().msp.ensure(payload.msp_id, payload.name, org_type)
+    return {"msp_id": payload.msp_id, "org_type": identity.org_type,
+            "public_key": ledger().msp.public_key(payload.msp_id)}
 
 
 @app.post("/v1/admin/reset", dependencies=[Depends(require_token)])

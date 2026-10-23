@@ -126,7 +126,7 @@ def create_organization(payload: OrganizationCreate, db: DbSession,
     db.flush()
     # Ensure the organisation has a ledger signing identity.
     try:
-        ledger_client.ensure_identity(organization.msp_id, organization.name)
+        ledger_client.ensure_identity(organization.msp_id, organization.name, organization.org_type)
     except Exception:                                    # noqa: BLE001 - non-fatal
         pass
     audit.record(db, "org.create", actor_id=principal.id, actor_role=principal.role,

@@ -15,9 +15,13 @@ class OrgIdentity:
     """An organisation's signing identity within an MSP."""
 
     def __init__(self, msp_id: str, name: str, private_key: ec.EllipticCurvePrivateKey | None,
-                 public_pem: str) -> None:
+                 public_pem: str, org_type: str | None = None) -> None:
         self.msp_id = msp_id
         self.name = name
+        # The organisation's type (BIOTECH | FARM | SUPPLY | REGULATOR). Submit rights are
+        # granted per type (contracts.SUBMIT_RIGHTS), so an organisation created at run time
+        # with its own MSP identifier has the same rights as the seeded one of its type.
+        self.org_type = org_type
         self._private_key = private_key
         self.public_pem = public_pem
 
@@ -80,19 +84,30 @@ class MSPRegistry:
             pub = self.dir / f"{msp_id}.pub.pem"
             if pub.is_file():
                 if priv.is_file():
-                    self._identities[msp_id] = OrgIdentity.from_files(
+                    identity = OrgIdentity.from_files(
                         msp_id, meta["name"], priv.read_text(), pub.read_text())
                 else:
-                    self._identities[msp_id] = OrgIdentity(msp_id, meta["name"], None, pub.read_text())
+                    identity = OrgIdentity(msp_id, meta["name"], None, pub.read_text())
+                identity.org_type = meta.get("org_type")
+                self._identities[msp_id] = identity
 
     def _save_index(self) -> None:
-        index = {m: {"name": i.name} for m, i in self._identities.items()}
+        index = {m: {"name": i.name, "org_type": i.org_type} for m, i in self._identities.items()}
         (self.dir / "index.json").write_text(json.dumps(index, indent=2))
 
-    def ensure(self, msp_id: str, name: str) -> OrgIdentity:
+    def ensure(self, msp_id: str, name: str, org_type: str | None = None) -> OrgIdentity:
+        """Create the identity if missing. A type is recorded the first time one is given
+        (an identity registered before types existed gets its type on the next ensure) and
+        is never changed afterwards, so re-registering cannot widen an organisation's rights."""
+        org_type = org_type.upper() if org_type else None
         if msp_id in self._identities:
-            return self._identities[msp_id]
+            identity = self._identities[msp_id]
+            if org_type and identity.org_type is None:
+                identity.org_type = org_type
+                self._save_index()
+            return identity
         identity = OrgIdentity.generate(msp_id, name)
+        identity.org_type = org_type
         key_path = self.dir / f"{msp_id}.key.pem"
         key_path.write_text(identity.private_pem())
         key_path.chmod(0o600)                      # private key: owner-read only
@@ -103,6 +118,10 @@ class MSPRegistry:
 
     def get(self, msp_id: str) -> OrgIdentity | None:
         return self._identities.get(msp_id)
+
+    def org_type(self, msp_id: str) -> str | None:
+        identity = self._identities.get(msp_id)
+        return identity.org_type if identity else None
 
     def public_key(self, msp_id: str) -> str | None:
         identity = self._identities.get(msp_id)

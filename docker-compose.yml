@@ -104,13 +104,19 @@ services:
       # The anchor sweep submits to the same ledger and Fabric bridge as the api.
       LEDGER_SERVICE_URL: http://ledger:8200
       SERVICE_TOKEN: ${SERVICE_TOKEN:?}
+      # The telemetry rescore sweep scores through the ai service: this image carries only
+      # ai/data, not the models, so without it every unscored reading stays unscored.
+      AI_SERVICE_URL: http://ai:8100
       FABRIC_BRIDGE_URL: ${COMPOSE_FABRIC_BRIDGE_URL:-}
       FABRIC_BRIDGE_TOKEN: ${FABRIC_BRIDGE_TOKEN:-}
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       api: { condition: service_healthy }
     healthcheck: { disable: true }
-    networks: [backend]
+    # `backend` is internal (no route out), so the host-run Fabric bridge
+    # (host.docker.internal:8300) is reachable only through `edge`, exactly as for the api.
+    # No port is published; nothing can connect in.
+    networks: [edge, backend]
 
   # Optional: docker compose --profile simulator up
   iot-simulator:

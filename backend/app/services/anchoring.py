@@ -20,10 +20,12 @@ replay never anchors twice and never reports an error for it.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import event, func, select
+from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session
 
 from ..core.logging_conf import app_log, log_event
@@ -172,15 +174,22 @@ def _apply_mirror(row: LedgerWrite, entry: dict[str, Any]) -> None:
         row.fabric_error = str(entry.get("error") or "mirror failed")[:2000]
 
 
-def remirror(db: Session, limit: int = 200, min_age_seconds: int = 60) -> dict[str, Any]:
+def remirror(db: Session, limit: int = 200, min_age_seconds: int = 60,
+             time_budget_seconds: float | None = None) -> dict[str, Any]:
     """Mirror every anchored write whose Fabric copy failed or never happened.
 
     A PENDING row younger than `min_age_seconds` may still have its background mirror in
     flight, so it is left alone. Fabric is asked first: a key already holding this hash is
     marked mirrored without writing a second version.
+
+    With `time_budget_seconds` the pass stops starting new rows once the budget is spent
+    (`skipped` counts the rest; the next pass takes them), so a hanging gateway cannot
+    starve whatever runs after it. A row already in flight finishes within the bridge's own
+    request timeout.
     """
     if not fabric_bridge.enabled():
-        return {"enabled": False, "mirrored": 0, "already_mirrored": 0, "failed": 0}
+        return {"enabled": False, "mirrored": 0, "already_mirrored": 0, "failed": 0,
+                "skipped": 0}
     cutoff = utcnow() - timedelta(seconds=min_age_seconds)
     rows = db.execute(select(LedgerWrite).where(
         LedgerWrite.anchor_status == "ANCHORED", LedgerWrite.fabric_key.is_not(None),
@@ -188,8 +197,12 @@ def remirror(db: Session, limit: int = 200, min_age_seconds: int = 60) -> dict[s
         | ((LedgerWrite.fabric_status == "PENDING") & (LedgerWrite.anchored_at <= cutoff)))
         .order_by(LedgerWrite.anchored_at.asc()).limit(limit)
         .execution_options(populate_existing=True)).scalars().all()
-    counts = {"enabled": True, "mirrored": 0, "already_mirrored": 0, "failed": 0}
-    for row in rows:
+    counts = {"enabled": True, "mirrored": 0, "already_mirrored": 0, "failed": 0, "skipped": 0}
+    deadline = None if time_budget_seconds is None else time.monotonic() + time_budget_seconds
+    for index, row in enumerate(rows):
+        if deadline is not None and time.monotonic() >= deadline:
+            counts["skipped"] = len(rows) - index
+            break
         counts[_mirror_row(row)] += 1
     db.flush()
     return counts
@@ -230,17 +243,55 @@ def anchor_counts(db: Session) -> dict[str, int]:
 # --------------------------------------------------------------------------- #
 # Ordered replay
 # --------------------------------------------------------------------------- #
+# One replay at a time. The scheduler and POST /blockchain/anchors/retry both replay the
+# journal; two replays reading the same PENDING rows would both submit them, and a write the
+# contract does not reject as a duplicate (AnchorAuditHead at the same seq) would be anchored
+# twice. In PostgreSQL a transaction-scoped advisory lock serialises replays across processes
+# and is released when the caller commits or rolls back, i.e. only once the replay's status
+# changes are visible to the next replayer. Within one process (and on SQLite, which has no
+# advisory locks) a non-blocking process lock does the same.
+_REPLAY_LOCK = threading.Lock()
+_REPLAY_ADVISORY_KEY = 0x41425350_0001          # "ABSP" + replay
+
+
+def _claim_replay(db: Session) -> bool:
+    """Take the cross-process replay claim for this transaction (PostgreSQL only)."""
+    if db.get_bind().dialect.name != "postgresql":
+        return True
+    return bool(db.execute(text("SELECT pg_try_advisory_xact_lock(:key)"),
+                           {"key": _REPLAY_ADVISORY_KEY}).scalar())
+
+
 def retry_pending(db: Session, limit: int = 500) -> dict[str, int]:
     """Replay unanchored writes oldest first. A write whose chain key or required keys sit
     behind a write that still fails is held back, so a batch's events are never submitted
-    before the batch itself. Stops early when the ledger's circuit breaker is open."""
+    before the batch itself. Stops early when the ledger's circuit breaker is open.
+
+    Only one replay runs at a time (see _REPLAY_LOCK); a call that finds another in progress
+    returns at once with `busy` set rather than replaying the same rows concurrently."""
+    if not _REPLAY_LOCK.acquire(blocking=False):
+        return {**_EMPTY_COUNTS, "busy": True}
+    try:
+        if not _claim_replay(db):
+            return {**_EMPTY_COUNTS, "busy": True}
+        return _retry_pending(db, limit)
+    finally:
+        _REPLAY_LOCK.release()
+
+
+_EMPTY_COUNTS = {"attempted": 0, "anchored": 0, "already_anchored": 0, "failed": 0,
+                 "rejected": 0, "blocked": 0, "deferred": 0, "busy": False}
+
+
+def _retry_pending(db: Session, limit: int) -> dict[str, int]:
     rows = db.execute(select(LedgerWrite).where(LedgerWrite.anchor_status.in_(UNRESOLVED))
                       .order_by(LedgerWrite.created_at.asc(), LedgerWrite.id.asc())
                       .limit(limit).execution_options(populate_existing=True)).scalars().all()
-    counts = {"attempted": 0, "anchored": 0, "already_anchored": 0, "failed": 0,
-              "rejected": 0, "blocked": 0, "deferred": 0}
+    counts = dict(_EMPTY_COUNTS)
     blocked: set[str] = set()
     for index, row in enumerate(rows):
+        if row.anchor_status not in UNRESOLVED:     # resolved since it was read: never replay
+            continue
         if blocked & {row.chain_key, *(row.requires or [])}:
             blocked.add(row.chain_key)
             counts["blocked"] += 1
@@ -265,6 +316,7 @@ def retry_pending(db: Session, limit: int = 500) -> dict[str, int]:
                 row.anchor_status = "REJECTED"
                 row.last_error = receipt.get("detail")
                 _update_entity(db, row, None, "REJECTED")
+                _alert_rejected(db, row)
                 counts["rejected"] += 1
         else:
             row.anchor_status = receipt.get("status", "FAILED")
@@ -275,6 +327,30 @@ def retry_pending(db: Session, limit: int = 500) -> dict[str, int]:
     if counts["anchored"] or counts["already_anchored"] or counts["rejected"]:
         log_event(app_log, logging.INFO, "anchor retry sweep", **counts)
     return counts
+
+
+def _alert_rejected(db: Session, row: LedgerWrite) -> None:
+    """A replay the ledger rejected leaves its record permanently unanchored: tell the
+    analysts (LEDGER alert, one per affected entity, repeats folded in by `kind`)."""
+    from ..models import Organization                                # noqa: PLC0415
+    from . import notifications                                      # noqa: PLC0415
+
+    org_id = db.execute(select(Organization.id).where(
+        Organization.msp_id == row.submitter_msp)).scalar_one_or_none()
+    entity_type = row.entity_type or "LedgerWrite"
+    entity_id = row.entity_id or row.id
+    try:
+        notifications.raise_alert(
+            db, "LEDGER", "HIGH",
+            f"Ledger rejected the replayed {row.contract}.{row.function} for {row.chain_key}",
+            detail=f"The record stays unanchored: {row.last_error or 'contract rejection'}",
+            org_id=org_id, entity_type=entity_type, entity_id=entity_id,
+            reasons=[f"{row.contract}.{row.function}", row.chain_key],
+            kind="ledger_replay_rejected", open_incident=False)
+    except Exception as exc:                                         # noqa: BLE001
+        # The REJECTED status is already recorded; an alert failure must not undo it.
+        log_event(app_log, logging.WARNING, "ledger rejection alert failed", write_id=row.id,
+                  error=str(exc))
 
 
 def _resolve(db: Session, row: LedgerWrite, receipt: dict[str, Any] | None) -> None:

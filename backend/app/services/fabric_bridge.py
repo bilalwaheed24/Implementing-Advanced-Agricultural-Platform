@@ -138,17 +138,21 @@ def mirror(contract: str, function: str, args: dict[str, Any], local_tx_id: str,
     thread.start()
 
 
-def flush(timeout: float = 60.0) -> None:
-    """Wait for background mirrors to finish. Short-lived scripts (the seeder) call this
-    before exiting, otherwise their last anchors would never reach Fabric."""
+def flush(timeout: float = 60.0) -> bool:
+    """Wait (at most `timeout` seconds) for background mirrors to finish, including the
+    persisting of their outcome. Short-lived processes (the seeder, start_api.py before it
+    execs uvicorn) call this, otherwise their last anchors would never reach Fabric or would
+    stay PENDING in the journal. True when nothing is left in flight."""
     import time
 
     deadline = time.monotonic() + timeout
     while True:
         with _lock:
             threads = list(_pending)
-        if not threads or time.monotonic() > deadline:
-            return
+        if not threads:
+            return True
+        if time.monotonic() > deadline:
+            return False
         threads[0].join(max(0.0, deadline - time.monotonic()))
 
 
