@@ -293,17 +293,26 @@ def evaluate_batch(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
     # custodian and the runner are all told. Previously it was filed under the runner — usually
     # the regulator — so neither party to the batch saw it.
     parties = [batch.custodian_org_id, org_id]
+    # One alert per batch and jurisdiction (kind): re-evaluating a batch that still fails
+    # folds into it rather than stacking a new alert and notification round, and a later
+    # COMPLIANT result resolves it.
+    kind = f"compliance:{jurisdiction}"[:80]
     if status != "COMPLIANT":
         notifications.alert_parties(
             db, "COMPLIANCE", "CRITICAL" if critical_failures else "HIGH",
-            f"Batch {batch.batch_code} is {status} in {jurisdiction}",
+            f"Batch {batch.batch_code} is {notifications.human_status(status)} "
+            f"in {jurisdiction}",
             detail="; ".join(r["detail"] for r in failed[:3]), org_id=batch.org_id,
             party_org_ids=parties, entity_type="Batch", entity_id=batch.id,
-            reasons=[r["rule_id"] for r in failed])
+            reasons=[r["rule_id"] for r in failed], kind=kind,
+            party_org_id=batch.custodian_org_id)
     else:
+        notifications.resolve_alerts(
+            db, "COMPLIANCE", batch.id, kind=kind, actor_id=actor_id,
+            note=f"A later evaluation found the batch compliant in {jurisdiction}")
         notifications.notify_parties(
             db, [batch.org_id, *parties], "COMPLIANCE",
-            f"Batch {batch.batch_code} is COMPLIANT in {jurisdiction}",
+            f"Batch {batch.batch_code} is compliant in {jurisdiction}",
             f"All {len(results)} rules passed.", "Batch", batch.id)
     return report
 

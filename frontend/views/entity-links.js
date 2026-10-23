@@ -18,6 +18,7 @@ const ENTITY_ROUTES = {
   Field: { permission: 'farm:read', href: () => '#/farms', text: 'Field' },
   SeedLot: { permission: 'gmo:read', href: () => '#/seed-lots', text: 'Seed lot' },
   GMOEvent: { permission: 'gmo:read', href: () => '#/gmo', text: 'GMO event' },
+  GMOApproval: { permission: 'gmo:read', href: () => '#/gmo', text: 'GMO approval' },
   Shipment: { permission: 'supply:read', href: () => '#/shipments', text: 'Shipment' },
   Product: { permission: 'supply:read', href: () => '#/products', text: 'Product' },
   Certification: { permission: 'cert:read', href: () => '#/certifications',
@@ -25,11 +26,12 @@ const ENTITY_ROUTES = {
   User: { permission: 'user:read', href: () => '#/users', text: 'User' },
 };
 
-/* "Device 1a2b3c4d" as a link when the role can open it, otherwise as text. */
-export function entityLink(entityType, entityId) {
+/* "Device 1a2b3c4d" — or "Field North 40" when the API supplied the record's name — as a
+ * link when the role can open it, otherwise as text. */
+export function entityLink(entityType, entityId, name = null) {
   if (!entityType) return null;
   const route = ENTITY_ROUTES[entityType];
-  const label = `${route ? route.text : titleCase(entityType)} ${shortId(entityId)}`;
+  const label = `${route ? route.text : titleCase(entityType)} ${name || shortId(entityId)}`;
   if (route && entityId && can(route.permission)) {
     return el('a', { href: route.href(entityId), text: label });
   }

@@ -353,21 +353,26 @@ def propagate_recall(db: Session, batch: Batch, actor_id: str | None, actor_role
                    else "Stop distribution and quarantine the stock."))
         notifications.notify_org(db, party, "RECALL", title, body, "Batch", subject.id,
                                  severity="HIGH")
-    if not notifications.has_open_alert(db, "COMPLIANCE", batch.id):
+    # Matched on kind: any other open COMPLIANCE alert on the batch (a failed evaluation, a
+    # cold-chain excursion) used to suppress the recall alert entirely.
+    if not notifications.has_open_alert(db, "COMPLIANCE", batch.id, kind="recall"):
         notifications.raise_alert(
             db, "COMPLIANCE", "HIGH", title,
             detail=f"{len(descendants)} derived batch(es) flagged.", org_id=batch.org_id,
-            entity_type="Batch", entity_id=batch.id, reasons=["recall"], notify=True)
+            entity_type="Batch", entity_id=batch.id, reasons=["Batch recalled"], notify=True,
+            kind="recall", party_org_id=batch.custodian_org_id)
     for child in descendants:
         if child.integrity_status != "FAILED":
             child.integrity_status = "SUSPECT"
-        if not notifications.has_open_alert(db, "COMPLIANCE", child.id):
+        if not notifications.has_open_alert(db, "COMPLIANCE", child.id,
+                                            kind="parent_recalled"):
             notifications.raise_alert(
                 db, "COMPLIANCE", "HIGH",
                 f"Batch {child.batch_code} derives from recalled batch {batch.batch_code}",
                 detail="Quarantine the stock and decide whether to recall it too.",
                 org_id=child.org_id, entity_type="Batch", entity_id=child.id,
-                reasons=["parent_recalled"], notify=False)
+                reasons=["Made from a recalled batch"], notify=False,
+                kind="parent_recalled", party_org_id=child.custodian_org_id)
     db.flush()
     audit.record(db, "supply.recall_propagated", actor_id=actor_id, actor_role=actor_role,
                  org_id=org_id, entity_type="Batch", entity_id=batch.id,
@@ -695,8 +700,10 @@ def issue_certification(db: Session, issuer_org_id: str, actor_id: str, actor_ro
     notifications.notify_org(
         db, subject_org_id, "CERTIFICATION",
         f"Certification {cert_code} issued to you",
-        f"{issuer.name} issued a {cert_type} certification ({standard}) for: {scope}. "
-        f"Valid {valid_from.date().isoformat()} to {valid_to.date().isoformat()}. You can now "
+        f"{issuer.name} issued {notifications.with_article(notifications.human_status(cert_type))} "
+        f"certification ({standard}) for: {scope}. "
+        f"Valid from {notifications.human_date(valid_from)} to "
+        f"{notifications.human_date(valid_to)}. You can now "
         f"claim it on batches you own or hold.", "Certification", certification.id)
     return certification
 
@@ -758,7 +765,8 @@ def revoke_certification(db: Session, certification: Certification, actor_id: st
             db, "CERTIFICATION", "HIGH",
             f"Certification {certification.cert_code} revoked; batch {batch.batch_code} affected",
             detail=reason, org_id=batch.org_id, entity_type="Batch", entity_id=batch.id,
-            notify=False)
+            notify=False, kind=f"cert_revoked:{certification.cert_code}"[:80],
+            party_org_id=batch.custodian_org_id)
     db.flush()
     claimed = ", ".join(b.batch_code for b in batches[:20]) or "no batch"
     notifications.notify_parties(
@@ -802,13 +810,13 @@ def sweep_certification_expiry(db: Session, warn_days: int = 30) -> dict[str, in
             notifications.raise_alert(
                 db, "CERTIFICATION", "WARNING",
                 f"Certification {certification.cert_code} has expired",
-                detail=f"Valid until {valid_to.date().isoformat()}. Claimed on: {claimed}.",
+                detail=f"Valid until {notifications.human_date(valid_to)}. Claimed on: {claimed}.",
                 org_id=certification.subject_org_id, entity_type="Certification",
                 entity_id=certification.id, notify=False, open_incident=False)
             notifications.notify_parties(
                 db, certification_parties(db, certification, batches), "CERTIFICATION",
                 f"Certification {certification.cert_code} has expired",
-                f"It was valid until {valid_to.date().isoformat()} and no longer authenticates. "
+                f"It was valid until {notifications.human_date(valid_to)} and no longer authenticates. "
                 f"Claimed on: {claimed}.", "Certification", certification.id,
                 severity="WARNING")
             expired += 1
@@ -818,13 +826,13 @@ def sweep_certification_expiry(db: Session, warn_days: int = 30) -> dict[str, in
         notifications.raise_alert(
             db, "CERTIFICATION", "WARNING",
             f"Certification {certification.cert_code} expires soon",
-            detail=f"Valid until {valid_to.date().isoformat()}. Claimed on: {claimed}.",
+            detail=f"Valid until {notifications.human_date(valid_to)}. Claimed on: {claimed}.",
             org_id=certification.issuer_org_id, entity_type="Certification",
             entity_id=certification.id, notify=False, open_incident=False)
         notifications.notify_parties(
             db, certification_parties(db, certification, batches), "CERTIFICATION",
             f"Certification {certification.cert_code} expires soon",
-            f"Valid until {valid_to.date().isoformat()}. Claimed on: {claimed}.",
+            f"Valid until {notifications.human_date(valid_to)}. Claimed on: {claimed}.",
             "Certification", certification.id, severity="WARNING")
         warned += 1
     return {"expired": expired, "expiring": warned}
@@ -997,13 +1005,21 @@ def verify_batch(db: Session, batch: Batch, actor_id: str | None = None,
                              "rules": verdict["rules_triggered"]})
 
     if integrity != "VERIFIED":
+        # kind="fraud": re-verifying a batch that still fails folds into the open alert
+        # (escalating it from SUSPECT to FAILED) instead of stacking another one.
         notifications.alert_parties(
             db, "FRAUD", "CRITICAL" if integrity == "FAILED" else "HIGH",
-            f"Supply-chain integrity {integrity} for batch {batch.batch_code}",
-            detail="; ".join(r["detail"] for r in verdict["reasons"][:3]),
+            f"Supply-chain integrity check flagged batch {batch.batch_code}",
+            detail=f"Verdict: {integrity.lower()}. "
+                   + "; ".join(r["detail"] for r in verdict["reasons"][:3]),
             org_id=batch.org_id, party_org_ids=[batch.custodian_org_id],
             entity_type="Batch", entity_id=batch.id,
-            reasons=[r["rule"] for r in verdict["reasons"]])
+            reasons=[r["rule"] for r in verdict["reasons"]], kind="fraud",
+            party_org_id=batch.custodian_org_id)
+    else:
+        notifications.resolve_alerts(
+            db, "FRAUD", batch.id, kind="fraud", actor_id=actor_id,
+            note="A later integrity check verified the batch")
 
     return {
         "integrity_status": integrity, "fraud_score": verdict["score"],

@@ -116,7 +116,10 @@ def authenticate(db: Session, email: str, password: str, ip: str | None = None,
             notifications.raise_alert(
                 db, "DATA_THEFT", "HIGH", f"Account locked after {user.failed_attempts} failed logins",
                 detail=f"Account {user.email} was locked following repeated authentication failures.",
-                org_id=user.org_id, entity_type="User", entity_id=user.id)
+                org_id=user.org_id, entity_type="User", entity_id=user.id,
+                # Its own kind: sharing DATA_THEFT + user with no kind, an open lockout
+                # alert suppressed the exfiltration sweep's alert for the same user.
+                kind="account_lockout")
         db.flush()
         audit.record(db, "auth.login", actor_id=user.id, actor_role=user.role, org_id=user.org_id,
                      entity_type="User", entity_id=user.id, outcome="FAILURE", ip=ip,
@@ -179,7 +182,8 @@ def refresh(db: Session, token: str, ip: str | None = None) -> dict[str, object]
             db, "DATA_THEFT", "CRITICAL", "Refresh token reuse detected",
             detail="A refresh token was presented after it had already been rotated. "
                    "Every token in the family has been invalidated.",
-            org_id=user.org_id if user else None, entity_type="User", entity_id=stored.user_id)
+            org_id=user.org_id if user else None, entity_type="User", entity_id=stored.user_id,
+            kind="refresh_token_reuse")
         audit.record(db, "auth.refresh_reuse", actor_id=stored.user_id,
                      entity_type="RefreshToken", entity_id=stored.id, outcome="FAILURE", ip=ip)
         # Durable before unwinding: the route does not commit on an error path, so

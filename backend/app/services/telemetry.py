@@ -273,12 +273,21 @@ def ingest_scene(db: Session, org_id: str, actor_id: str, actor_role: str, scene
 
     # VARI (RGB cameras) sits lower than NDVI for the same healthy crop, so it has its own line.
     threshold = 0.35 if index_name == "NDVI" else 0.05
-    if ndvi_mean < threshold and cloud_cover_pct < 40:
-        notifications.raise_alert(
-            db, "AGRONOMY", "WARNING", f"Low vegetation index on field {field.name}",
-            detail=f"{index_name} mean {ndvi_mean:.2f} from {source.lower()} imagery indicates "
-                   f"crop stress in this field.",
-            org_id=org_id, entity_type="Field", entity_id=field_id, open_incident=False)
+    # One alert per field (kind="low_ndvi"): each further low scene folds into it, and a
+    # clear scene at or above the line resolves it. A cloudy scene says nothing either way.
+    if cloud_cover_pct < 40:
+        if ndvi_mean < threshold:
+            notifications.raise_alert(
+                db, "AGRONOMY", "WARNING", f"Low vegetation index on field {field.name}",
+                detail=f"{index_name} mean {ndvi_mean:.2f} from {source.lower()} imagery "
+                       f"indicates crop stress in this field.",
+                org_id=org_id, entity_type="Field", entity_id=field_id, open_incident=False,
+                kind="low_ndvi")
+        else:
+            notifications.resolve_alerts(
+                db, "AGRONOMY", field_id, kind="low_ndvi", actor_id=actor_id,
+                note=f"A later scene shows {index_name} mean {ndvi_mean:.2f}, above the "
+                     f"crop-stress line")
     return scene
 
 

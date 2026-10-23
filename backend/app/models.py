@@ -269,6 +269,11 @@ class Alert(Base):
     __tablename__ = "alerts"
     id: Mapped[str] = _pk()
     org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"), index=True)
+    # A second organisation the alert concerns: the custodian of a batch owned by org_id.
+    # repositories.PARTY_COLUMNS makes the alert visible (and workable) there too, so the
+    # processor holding a recalled or failing batch sees its alert, not only the farm.
+    custodian_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"),
+                                                         index=True)
     category: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     severity: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -306,6 +311,10 @@ class Incident(Base):
     entity_type: Mapped[str | None] = mapped_column(String(40))
     entity_id: Mapped[str | None] = mapped_column(String(36), index=True)
     source_alert_id: Mapped[str | None] = mapped_column(String(36))
+    # Copied from the alert that opened it: the custodian of the batch the incident is about
+    # reads it too (repositories.PARTY_COLUMNS).
+    custodian_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"),
+                                                         index=True)
     assignee_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _created()

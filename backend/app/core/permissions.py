@@ -143,10 +143,14 @@ ROLE_PERMISSIONS: dict[Role, frozenset[P]] = {
         P.INCIDENT_READ, P.BLOCKCHAIN_READ, P.BLOCKCHAIN_EXPLORE, P.AUDIT_READ, P.ORG_READ,
     }),
 
+    # ALERT_WRITE and INCIDENT_READ: COMPLIANCE and FRAUD alerts are routed to this role and
+    # filed against batches it holds as custodian (alerts.custodian_org_id), so it must be able
+    # to acknowledge and resolve them and follow the incident a HIGH one opens. Both stay
+    # tenant-scoped through repositories.visible().
     Role.SUPPLY_CHAIN_OPERATOR: frozenset({
         P.SUPPLY_READ, P.SUPPLY_WRITE, P.SUPPLY_VERIFY, P.CERT_READ, P.GMO_READ, P.TELEMETRY_READ,
-        P.COMPLIANCE_READ, P.COMPLIANCE_RUN, P.BLOCKCHAIN_READ, P.ALERT_READ, P.AI_READ,
-        P.DEVICE_READ, P.ORG_READ,
+        P.COMPLIANCE_READ, P.COMPLIANCE_RUN, P.BLOCKCHAIN_READ, P.ALERT_READ, P.ALERT_WRITE,
+        P.INCIDENT_READ, P.AI_READ, P.DEVICE_READ, P.ORG_READ,
     }),
 
     Role.CERTIFIER: frozenset({

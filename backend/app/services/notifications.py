@@ -1,7 +1,7 @@
 """Alerts, incidents and user notifications (FR-X4)."""
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Iterable
 
 from sqlalchemy import select
@@ -39,6 +39,41 @@ ACTIVE_INCIDENT_STATES = ("OPEN", "TRIAGED", "CONTAINED")
 # A plain recurrence is written to the incident timeline at most this often (an escalation
 # always is), so a sensor misbehaving every 15 minutes does not bury the timeline either.
 RECURRENCE_EVENT_INTERVAL = timedelta(hours=1)
+
+# How a category reads in a sentence ("Opened automatically from a critical biosecurity
+# alert"). The category codes themselves stay as they are for filtering.
+CATEGORY_LABELS = {
+    "DEVICE_ANOMALY": "device anomaly", "DEVICE_HEALTH": "device health",
+    "DEVICE_AUTH": "device authentication", "DATA_THEFT": "data theft",
+    "BIOSECURITY": "biosecurity", "DURC": "dual-use research of concern", "FRAUD": "fraud",
+    "COMPLIANCE": "compliance", "CERTIFICATION": "certification", "LEDGER": "ledger",
+    "AGRONOMY": "agronomy",
+}
+
+
+def category_label(category: str | None) -> str:
+    return CATEGORY_LABELS.get(category or "", (category or "").replace("_", " ").lower())
+
+
+def human_date(value: date | datetime | None) -> str:
+    """A date as people write it: "23 Sep 2026" rather than "2026-09-23"."""
+    if value is None:
+        return "no date"
+    if isinstance(value, datetime):
+        value = ensure_aware(value).date()
+    return f"{value.day} {value.strftime('%b %Y')}"
+
+
+def human_status(code: str | None) -> str:
+    """An enum code in words: NON_COMPLIANT -> "non-compliant", SPECIALTY -> "specialty"."""
+    words = (code or "").lower().replace("non_", "non-", 1).replace("_", " ")
+    return " ".join("GMO" if word == "gmo" else word.replace("-gmo", "-GMO")
+                    for word in words.split(" "))
+
+
+def with_article(phrase: str) -> str:
+    """ "organic" -> "an organic", "specialty" -> "a specialty"."""
+    return f"{'an' if phrase[:1].lower() in 'aeiou' else 'a'} {phrase}" if phrase else phrase
 
 
 def find_open_alert(db: Session, category: str, entity_id: str,
@@ -80,8 +115,13 @@ def raise_alert(db: Session, category: str, severity: str, title: str, *,
                 detail: str = "", org_id: str | None = None, entity_type: str | None = None,
                 entity_id: str | None = None, reasons: Iterable[Any] = (),
                 notify: bool = True, open_incident: bool | None = None,
-                kind: str | None = None) -> Alert:
+                kind: str | None = None, party_org_id: str | None = None) -> Alert:
     """Raise an alert, or fold a repeat into the one already open.
+
+    `party_org_id` names a second organisation the alert concerns — the current custodian of
+    a batch owned by `org_id`, say. It is stored on the alert (alerts.custodian_org_id), so
+    repositories.scoped() shows the alert to that organisation as well and it can be worked
+    there, and the category's roles in that organisation are notified too.
 
     With a `kind` and an entity, an unresolved alert of the same (category, entity, kind)
     absorbs the occurrence: its count and last_seen_at advance, its severity can only rise,
@@ -94,13 +134,16 @@ def raise_alert(db: Session, category: str, severity: str, title: str, *,
     if kind is not None and entity_id:
         existing = find_open_alert(db, category, entity_id, kind)
         if existing is not None:
+            if party_org_id and party_org_id != existing.org_id:
+                existing.custodian_org_id = party_org_id     # custody may have moved on
             return _record_recurrence(db, existing, severity, detail, reasons, notify,
                                       open_incident)
 
+    party = party_org_id if party_org_id and party_org_id != org_id else None
     alert = Alert(category=category, severity=severity, title=title[:255], detail=detail,
                   org_id=org_id, entity_type=entity_type, entity_id=entity_id,
                   reasons=list(reasons)[:12], kind=kind, occurrences=1,
-                  last_seen_at=utcnow())
+                  last_seen_at=utcnow(), custodian_org_id=party)
     db.add(alert)
     db.flush()
 
@@ -109,7 +152,8 @@ def raise_alert(db: Session, category: str, severity: str, title: str, *,
         _attach_to_incident(db, alert)
 
     if notify:
-        fan_out(db, category, severity, title, detail, org_id, entity_type, entity_id)
+        fan_out(db, category, severity, title, detail, org_id, entity_type, entity_id,
+                party_org_id=party)
     return alert
 
 
@@ -152,7 +196,7 @@ def _record_recurrence(db: Session, alert: Alert, severity: str, detail: str,
     # Re-notify only when the situation got worse; a repeat is already on everyone's list.
     if notify and escalated:
         fan_out(db, alert.category, alert.severity, alert.title, alert.detail, alert.org_id,
-                alert.entity_type, alert.entity_id)
+                alert.entity_type, alert.entity_id, party_org_id=alert.custodian_org_id)
     return alert
 
 
@@ -164,7 +208,8 @@ def _attach_to_incident(db: Session, alert: Alert) -> Incident:
         if SEVERITY_ORDER.get(alert.severity, 0) > SEVERITY_ORDER.get(incident.severity, 0):
             incident.severity = alert.severity
         add_incident_event(db, incident.id, "ALERT_ATTACHED",
-                           f"{alert.severity} {alert.category} alert attached: {alert.title}",
+                           f"A {alert.severity.lower()} {category_label(alert.category)} "
+                           f"alert joined this incident: {alert.title}",
                            None)
     alert.incident_id = incident.id
     db.flush()
@@ -175,12 +220,13 @@ def open_incident_for(db: Session, alert: Alert) -> Incident:
     incident = Incident(title=f"Incident: {alert.title}"[:255], severity=alert.severity,
                         org_id=alert.org_id, summary=alert.detail or alert.title,
                         category=alert.category, entity_type=alert.entity_type,
-                        entity_id=alert.entity_id, source_alert_id=alert.id)
+                        entity_id=alert.entity_id, source_alert_id=alert.id,
+                        custodian_org_id=alert.custodian_org_id)
     db.add(incident)
     db.flush()
     db.add(IncidentEvent(incident_id=incident.id, action="OPENED",
-                         detail=f"Opened automatically from {alert.severity} alert "
-                                f"in category {alert.category}"))
+                         detail=f"Opened automatically from a {alert.severity.lower()} "
+                                f"{category_label(alert.category)} alert: {alert.title}"))
     db.flush()
     return incident
 
@@ -199,8 +245,10 @@ def notify_org(db: Session, org_id: str, category: str, title: str, body: str,
 
 
 def fan_out(db: Session, category: str, severity: str, title: str, body: str,
-            org_id: str | None, entity_type: str | None, entity_id: str | None) -> int:
-    """Notify every active user holding a role that owns this alert category."""
+            org_id: str | None, entity_type: str | None, entity_id: str | None, *,
+            party_org_id: str | None = None) -> int:
+    """Notify every active user holding a role that owns this alert category, in the alert's
+    organisation and its party organisation (the batch custodian), if it has one."""
     roles = [r.value for r in CATEGORY_ROLES.get(category, (Role.ADMIN,))]
     query = select(User).where(User.role.in_(roles), User.status == "ACTIVE",
                                User.deleted_at.is_(None))
@@ -210,7 +258,8 @@ def fan_out(db: Session, category: str, severity: str, title: str, body: str,
     platform_roles = {r.value for r in CROSS_TENANT_ROLES}
     sent = 0
     for user in recipients:
-        if org_id and user.org_id != org_id and user.role not in platform_roles:
+        if org_id and user.org_id not in {org_id, party_org_id} \
+                and user.role not in platform_roles:
             continue
         db.add(Notification(user_id=user.id, severity=severity, category=category,
                             title=title[:255], body=body, entity_type=entity_type,
@@ -253,9 +302,13 @@ def acknowledge(db: Session, alert: Alert, actor_id: str) -> Alert:
     return alert
 
 
-def resolve(db: Session, alert: Alert, actor_id: str | None = None) -> Alert:
+def resolve(db: Session, alert: Alert, actor_id: str | None = None,
+            note: str | None = None) -> Alert:
     """Resolve an alert. When it was the last unresolved alert on an active incident, the
-    incident is resolved with it: nothing is left on it to respond to."""
+    incident is resolved with it: nothing is left on it to respond to.
+
+    `note` says why (a review decision, a passing re-check). It is written once, on the
+    ALERT_RESOLVED entry and as the reason on the incident's RESOLVED entry."""
     _require_alert_transition(alert, "RESOLVED")
     alert.status = "RESOLVED"
     alert.resolved_at = utcnow()
@@ -264,7 +317,8 @@ def resolve(db: Session, alert: Alert, actor_id: str | None = None) -> Alert:
         incident = db.get(Incident, alert.incident_id)
         if incident is not None and incident.status in ACTIVE_INCIDENT_STATES:
             add_incident_event(db, incident.id, "ALERT_RESOLVED",
-                               f"Alert resolved: {alert.title}", actor_id)
+                               f"Alert resolved: {alert.title}"
+                               + (f". {note}" if note else ""), actor_id)
             remaining = db.execute(select(Alert.id).where(
                 Alert.incident_id == incident.id,
                 Alert.status.in_(UNRESOLVED_ALERT_STATES)).limit(1)).first()
@@ -273,8 +327,8 @@ def resolve(db: Session, alert: Alert, actor_id: str | None = None) -> Alert:
                 incident.closed_at = utcnow()
                 db.flush()
                 add_incident_event(db, incident.id, "RESOLVED",
-                                   "Resolved automatically: every linked alert is resolved.",
-                                   actor_id)
+                                   "Resolved: every linked alert is resolved"
+                                   + (f" ({note})." if note else "."), actor_id)
     return alert
 
 
@@ -385,15 +439,47 @@ def alert_parties(db: Session, category: str, severity: str, title: str, *,
                   party_org_ids: Iterable[str | None], detail: str = "",
                   org_id: str | None = None, entity_type: str | None = None,
                   entity_id: str | None = None, reasons: Iterable[Any] = (),
-                  open_incident: bool | None = None) -> Alert:
+                  open_incident: bool | None = None, kind: str | None = None,
+                  party_org_id: str | None = None) -> Alert:
     """Raise an alert owned by `org_id` and notify every party organisation plus the
-    platform oversight roles for the category, each user once."""
+    platform oversight roles for the category, each user once.
+
+    With a `kind`, a repeat folds into the alert still unresolved and the parties are told
+    again only when it got worse, so re-running the same check no longer stacks identical
+    alerts and notifications. `party_org_id` (usually the batch custodian) can see and work
+    the alert as well as its owner (raise_alert)."""
+    previous = find_open_alert(db, category, entity_id, kind) \
+        if kind is not None and entity_id else None
+    previous_severity = previous.severity if previous is not None else ""
     alert = raise_alert(db, category, severity, title, detail=detail, org_id=org_id,
                         entity_type=entity_type, entity_id=entity_id, reasons=reasons,
-                        notify=False, open_incident=open_incident)
-    notify_parties(db, [org_id, *party_org_ids], category, title, detail, entity_type,
-                   entity_id, severity, include_oversight=True)
+                        notify=False, open_incident=open_incident, kind=kind,
+                        party_org_id=party_org_id)
+    if previous is None or \
+            SEVERITY_ORDER.get(severity, 0) > SEVERITY_ORDER.get(previous_severity, 0):
+        notify_parties(db, [org_id, *party_org_ids], category, title, detail, entity_type,
+                       entity_id, severity, include_oversight=True)
     return alert
+
+
+def resolve_alerts(db: Session, category: str, entity_id: str | None, *,
+                   kind: str | None = None, kind_prefix: str | None = None,
+                   actor_id: str | None = None, note: str | None = None) -> list[Alert]:
+    """Resolve the unresolved alerts of one category (and kind, or kind prefix) against one
+    record once a later result shows the condition has cleared: a batch verified after a
+    fraud alert, a compliant re-evaluation, a permitted release, a restored approval."""
+    if not entity_id:
+        return []
+    query = select(Alert).where(Alert.category == category, Alert.entity_id == entity_id,
+                                Alert.status.in_(UNRESOLVED_ALERT_STATES))
+    if kind is not None:
+        query = query.where(Alert.kind == kind)
+    if kind_prefix is not None:
+        query = query.where(Alert.kind.startswith(kind_prefix, autoescape=True))
+    alerts = list(db.execute(query.order_by(Alert.created_at.asc())).scalars())
+    for alert in alerts:
+        resolve(db, alert, actor_id, note=note)
+    return alerts
 
 
 def resolve_entity_alerts(db: Session, entity_type: str, entity_id: str, actor_id: str | None,
@@ -402,24 +488,12 @@ def resolve_entity_alerts(db: Session, entity_type: str, entity_id: str, actor_i
     record the resolution on any incident opened from them.
 
     The incident moves to RESOLVED when none of its alerts remain open; an analyst can still
-    reopen it from there (security_ops.INCIDENT_TRANSITIONS)."""
+    reopen it from there (security_ops.INCIDENT_TRANSITIONS). resolve() carries the note, so
+    the timeline gets a single RESOLVED entry; this used to add a second one repeating it."""
     alerts = list(db.execute(select(Alert).where(
         Alert.entity_type == entity_type, Alert.entity_id == entity_id,
-        Alert.status.in_(("OPEN", "ACKNOWLEDGED")))).scalars())
-    incidents: set[str] = set()
+        Alert.status.in_(UNRESOLVED_ALERT_STATES))).scalars())
     for alert in alerts:
-        resolve(db, alert)
-        if alert.incident_id:
-            incidents.add(alert.incident_id)
-    for incident_id in sorted(incidents):
-        add_incident_event(db, incident_id, "RESOLVED", note, actor_id)
-        incident = db.get(Incident, incident_id)
-        still_open = db.execute(select(Alert.id).where(
-            Alert.incident_id == incident_id,
-            Alert.status.in_(("OPEN", "ACKNOWLEDGED"))).limit(1)).first()
-        if incident is not None and still_open is None \
-                and incident.status in {"OPEN", "TRIAGED", "CONTAINED"}:
-            incident.status = "RESOLVED"
-            incident.closed_at = utcnow()
+        resolve(db, alert, actor_id, note=note)
     db.flush()
     return alerts

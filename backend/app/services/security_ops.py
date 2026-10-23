@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.errors import Conflict, ValidationFailed
@@ -21,6 +21,18 @@ SIGNAL_WEIGHTS = {
     "unfamiliar_scope": 0.20,
     "repeated_exports": 0.25,
     "cross_tenant_attempts": 0.45,
+    "permission_denials": 0.15,
+}
+
+# What each signal means, in the words an analyst reads on the alert.
+SIGNAL_LABELS = {
+    "volume_spike": "Unusually many requests in a short time",
+    "max_page_size_streak": "Repeated maximum-size page reads",
+    "off_hours_access": "Most activity outside working hours",
+    "unfamiliar_scope": "Access spread across an unusually wide range of data",
+    "repeated_exports": "Repeated exports or bulk reads",
+    "cross_tenant_attempts": "Attempts to open other organisations' records",
+    "permission_denials": "Many requests refused for lack of permission",
 }
 
 EXPORT_ROUTES = ("/export", "/audit", "/telemetry", "/reports")
@@ -28,6 +40,18 @@ BASELINE_WINDOW_HOURS = 24
 BURST_WINDOW_MINUTES = 10
 BURST_THRESHOLD = 120
 DETECTION_THRESHOLD = 0.5
+# A single probe of a foreign record is usually a stale or shared link; deliberate probing
+# repeats. Fewer attempts than this are not a signal.
+CROSS_TENANT_MIN_ATTEMPTS = 3
+PERMISSION_DENIAL_MIN = 20
+# Signals that indicate intent on their own. The rest describe ordinary heavy use as well: a
+# farm operator clicking through the app produces a burst of maximum-size lookups (the web app
+# loads its dropdowns with page_size=200) and the odd refused page. Without an intent signal,
+# an alert therefore needs a volume spike AND at least two harvesting signals.
+# max_page_size_streak and permission_denials still add to the score but never corroborate.
+INTENT_SIGNALS = frozenset({"cross_tenant_attempts"})
+HARVEST_SIGNALS = frozenset({"repeated_exports", "unfamiliar_scope", "off_hours_access"})
+CORROBORATING_HARVEST_SIGNALS = 2
 
 
 def record_access(db: Session, principal_id: str, org_id: str | None, route: str, method: str,
@@ -55,8 +79,9 @@ def evaluate_principal(db: Session, principal_id: str, org_id: str | None) -> di
     if not records:
         # Same response shape in every branch: a caller must never have to guess
         # which keys are present.
-        return {"score": 0.0, "level": "INFO", "signals": [], "requests_examined": 0,
-                "distinct_routes": 0, "threshold": DETECTION_THRESHOLD}
+        return {"score": 0.0, "level": "INFO", "flagged": False, "signals": [],
+                "requests_examined": 0, "distinct_routes": 0,
+                "threshold": DETECTION_THRESHOLD}
 
     signals: list[dict[str, Any]] = []
 
@@ -90,12 +115,20 @@ def evaluate_principal(db: Session, principal_id: str, org_id: str | None) -> di
                         "detail": f"{len(export_hits)} requests to export or bulk-read endpoints",
                         "value": len(export_hits)})
 
-    cross_tenant = [r for r in records if r.cross_tenant_attempt]
-    if cross_tenant:
+    # The recorder marks a 403 as well as a foreign-record probe. A 403 is a permission
+    # refusal inside the caller's own organisation (a page their role cannot use), not an
+    # attempt on another tenant's data, so it is counted separately and weighs far less.
+    cross_tenant = [r for r in records if r.cross_tenant_attempt and r.status_code != 403]
+    if len(cross_tenant) >= CROSS_TENANT_MIN_ATTEMPTS:
         signals.append({"signal": "cross_tenant_attempts",
-                        "detail": f"{len(cross_tenant)} attempt(s) to access another "
-                                  f"organisation's data",
+                        "detail": f"{len(cross_tenant)} attempts to open another "
+                                  f"organisation's records",
                         "value": len(cross_tenant)})
+    denied = [r for r in records if r.status_code == 403]
+    if len(denied) >= PERMISSION_DENIAL_MIN:
+        signals.append({"signal": "permission_denials",
+                        "detail": f"{len(denied)} requests refused for lack of permission",
+                        "value": len(denied)})
 
     if len(routes) > 25 and len(records) > 200:
         signals.append({"signal": "unfamiliar_scope",
@@ -107,10 +140,21 @@ def evaluate_principal(db: Session, principal_id: str, org_id: str | None) -> di
         weight = SIGNAL_WEIGHTS.get(signal["signal"], 0.1)
         score = score + weight - score * weight        # probabilistic OR
     score = round(min(1.0, score), 4)
-    level = "CRITICAL" if score >= 0.8 else "HIGH" if score >= DETECTION_THRESHOLD else \
-        "WARNING" if score >= 0.3 else "INFO"
+    names = {s["signal"] for s in signals}
+    corroborated = (bool(names & INTENT_SIGNALS)
+                    or ("volume_spike" in names
+                        and len(names & HARVEST_SIGNALS) >= CORROBORATING_HARVEST_SIGNALS))
+    flagged = score >= DETECTION_THRESHOLD and corroborated
+    if flagged:
+        level = "CRITICAL" if score >= 0.8 else "HIGH"
+    else:
+        # Heavy but uncorroborated use is shown as a warning on evaluation; it never opens
+        # an incident.
+        level = "WARNING" if score >= 0.3 else "INFO"
+    for signal in signals:
+        signal["label"] = SIGNAL_LABELS.get(signal["signal"], signal["signal"])
 
-    return {"score": score, "level": level, "signals": signals,
+    return {"score": score, "level": level, "flagged": flagged, "signals": signals,
             "requests_examined": len(records), "distinct_routes": len(routes),
             "threshold": DETECTION_THRESHOLD}
 
@@ -137,17 +181,34 @@ def sweep_data_theft(db: Session, hours: int = 24,
     findings: list[dict[str, Any]] = []
     for principal_id, org_id in principals:
         verdict = evaluate_principal(db, principal_id, org_id)
-        if verdict["score"] >= DETECTION_THRESHOLD:
+        if verdict["flagged"]:
             findings.append({"principal_id": principal_id, **verdict})
-            # Any unresolved alert counts: an acknowledged one is being looked at already.
-            if not notifications.has_open_alert(db, "DATA_THEFT", principal_id):
+            # Any unresolved alert of this kind counts: an acknowledged one is being looked at
+            # already. Matched on kind, so an open account-lockout alert (also DATA_THEFT on
+            # the same user) no longer hides an exfiltration finding.
+            if not notifications.has_open_alert(db, "DATA_THEFT", principal_id,
+                                                kind=EXFILTRATION_KIND):
                 notifications.raise_alert(
                     db, "DATA_THEFT", verdict["level"],
-                    f"Possible agricultural data exfiltration by principal {principal_id[:8]}",
+                    f"Possible data exfiltration by {_principal_label(db, principal_id)}",
                     detail="; ".join(s["detail"] for s in verdict["signals"][:3]),
                     org_id=org_id, entity_type="User", entity_id=principal_id,
-                    reasons=[s["signal"] for s in verdict["signals"]])
+                    reasons=[s["label"] for s in verdict["signals"]],
+                    kind=EXFILTRATION_KIND)
     return findings
+
+
+EXFILTRATION_KIND = "exfiltration"
+
+
+def _principal_label(db: Session, principal_id: str) -> str:
+    """ "Jane Doe (jane@farm.example)" for the alert title, rather than an id prefix."""
+    user = db.get(User, principal_id)
+    if user is None:
+        return f"an unknown account ({principal_id[:8]})"
+    if user.full_name and user.email:
+        return f"{user.full_name} ({user.email})"
+    return user.full_name or user.email or principal_id[:8]
 
 
 # --------------------------------------------------------------------------- #
@@ -235,8 +296,10 @@ def security_dashboard(db: Session, org_id: str | None) -> dict[str, Any]:
     incident_query = select(Incident)
     device_query = select(Device).where(Device.deleted_at.is_(None))
     if org_id:
-        alert_query = alert_query.where(Alert.org_id == org_id)
-        incident_query = incident_query.where(Incident.org_id == org_id)
+        alert_query = alert_query.where(or_(Alert.org_id == org_id,
+                                            Alert.custodian_org_id == org_id))
+        incident_query = incident_query.where(or_(Incident.org_id == org_id,
+                                                  Incident.custodian_org_id == org_id))
         device_query = device_query.where(Device.org_id == org_id)
 
     alerts = list(db.execute(alert_query).scalars())
@@ -245,14 +308,17 @@ def security_dashboard(db: Session, org_id: str | None) -> dict[str, Any]:
 
     by_severity: dict[str, int] = {}
     by_category: dict[str, int] = {}
+    # "Open" means unresolved: an acknowledged alert still needs attention, and the alert
+    # board, dedupe and incident sync all treat it so (notifications.UNRESOLVED_ALERT_STATES).
+    unresolved = notifications.UNRESOLVED_ALERT_STATES
     for alert in alerts:
-        if alert.status == "OPEN":
+        if alert.status in unresolved:
             by_severity[alert.severity] = by_severity.get(alert.severity, 0) + 1
             by_category[alert.category] = by_category.get(alert.category, 0) + 1
 
     return {
         "alerts_total": len(alerts),
-        "alerts_open": sum(1 for a in alerts if a.status == "OPEN"),
+        "alerts_open": sum(1 for a in alerts if a.status in unresolved),
         "open_by_severity": by_severity,
         "open_by_category": by_category,
         "incidents_open": sum(1 for i in incidents if i.status not in {"RESOLVED", "CLOSED"}),

@@ -13,7 +13,7 @@ from ..core.permissions import P, has_permission
 from ..models import Alert, Incident, User
 from ..repositories import get_or_404, paginate, visible
 from ..schemas import AlertOut, IncidentOut, IncidentUpdate, Page
-from ..services import notifications, security_ops as service
+from ..services import audit, notifications, security_ops as service
 
 router = APIRouter(prefix="/security", tags=["Security Operations"],
                    dependencies=[Depends(rate_limit)])
@@ -39,8 +39,67 @@ def list_alerts(db: DbSession, paging: PagingDep,
     if incident_id:
         query = query.where(Alert.incident_id == incident_id)
     rows, total = paginate(db, query, paging.page, paging.page_size)
-    return Page[AlertOut](items=[AlertOut.model_validate(r) for r in rows], total=total,
+    labels = _source_labels(db, rows)
+    return Page[AlertOut](items=[_alert_out(r, labels) for r in rows], total=total,
                           page=paging.page, page_size=paging.page_size)
+
+
+def _alert_out(alert: Alert, labels: dict[tuple[str, str], str]) -> AlertOut:
+    out = AlertOut.model_validate(alert)
+    out.source_label = labels.get((alert.entity_type or "", alert.entity_id or ""))
+    return out
+
+
+# How the record an alert is about is named on screen ("Field North 40", "Batch B-1024")
+# instead of a type and an id prefix. Only rows the caller can already see are listed, and
+# naming the record they are about discloses nothing the alert's own title does not.
+def _source_labels(db, alerts: list[Alert]) -> dict[tuple[str, str], str]:
+    from ..models import (Batch, Certification, CrisprAssessment, Device, Farm, Field,
+                          GMOApproval, GMOEvent, SequenceScreening, Shipment)
+
+    namers = {
+        "Field": (Field, lambda r: r.name),
+        "Farm": (Farm, lambda r: r.name),
+        "Batch": (Batch, lambda r: r.batch_code),
+        "Shipment": (Shipment, lambda r: r.sscc),
+        "Certification": (Certification, lambda r: r.cert_code),
+        "SequenceScreening": (SequenceScreening, lambda r: r.name),
+        "CrisprAssessment": (CrisprAssessment, lambda r: f"{r.target_gene} in {r.organism}"),
+        "GMOEvent": (GMOEvent, lambda r: r.event_code),
+        "Device": (Device, lambda r: (f"{r.device_type.replace('_', ' ').title()} "
+                                      f"{r.serial_number or r.id[:8]}")),
+        "User": (User, lambda r: r.full_name or r.email),
+    }
+    wanted: dict[str, set[str]] = {}
+    for alert in alerts:
+        if alert.entity_type and alert.entity_id:
+            wanted.setdefault(alert.entity_type, set()).add(alert.entity_id)
+    labels: dict[tuple[str, str], str] = {}
+    for entity_type, ids in wanted.items():
+        if entity_type == "GMOApproval":
+            for approval in db.execute(select(GMOApproval).where(
+                    GMOApproval.id.in_(ids))).scalars():
+                event = db.get(GMOEvent, approval.gmo_event_id)
+                labels[(entity_type, approval.id)] = (
+                    f"{event.event_code if event else 'event'} in {approval.jurisdiction}")
+            continue
+        if entity_type not in namers:
+            continue
+        model, name = namers[entity_type]
+        for row in db.execute(select(model).where(model.id.in_(ids))).scalars():
+            try:
+                labels[(entity_type, row.id)] = str(name(row))[:120]
+            except Exception:                                   # noqa: BLE001
+                continue                       # a label is a nicety; never fail the list
+    return labels
+
+
+def _audit_alert(db, principal, alert: Alert, action: str, previous: str) -> None:
+    audit.record(db, f"alert.{action}", actor_id=principal.id, actor_role=principal.role,
+                 org_id=alert.org_id, entity_type="Alert", entity_id=alert.id,
+                 detail={"category": alert.category, "kind": alert.kind,
+                         "from": previous, "to": alert.status,
+                         "incident_id": alert.incident_id})
 
 
 @router.post("/alerts/{alert_id}/acknowledge", response_model=AlertOut,
@@ -48,18 +107,22 @@ def list_alerts(db: DbSession, paging: PagingDep,
 def acknowledge(alert_id: str, db: DbSession,
                 principal: Annotated[object, Depends(require_permission(P.ALERT_WRITE))]) -> AlertOut:
     alert = get_or_404(db, Alert, alert_id, principal.role, principal.org_id, name="Alert")
+    previous = alert.status
     notifications.acknowledge(db, alert, principal.id)
+    _audit_alert(db, principal, alert, "acknowledge", previous)
     db.commit()
-    return AlertOut.model_validate(alert)
+    return _alert_out(alert, _source_labels(db, [alert]))
 
 
 @router.post("/alerts/{alert_id}/resolve", response_model=AlertOut, summary="Resolve an alert")
 def resolve(alert_id: str, db: DbSession,
             principal: Annotated[object, Depends(require_permission(P.ALERT_WRITE))]) -> AlertOut:
     alert = get_or_404(db, Alert, alert_id, principal.role, principal.org_id, name="Alert")
+    previous = alert.status
     notifications.resolve(db, alert, principal.id)
+    _audit_alert(db, principal, alert, "resolve", previous)
     db.commit()
-    return AlertOut.model_validate(alert)
+    return _alert_out(alert, _source_labels(db, [alert]))
 
 
 @router.get("/incidents", response_model=Page[IncidentOut], summary="List incidents")
@@ -95,8 +158,12 @@ def get_incident(incident_id: str, db: DbSession,
             "can_update": _may_update_incident(principal, incident),
             "alerts": [AlertOut.model_validate(a).model_dump()
                        for a in notifications.linked_alerts(db, incident.id)],
+            # An entry without an actor was written by the platform itself (an alert opening
+            # or joining the incident, a sweep, a resolved check), and is labelled so.
             "timeline": [{"action": e.action, "detail": e.detail, "actor_id": e.actor_id,
                           "actor_name": people.get(e.actor_id),
+                          "actor_label": (people.get(e.actor_id) or "a user") if e.actor_id
+                          else "system",
                           "created_at": e.created_at} for e in events]}
 
 

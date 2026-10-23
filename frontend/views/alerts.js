@@ -29,6 +29,17 @@ function actionButtons(row, reload) {
   return el('div', { class: 'row' }, buttons);
 }
 
+/* The reasons worth a column of their own: those the detail line does not already say.
+ * A biosecurity or DURC alert's detail is its first reasons joined, so repeating them under
+ * Reasons only doubled the text. */
+function extraReasons(row) {
+  const detail = String(row.detail || '').toLowerCase();
+  const reasons = (row.reasons || [])
+    .map((r) => (typeof r === 'string' ? r : r.rule || r.detail || ''))
+    .filter((r) => r && !detail.includes(String(r).toLowerCase()));
+  return humanizeText(reasons.slice(0, 2).join('; '));
+}
+
 function occurrenceHint(row) {
   if (!row.occurrences || row.occurrences < 2) return null;
   return el('div', { class: 'hint', text: `Seen ${row.occurrences} times, last `
@@ -58,10 +69,10 @@ export const render = listView({
         row.detail ? el('div', { class: 'hint', text: humanizeText(row.detail) }) : null,
       ]) },
     { label: 'Reasons', render: (row) => el('span', { class: 'hint',
-        text: humanizeText((row.reasons || []).slice(0, 2)
-          .map((r) => (typeof r === 'string' ? r : r.rule || '')).join('; ')) }) },
+        text: extraReasons(row) || '—' }) },
     { label: 'Source', render: (row) => el('div', {}, [
-        entityLink(row.entity_type, row.entity_id) || el('span', { class: 'hint', text: '—' }),
+        entityLink(row.entity_type, row.entity_id, row.source_label)
+          || el('span', { class: 'hint', text: '—' }),
         row.incident_id ? el('div', {}, [incidentLink(row.incident_id)]) : null,
       ]) },
     { label: 'Status', render: (row) => badge(row.status) },

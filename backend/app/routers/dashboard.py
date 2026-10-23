@@ -134,8 +134,10 @@ def dashboard(db: DbSession, principal: CurrentUser) -> dict:
         }
     if has_permission(principal.role, P.ALERT_READ):
         tiles["alerts"] = {
-            "open": _count(db, Alert, org_id, Alert.status == "OPEN"),
-            "critical_open": _count(db, Alert, org_id, Alert.status == "OPEN",
+            # Unresolved (OPEN or ACKNOWLEDGED): an acknowledged alert still needs attention.
+            "open": _count(db, Alert, org_id, Alert.status.in_(("OPEN", "ACKNOWLEDGED"))),
+            "critical_open": _count(db, Alert, org_id,
+                                    Alert.status.in_(("OPEN", "ACKNOWLEDGED")),
                                     Alert.severity == "CRITICAL"),
         }
     if has_permission(principal.role, P.BIOSECURITY_READ):
