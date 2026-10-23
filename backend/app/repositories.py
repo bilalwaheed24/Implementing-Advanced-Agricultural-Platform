@@ -30,7 +30,13 @@ def scoped(model: type[T], org_id: str | None, *, include_deleted: bool = False)
     """Base SELECT for a model, filtered to one organisation and excluding soft-deleted rows."""
     query = select(model)
     if org_id is not None and _has_column(model, "org_id"):
-        if _has_column(model, "custodian_org_id"):
+        party_columns = getattr(model, "__party_columns__", None)
+        if party_columns:
+            # A record with more than one party (a shipment's sender and receiver) is
+            # visible to each of them.
+            query = query.where(or_(*(getattr(model, column) == org_id
+                                      for column in party_columns)))
+        elif _has_column(model, "custodian_org_id"):
             # A batch handed over in a custody transfer is visible to its current custodian
             # as well as to the organisation that created it.
             query = query.where(or_(getattr(model, "org_id") == org_id,

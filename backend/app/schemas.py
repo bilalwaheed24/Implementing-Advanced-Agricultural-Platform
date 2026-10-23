@@ -793,12 +793,22 @@ class ShipmentCreate(BaseModel):
     departed_at: datetime
     arrived_at: datetime | None = None
     cold_chain_device_id: str | None = None
+    # The organisation receiving the batch. Custody moves to it when the shipment is created,
+    # and it marks the shipment arrived. Omitted for a move inside the organisation.
+    to_org_id: str | None = None
+
+
+class ShipmentArrive(BaseModel):
+    arrived_at: datetime
+    location_name: str | None = Field(default=None, max_length=200)
 
 
 class ShipmentOut(ORMModel):
     id: str
     sscc: str
     batch_id: str
+    org_id: str
+    to_org_id: str | None = None
     carrier: str
     origin_name: str
     destination_name: str
@@ -808,6 +818,14 @@ class ShipmentOut(ORMModel):
     temp_min_c: float | None = None
     temp_max_c: float | None = None
     cold_chain_device_id: str | None = None
+    # Resolved for display by the shipment endpoints (not columns on the row).
+    batch_code: str | None = None
+    product_name: str | None = None
+    storage_temp_min_c: float | None = None
+    storage_temp_max_c: float | None = None
+    # True when the recorded temperature range left the product's storage range; None when
+    # there is no telemetry or the product declares no range.
+    excursion: bool | None = None
 
 
 class CertificationCreate(BaseModel):

@@ -20,7 +20,7 @@ from ..core.security import (canonical_json, content_hash, decrypt_at_rest, encr
                              ensure_aware as _aware, nonce_cache, sha256_hex,
                              timestamp_within_window, utcnow, verify_device_signature)
 from ..models import AIAnalysis, Device, SatelliteScene, Telemetry
-from . import ai_client, audit, devices as device_service, notifications
+from . import ai_client, audit, cold_chain, devices as device_service, notifications
 
 
 
@@ -77,17 +77,23 @@ def verify_and_ingest(db: Session, device_id: str, timestamp_header: str, nonce:
         security_event("telemetry quarantined: failed range validation", device_id=device_id,
                        problems=problems[:5])
 
-    # 6. persist, encrypted at rest
+    # 6. persist, encrypted at rest. The shipment comes from the device's cold-chain binding;
+    #    a shipment id the device sends is only honoured when it is bound to this device.
+    shipment = cold_chain.bind_shipment(db, device, shipment_id, recorded_at)
     payload = canonical_json(readings)
     record = Telemetry(
         device_id=device.id, org_id=device.org_id, field_id=device.field_id,
-        shipment_id=shipment_id, recorded_at=_aware(recorded_at), nonce=nonce,
+        shipment_id=shipment.id if shipment else None, recorded_at=_aware(recorded_at),
+        nonce=nonce,
         payload_enc="", payload_hash=sha256_hex(payload),
         summary=_summary(readings), quality=quality,
         backfilled=allow_backfill)
     db.add(record)
     db.flush()
     record.payload_enc = encrypt_at_rest(payload, record.id)
+    if shipment is not None and quality == "OK":
+        # Running temperature range and the storage-range excursion alert (FR-D1).
+        cold_chain.record_reading(db, shipment, record)
 
     if sequence is not None:
         device.last_sequence = sequence

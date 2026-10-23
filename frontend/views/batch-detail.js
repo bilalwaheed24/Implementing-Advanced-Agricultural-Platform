@@ -1,7 +1,9 @@
 import { session, el, api, badge, fmtDate, fmtNum, table, empty, toast, can, reasonList,
-         rowHeader, titleCase, jurisdictionLabel, refreshView } from '/static/assets/core.js';
+         rowHeader, titleCase, jurisdictionLabel, refreshView, confirmDialog }
+  from '/static/assets/core.js';
 import { createPanel, choiceSelect, dateInput, todayIso, atNoon, remoteSelect }
   from '/static/views/formkit.js';
+import { shipmentForm, arriveControl, coldChainCell } from '/static/views/shipments.js';
 
 /* EPCIS business step -> the batch state it moves the batch into. Mirrors
  * `supplychain.BIZ_STEP_TO_STATE` on the server. */
@@ -61,22 +63,16 @@ function recordEventPanel(batch, reload) {
     value: String(batch.quantity) });
   const unit = el('input', { maxlength: '12', value: batch.unit });
   const occurred = dateInput(todayIso(), { required: 'required' });
-  // Shipping the batch to another organisation transfers custody to it: the receiver then
-  // sees the batch and records its receipt; this organisation keeps read access only.
-  const handOver = remoteSelect({
-    endpoint: '/admin/organizations/directory', required: false,
-    filter: (org) => org.id !== session.read()?.org_id && org.org_type !== 'REGULATOR',
-    label: (org) => `${org.name} (${titleCase(org.org_type)})`,
-    placeholder: 'Keep custody (no hand-over)',
-    emptyLabel: 'No trading partner registered',
-  });
+  // Handing the batch to another organisation is done with a shipment (Shipments card): the
+  // shipment records the shipping event and moves custody in one step, so the two cannot
+  // fall out of order.
 
   return createPanel({
     toggleLabel: 'Record a custody event',
     submitLabel: 'Record event',
     hint: `This batch is ${titleCase(batch.state)}. Only the steps it can legally move to are `
       + 'listed. Quantity may fall but never rise — the server enforces conservation. To pass '
-      + 'the batch on, choose Shipping and the organisation receiving it.',
+      + 'the batch to another organisation, create a shipment in the Shipments card.',
     controls: [
       ['Business step', step],
       ['Disposition', disposition],
@@ -85,7 +81,6 @@ function recordEventPanel(batch, reload) {
       ['Quantity', quantity],
       ['Unit', unit],
       ['Occurred on', occurred],
-      ['Hand over to', handOver],
     ],
     submit: async () => {
       await api('/supply-chain/events', { method: 'POST', body: {
@@ -95,12 +90,8 @@ function recordEventPanel(batch, reload) {
         quantity: quantity.value === '' ? null : Number(quantity.value),
         unit: unit.value || null,
         occurred_at: atNoon(occurred.value),
-        to_org_id: handOver.value || null,
       } });
-      const receiver = handOver.value ? handOver.selectedOptions[0]?.text : null;
-      return receiver
-        ? `Batch handed over to ${receiver} — they now hold it and have been notified`
-        : `Event recorded — batch is now ${titleCase(STEP_TO_STATE[step.value])}`;
+      return `Event recorded — batch is now ${titleCase(STEP_TO_STATE[step.value])}`;
     },
     onDone: reload,
   });
@@ -132,6 +123,56 @@ function claimPanel(batch, claimed, hasGmo, reload) {
     },
     onDone: reload,
   });
+}
+
+/* The owner answers for a batch after handing it over, so both the owner and the current
+ * holder may recall it. The server notifies the whole lineage and flags derived batches. */
+function recallControl(batch) {
+  if (!(BATCH_TRANSITIONS[batch.state] || []).includes('RECALLED')) return null;
+  const button = el('button', { class: 'danger', text: 'Recall this batch', onClick: async () => {
+    if (!confirmDialog(`Recall batch ${batch.batch_code}? This is final. Every organisation in `
+      + 'its lineage is notified and batches made from it are flagged.')) return;
+    button.disabled = true;
+    try {
+      await api('/supply-chain/events', { method: 'POST', body: {
+        batch_id: batch.id, biz_step: 'recalling', disposition: 'recalled',
+        occurred_at: new Date().toISOString() } });
+      toast(`Batch ${batch.batch_code} recalled — its lineage has been notified`, 'ok');
+      refreshView();
+    } catch (error) {
+      toast(error.message, 'error');
+      button.disabled = false;
+    }
+  } });
+  return el('div', { class: 'u-mt-12' }, [
+    el('p', { class: 'hint', text: 'Recalling notifies the owner, the holder and every '
+      + 'organisation with a parent or derived batch, and marks derived batches suspect.' }),
+    button,
+  ]);
+}
+
+/* Every shipment of this batch this organisation is party to, with the receiver's action. */
+function shipmentsCard(batch, shipments, holdsIt) {
+  const rows = shipments.length
+    ? table([
+      { label: 'SSCC', render: (row) => el('a', { href: '#/shipments', class: 'mono',
+        text: row.sscc }) },
+      { label: 'Route', render: (row) => `${row.origin_name} → ${row.destination_name}` },
+      { label: 'Departed', render: (row) => fmtDate(row.departed_at) },
+      { label: 'Status', render: (row) => el('div', {}, [badge(row.status),
+        row.arrived_at ? el('div', { class: 'hint', text: fmtDate(row.arrived_at) })
+          : arriveControl(row, () => refreshView())]) },
+      { label: 'Cold chain', render: (row) => coldChainCell(row) },
+    ], shipments)
+    : empty('No shipments', 'This batch has not been shipped yet.');
+  const canShip = holdsIt && can('supply:write')
+    && (BATCH_TRANSITIONS[batch.state] || []).includes('IN_TRANSIT');
+  return el('div', { class: 'card' }, [
+    el('h2', { text: 'Shipments' }),
+    rows,
+    canShip ? shipmentForm({ batch, reload: () => refreshView(),
+      toggleLabel: 'Ship or hand over this batch' }) : null,
+  ]);
 }
 
 /* A printable product label: the QR a consumer scans, with the code typed underneath. */
@@ -172,9 +213,11 @@ function gmoCell(gmo) {
 
 export async function render({ id }) {
   if (!id) return empty('No batch selected', 'Choose a batch from the list.');
-  const [batch, custody] = await Promise.all([
+  const [batch, custody, shipments] = await Promise.all([
     api(`/supply-chain/batches/${id}`),
     api(`/supply-chain/batches/${id}/custody`),
+    api(`/supply-chain/shipments?batch_id=${encodeURIComponent(id)}&page_size=50`)
+      .then((page) => page.items || []).catch(() => []),
   ]);
   const context = custody.context || {};
   const orgName = (orgId) => (context.organisations || {})[orgId] || 'another organisation';
@@ -284,6 +327,7 @@ export async function render({ id }) {
               el('td', { class: 'mono', text: batch.tx_id ? batch.tx_id.slice(0, 24) + '…' : '—' })]),
           ]),
         ]),
+        shipmentsCard(batch, shipments, holdsIt),
         labelCard(batch, context),
         el('div', { class: 'card' }, [
           el('h2', { text: 'Certifications' }),
@@ -299,7 +343,8 @@ export async function render({ id }) {
             ? recordEventPanel(batch, () => refreshView())
             : el('p', { class: 'hint', text: `${context.custodian?.name || 'Another organisation'} `
               + 'holds this batch now, so only they can record its next step. You keep read '
-              + 'access to its history.' }),
+              + 'access to its history, and you can still recall it.' }),
+          isParty ? recallControl(batch) : null,
         ]) : null,
         can('supply:verify') ? el('div', { class: 'card' }, [
           el('h2', { text: 'Supply-chain integrity and fraud scoring' }),
