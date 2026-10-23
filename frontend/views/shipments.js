@@ -185,7 +185,8 @@ export const render = listView({
     ]) },
     { label: 'From → to', render: (row) => el('div', {}, [
       orgName(row.org_id), ' → ',
-      row.to_org_id ? orgName(row.to_org_id) : el('span', { class: 'hint', text: 'internal' }),
+      row.to_org_id ? orgName(row.to_org_id)
+        : el('span', { class: 'hint', text: 'Internal move (no hand-over)' }),
     ]) },
     { label: 'Carrier', key: 'carrier' },
     { label: 'Route', render: (row) => `${row.origin_name} → ${row.destination_name}` },

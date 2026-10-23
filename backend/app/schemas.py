@@ -962,6 +962,9 @@ class ComplianceReportOut(ORMModel):
     tx_id: str | None = None
     anchor_status: str
     created_at: datetime
+    # False when the subject is a batch the caller cannot open (e.g. it has since been handed
+    # on), so the screen shows its code instead of a link that would 404.
+    subject_readable: bool | None = None
 
 
 class EIARequest(BaseModel):

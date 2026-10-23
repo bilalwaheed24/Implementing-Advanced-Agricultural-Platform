@@ -64,7 +64,13 @@ def _role(value: str) -> Role | None:
 
 def _supply_tiles(db, org_id: str | None) -> dict:
     held = [] if org_id is None else [Batch.custodian_org_id == org_id]
-    shipped = [] if org_id is None else [Shipment.org_id == org_id]
+    # Both ends of a shipment work with it: the sender dispatched it, and the receiver must
+    # mark it arrived. The receiver of an internal move (no to_org_id) is the sender itself.
+    shipped = [] if org_id is None else [or_(Shipment.org_id == org_id,
+                                             Shipment.to_org_id == org_id)]
+    receiving = [] if org_id is None else [or_(
+        Shipment.to_org_id == org_id,
+        (Shipment.to_org_id.is_(None)) & (Shipment.org_id == org_id))]
     # A hand-over is booked in when the receiver records a receiving event. Until then the
     # batch sits with the receiver but its arrival has not been confirmed.
     received = select(SupplyChainEvent.id).where(
@@ -79,6 +85,9 @@ def _supply_tiles(db, org_id: str | None) -> dict:
         "integrity_suspect": _count(db, Batch, org_id, Batch.integrity_status == "SUSPECT"),
         "shipments_in_transit": _scalar(db, select(func.count()).select_from(Shipment).where(
             Shipment.status == "IN_TRANSIT", *shipped)),
+        # In transit to the caller, who is the one to mark them arrived.
+        "awaiting_arrival": _scalar(db, select(func.count()).select_from(Shipment).where(
+            Shipment.status == "IN_TRANSIT", *receiving)),
         "pending_handovers": _scalar(db, select(func.count()).select_from(Batch).where(
             Batch.custodian_org_id != Batch.org_id, ~received.exists(), *held)),
     }

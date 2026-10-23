@@ -30,8 +30,13 @@ def _has_column(model: type, name: str) -> bool:
     return hasattr(model, name)
 
 
-def scoped(model: type[T], org_id: str | None, *, include_deleted: bool = False) -> Select:
-    """Base SELECT for a model, filtered to one organisation and excluding soft-deleted rows."""
+def scoped(model: type[T], org_id: str | None, *, include_deleted: bool = False,
+           also: Any = None) -> Select:
+    """Base SELECT for a model, filtered to one organisation and excluding soft-deleted rows.
+
+    `also` is an extra SQL condition under which a row is visible to the organisation besides
+    the party columns, e.g. a batch carrying a certificate the organisation issued.
+    """
     query = select(model)
     if org_id is not None and _has_column(model, "org_id"):
         # A batch handed over in a custody transfer is visible to its current custodian as well
@@ -41,6 +46,8 @@ def scoped(model: type[T], org_id: str | None, *, include_deleted: bool = False)
         columns = getattr(model, "__party_columns__", None) or PARTY_COLUMNS
         parties = [getattr(model, column) == org_id for column in columns
                    if _has_column(model, column)]
+        if also is not None:
+            parties.append(also)
         query = query.where(or_(*parties)) if len(parties) > 1 else query.where(parties[0])
     if not include_deleted and _has_column(model, "deleted_at"):
         query = query.where(getattr(model, "deleted_at").is_(None))
@@ -61,25 +68,25 @@ def unscoped(model: type[T], role: str, *, include_deleted: bool = False) -> Sel
 
 
 def visible(model: type[T], role: str, org_id: str | None, *,
-            include_deleted: bool = False) -> Select:
-    """Scoped for ordinary roles, unscoped for cross-tenant roles."""
+            include_deleted: bool = False, also: Any = None) -> Select:
+    """Scoped for ordinary roles, unscoped for cross-tenant roles (`also`: see `scoped`)."""
     try:
         cross = Role(role) in CROSS_TENANT_ROLES
     except ValueError:
         cross = False
     if cross:
         return unscoped(model, role, include_deleted=include_deleted)
-    return scoped(model, org_id, include_deleted=include_deleted)
+    return scoped(model, org_id, include_deleted=include_deleted, also=also)
 
 
 def get_or_404(db: Session, model: type[T], entity_id: str, role: str, org_id: str | None,
-               *, name: str | None = None) -> T:
+               *, name: str | None = None, also: Any = None) -> T:
     """Fetch by id within the caller's visibility.
 
     Returns 404 rather than 403 when a row exists but belongs to another tenant:
     revealing existence would itself leak tenancy information (Development-rules.md §13).
     """
-    query = visible(model, role, org_id).where(getattr(model, "id") == entity_id)
+    query = visible(model, role, org_id, also=also).where(getattr(model, "id") == entity_id)
     entity = db.execute(query).scalar_one_or_none()
     if entity is None:
         # The caller still gets a plain 404, but if the row exists in another tenant this
