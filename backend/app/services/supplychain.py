@@ -537,12 +537,15 @@ def awaiting_booking(org_id: str | None) -> list[Any]:
     handed_at = (select(func.max(handover.occurred_at))
                  .where(handover.batch_id == Batch.id,
                         handover.to_org_id == Batch.custodian_org_id)
+                 # Tied to the outer batch explicitly: nested inside `booked`, it was otherwise
+                 # given its own FROM batches and took the latest hand-over on the platform.
+                 .correlate(Batch)
                  .scalar_subquery())
     booked = select(SupplyChainEvent.id).where(
         SupplyChainEvent.batch_id == Batch.id,
         SupplyChainEvent.org_id == Batch.custodian_org_id,
         SupplyChainEvent.biz_step.in_(BOOKING_STEPS),
-        or_(handed_at.is_(None), SupplyChainEvent.occurred_at >= handed_at))
+        or_(handed_at.is_(None), SupplyChainEvent.occurred_at >= handed_at)).correlate(Batch)
     conditions = [Batch.custodian_org_id != Batch.org_id, Batch.state != "IN_TRANSIT",
                   ~booked.exists()]
     if org_id is not None:

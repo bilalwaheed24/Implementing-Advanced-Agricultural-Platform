@@ -130,6 +130,33 @@ class TestHandoverCounts:
         assert after["pending_handovers"] == before["pending_handovers"]
         assert farm_batch["id"] not in _awaiting_receipt(client, auth)
 
+    def test_an_unrelated_handover_does_not_reopen_a_booked_batch(self, client, auth, orgs,
+                                                                 farm_batch, chilled_product,
+                                                                 second_farm_org):
+        """The booking rule is per batch: a later hand-over of some other batch, anywhere on
+        the platform, must not put an already booked-in batch back on the list."""
+        shipment = _ship(client, auth, farm_batch["id"], to_org_id=orgs["SUPPLY"].id,
+                         departed_at=iso(now() - timedelta(hours=3))).json()
+        arrived = client.post(f"{API}/supply-chain/shipments/{shipment['id']}/arrive",
+                              headers=auth("SUPPLY_CHAIN_OPERATOR"),
+                              json={"arrived_at": iso(now() - timedelta(hours=2))})
+        assert arrived.status_code == 200, arrived.text
+        booked_tiles = _supply_tiles(client, auth)
+        assert farm_batch["id"] not in _awaiting_receipt(client, auth)
+
+        other = client.post(f"{API}/supply-chain/batches", headers=auth("FARM_OPERATOR"), json={
+            "batch_code": unique("SHB"), "product_id": chilled_product["id"],
+            "quantity": 500.0, "unit": "kg", "origin_region": "Iowa", "origin_country": "US",
+            "harvested_at": iso(now() - timedelta(days=1))}).json()
+        # Handed over after the first batch was booked in: with the bug, its hand-over time
+        # was taken as every batch's, so the first batch looked unbooked again.
+        assert _ship(client, auth, other["id"], to_org_id=second_farm_org.id,
+                     departed_at=iso(now() - timedelta(hours=1))).status_code == 201
+
+        assert farm_batch["id"] not in _awaiting_receipt(client, auth)
+        assert _supply_tiles(client, auth)["pending_handovers"] == \
+            booked_tiles["pending_handovers"]
+
     def test_storing_instead_of_receiving_closes_the_shipment(self, client, auth, db, users,
                                                               orgs, farm_batch):
         shipment = _ship(client, auth, farm_batch["id"], to_org_id=orgs["SUPPLY"].id).json()
