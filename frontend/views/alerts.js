@@ -1,5 +1,5 @@
 import { el, api, badge, fmtDate, humanizeText, titleCase, toast,
-         can } from '/static/assets/core.js';
+         can, role } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { entityLink, incidentLink } from '/static/views/entity-links.js';
 
@@ -11,12 +11,20 @@ async function alertAction(row, action, done, reload) {
   } catch (error) { toast(error.message, 'error'); }
 }
 
+/* Mirrors core/permissions.py: data-theft and ledger alerts can be acknowledged or resolved
+ * only by security oversight, so nobody clears an alert raised about themselves. */
+const OVERSIGHT_CATEGORIES = new Set(['DATA_THEFT', 'LEDGER']);
+const OVERSIGHT_ROLES = new Set(['ADMIN', 'SECURITY_ANALYST']);
+
 function actionButtons(row, reload) {
   // Mirrors the server's alert lifecycle (notifications.ALERT_TRANSITIONS): an OPEN alert
   // may be acknowledged or resolved, an ACKNOWLEDGED one may still be resolved, and a
   // RESOLVED one is final. Only a principal holding alert:write is offered either.
   if (!can('alert:write') || row.status === 'RESOLVED') {
     return el('span', { class: 'hint', text: '—' });
+  }
+  if (OVERSIGHT_CATEGORIES.has(row.category) && !OVERSIGHT_ROLES.has(role())) {
+    return el('span', { class: 'hint', text: 'Handled by security analysts' });
   }
   const buttons = [];
   if (row.status === 'OPEN') {
