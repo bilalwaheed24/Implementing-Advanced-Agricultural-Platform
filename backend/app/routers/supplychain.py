@@ -14,7 +14,7 @@ from ..models import (Batch, Certification, CertificationLink, FraudAssessment, 
 from ..repositories import get_or_404, paginate, visible
 from ..schemas import (BatchCreate, BatchOut, CertificationCreate, CertificationLinkCreate,
                        CertificationOut, Page, ProductCreate, ProductOut, RevokeRequest,
-                       ShipmentCreate, ShipmentOut, SupplyChainEventCreate, SupplyChainEventOut,
+                       ShipmentArrive, ShipmentCreate, ShipmentOut, SupplyChainEventCreate, SupplyChainEventOut,
                        VerificationResult)
 from ..services import supplychain as service
 
@@ -113,7 +113,11 @@ def record_event(payload: SupplyChainEventCreate, db: DbSession,
                  ) -> SupplyChainEventOut:
     batch = get_or_404(db, Batch, payload.batch_id, principal.role, principal.org_id,
                        name="Batch")
-    if not principal.is_cross_tenant and batch.custodian_org_id != principal.org_id:
+    # A recall is the one step the producer may record after a hand-over: it answers for
+    # the product wherever it now is.
+    recalling_owner = payload.biz_step == "recalling" and batch.org_id == principal.org_id
+    if (not principal.is_cross_tenant and batch.custodian_org_id != principal.org_id
+            and not recalling_owner):
         # The producer keeps read access after a hand-over, but only the organisation that
         # physically holds the batch can record what happens to it next.
         raise PermissionDenied("Only the organisation currently holding this batch may record "
@@ -145,34 +149,58 @@ def list_events(db: DbSession, paging: PagingDep,
 def create_shipment(payload: ShipmentCreate, db: DbSession,
                     principal: Annotated[object, Depends(require_permission(P.SUPPLY_WRITE))]
                     ) -> ShipmentOut:
+    """Records the batch's shipping event too, and with `to_org_id` hands the batch over."""
     shipment = service.create_shipment(db, principal.org_id, principal.id, principal.role,
                                        **payload.model_dump())
     db.commit()
-    return ShipmentOut.model_validate(shipment)
+    return ShipmentOut(**service.shipment_views(db, [shipment])[0])
 
 
 @router.get("/shipments", response_model=Page[ShipmentOut], summary="List shipments")
 def list_shipments(db: DbSession, paging: PagingDep,
-                   principal: Annotated[object, Depends(require_permission(P.SUPPLY_READ))]
-                   ) -> Page[ShipmentOut]:
+                   principal: Annotated[object, Depends(require_permission(P.SUPPLY_READ))],
+                   batch_id: str | None = Query(default=None),
+                   status: str | None = Query(default=None)) -> Page[ShipmentOut]:
+    # Visible to the sender and, for a hand-over, the receiver (Shipment.__party_columns__).
     query = visible(Shipment, principal.role, principal.org_id).order_by(
         Shipment.departed_at.desc())
+    if batch_id:
+        query = query.where(Shipment.batch_id == batch_id)
+    if status:
+        query = query.where(Shipment.status == status.upper())
     rows, total = paginate(db, query, paging.page, paging.page_size)
-    return Page[ShipmentOut](items=[ShipmentOut.model_validate(r) for r in rows], total=total,
-                             page=paging.page, page_size=paging.page_size)
+    return Page[ShipmentOut](items=[ShipmentOut(**v) for v in service.shipment_views(db, rows)],
+                             total=total, page=paging.page, page_size=paging.page_size)
+
+
+@router.post("/shipments/{shipment_id}/arrive", response_model=ShipmentOut,
+             summary="Mark a shipment arrived (receiver)")
+def arrive_shipment(shipment_id: str, payload: ShipmentArrive, db: DbSession,
+                    principal: Annotated[object, Depends(require_permission(P.SUPPLY_WRITE))]
+                    ) -> ShipmentOut:
+    """Sets the shipment DELIVERED and records the batch's `receiving` event."""
+    shipment = get_or_404(db, Shipment, shipment_id, principal.role, principal.org_id,
+                          name="Shipment")
+    service.arrive_shipment(db, shipment, principal.org_id, principal.id, principal.role,
+                            payload.arrived_at, payload.location_name)
+    db.commit()
+    return ShipmentOut(**service.shipment_views(db, [shipment])[0])
 
 
 @router.get("/shipments/{shipment_id}/cold-chain", summary="Cold-chain evidence for a shipment")
 def cold_chain(shipment_id: str, db: DbSession,
                principal: Annotated[object, Depends(require_permission(P.SUPPLY_READ))]) -> dict:
+    from ..services import cold_chain as cold_chain_service
     from ..services import telemetry as telemetry_service
 
     shipment = get_or_404(db, Shipment, shipment_id, principal.role, principal.org_id,
                           name="Shipment")
     service.refresh_shipment_temperatures(db, shipment)
     db.commit()
+    summary = telemetry_service.shipment_summary(db, shipment.id)
     return {"shipment_id": shipment.id, "sscc": shipment.sscc, "status": shipment.status,
-            **telemetry_service.shipment_summary(db, shipment.id)}
+            "cold_chain_device_id": shipment.cold_chain_device_id, **summary,
+            **cold_chain_service.summary(db, shipment, summary)}
 
 
 # --- certifications --------------------------------------------------------

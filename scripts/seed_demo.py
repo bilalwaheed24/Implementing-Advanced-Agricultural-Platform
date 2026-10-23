@@ -330,48 +330,52 @@ def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now) -> 
         now - timedelta(days=9))
     db.flush()
 
-    journey = [
-        (farm_org, farmer, "harvesting", "in_progress", "Green Valley North", 42.03, -93.63,
-         8, 1800.0, None),
-        (farm_org, farmer, "shipping", "in_transit", "Green Valley North", 42.03, -93.63,
-         7.5, 1800.0, supply_org.id),
-        (supply_org, supply_user, "receiving", "in_storage", "Continental Foods Plant A",
-         41.88, -93.41, 7.2, 1800.0, None),
-        (supply_org, supply_user, "transforming", "in_progress", "Continental Foods Plant A",
-         41.88, -93.41, 6, 1750.0, None),
-        (supply_org, supply_user, "packing", "in_progress", "Continental Foods Plant A",
-         41.88, -93.41, 5.8, 1750.0, None),
-        (supply_org, supply_user, "shipping", "in_transit", "Continental Foods Plant A",
-         41.88, -93.41, 5, 1750.0, None),
-        (supply_org, supply_user, "receiving", "in_storage", "Chicago Distribution Center",
-         41.88, -87.63, 4, 1750.0, None),
-    ]
-    for actor_org, actor, biz_step, disposition, place, lat, lon, days_ago, qty, to_org \
-            in journey:
+    # Each leg that moves the batch is a shipment: creating it records the shipping event
+    # (and, for the farm leg, hands custody to the processor); the receiver marks it arrived,
+    # which records the receiving event. The farm's cold-chain sensor rides the first leg.
+    cold_sensor = next((d for d in db.execute(
+        select(Device).where(Device.device_type == "COLD_CHAIN_SENSOR",
+                             Device.org_id == farm_org.id)).scalars()), None)
+
+    def ship(sender_org, sender, receiver_org, receiver, sscc, carrier, origin, destination,
+             departed_days, arrived_days, sensor):
+        try:
+            shipment = supplychain.create_shipment(
+                db, sender_org.id, sender.id, sender.role,
+                to_org_id=receiver_org.id if receiver_org.id != sender_org.id else None,
+                sscc=sscc, batch_id=batch.id, carrier=carrier, origin_name=origin[0],
+                origin_lat=origin[1], origin_lon=origin[2], destination_name=destination[0],
+                destination_lat=destination[1], destination_lon=destination[2],
+                departed_at=now - timedelta(days=departed_days), arrived_at=None,
+                cold_chain_device_id=sensor.id if sensor else None)
+            db.flush()
+            supplychain.arrive_shipment(db, shipment, receiver_org.id, receiver.id,
+                                        receiver.role, now - timedelta(days=arrived_days))
+            db.flush()
+        except Exception as error:                                  # noqa: BLE001
+            print(f"  shipment seed skipped for {sscc}: {error}")
+
+    farm_gate = ("Green Valley North", 42.03, -93.63)
+    plant = ("Continental Foods Plant A", 41.88, -93.41)
+    chicago = ("Chicago Distribution Center", 41.88, -87.63)
+
+    def step(actor_org, actor, biz_step, disposition, place, days_ago, qty):
         try:
             supplychain.record_event(
                 db, actor_org.id, actor.id, actor.role, batch, biz_step,
-                disposition, "OBJECT", None, place, lat, lon, qty, "kg", to_org,
+                disposition, "OBJECT", None, place[0], place[1], place[2], qty, "kg", None,
                 now - timedelta(days=days_ago), {"seeded": True})
             db.flush()
         except Exception as error:                                  # noqa: BLE001
             print(f"  supply-chain event seed skipped for {biz_step}: {error}")
 
-    cold_sensor = next((d for d in db.execute(
-        select(Device).where(Device.device_type == "COLD_CHAIN_SENSOR")).scalars()), None)
-    try:
-        supplychain.create_shipment(
-            db, supply_org.id, supply_user.id, supply_user.role,
-            sscc="003123450000001148", batch_id=batch.id,
-            carrier="Continental Cold Logistics", origin_name="Continental Foods Plant A",
-            origin_lat=41.88, origin_lon=-93.41,
-            destination_name="Chicago Distribution Center",
-            destination_lat=41.88, destination_lon=-87.63,
-            departed_at=now - timedelta(days=5), arrived_at=now - timedelta(days=4),
-            cold_chain_device_id=cold_sensor.id if cold_sensor else None)
-        db.flush()
-    except Exception as error:                                      # noqa: BLE001
-        print(f"  shipment seed skipped: {error}")
+    step(farm_org, farmer, "harvesting", "in_progress", farm_gate, 8, 1800.0)
+    ship(farm_org, farmer, supply_org, supply_user, "003123450000001131",
+         "Green Valley Haulage", farm_gate, plant, 7.5, 7.2, cold_sensor)
+    step(supply_org, supply_user, "transforming", "in_progress", plant, 6, 1750.0)
+    step(supply_org, supply_user, "packing", "in_progress", plant, 5.8, 1750.0)
+    ship(supply_org, supply_user, supply_org, supply_user, "003123450000001148",
+         "Continental Cold Logistics", plant, chicago, 5, 4, None)
 
     # --- certification: issue a valid specialty claim and link it ---------------
     try:

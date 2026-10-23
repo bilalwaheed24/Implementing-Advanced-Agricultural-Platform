@@ -158,10 +158,13 @@ def main() -> int:
     #    records (cold-chain routes and quantities are commercially sensitive)
     admin = login(api, "admin@absp.demo")
     status, shipments = call(api, "GET", "/api/v1/supply-chain/shipments?page_size=50", admin)
-    shipment_ids = [s["id"] for s in (shipments.get("items", [])
-                                      if isinstance(shipments, dict) else [])]
     prober = login(api, "farmer@absp.demo")
     _, me = call(api, "GET", "/api/v1/auth/me", prober)
+    # A shipment is visible to its sender and receiver, so the farm's own hand-over to the
+    # processor is not foreign to it; probe only shipments the farm is no party to.
+    shipment_ids = [s["id"] for s in (shipments.get("items", [])
+                                      if isinstance(shipments, dict) else [])
+                    if me.get("org_id") not in {s.get("org_id"), s.get("to_org_id")}]
     statuses = [call(api, "GET", f"/api/v1/supply-chain/shipments/{sid}/cold-chain", prober)[0]
                 for sid in shipment_ids for _ in range(3)]
     check("foreign shipment records stay hidden (404, no existence leak)",

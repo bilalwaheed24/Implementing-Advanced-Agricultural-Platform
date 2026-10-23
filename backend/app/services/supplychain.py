@@ -16,10 +16,10 @@ from ..core.errors import Conflict, NotFound, PermissionDenied, ValidationFailed
 from ..core.permissions import CROSS_TENANT_ROLES
 from ..core.security import ensure_aware as _aware, content_hash, utcnow, verification_code
 from ..repositories import get_or_404, visible
-from ..models import (Batch, Certification, CertificationLink, Crop, Farm, Field,
+from ..models import (Batch, Certification, CertificationLink, Crop, Device, Farm, Field,
                       FraudAssessment, GMOApproval, GMOEvent, Organization, Product, SeedLot,
                       Shipment, SupplyChainEvent)
-from . import ai_client, audit, gmo as gmo_service, ledger_client, notifications, telemetry as telemetry_service
+from . import ai_client, audit, cold_chain, gmo as gmo_service, ledger_client, notifications, telemetry as telemetry_service
 
 BIZ_STEP_TO_STATE = {
     "commissioning": "CREATED", "harvesting": "HARVESTED", "transforming": "PROCESSED",
@@ -147,6 +147,10 @@ def create_batch(db: Session, org_id: str, actor_id: str, actor_role: str, batch
         parent = get_or_404(db, Batch, parent_batch_id, actor_role, org_id, name="Parent batch")
         if not _is_cross_tenant(actor_role) and parent.custodian_org_id != org_id:
             raise PermissionDenied("A batch can only be derived from a batch you currently hold")
+        if parent.state in {"RECALLED", "CONSUMED"}:
+            # A recalled lot must not re-enter the chain under a new code.
+            raise ValidationFailed(
+                f"Batch {parent.batch_code} is {parent.state} and cannot be used as a parent")
         if quantity > parent.quantity + 1e-9:
             raise ValidationFailed(
                 f"Quantity {quantity} exceeds the parent batch quantity {parent.quantity}")
@@ -197,6 +201,10 @@ def create_batch(db: Session, org_id: str, actor_id: str, actor_role: str, batch
                   origin_region=origin_region, origin_country=origin_country,
                   harvested_at=_aware(harvested_at), created_by=actor_id)
     db.add(batch)
+    if parent is not None:
+        # The child takes its quantity out of the parent (quantity conservation): otherwise
+        # every child could claim the parent's full amount.
+        parent.quantity = max(0.0, parent.quantity - quantity)
     db.flush()
 
     digest = content_hash(batch_content(batch, product))
@@ -274,15 +282,110 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
     if quantity is not None:
         batch.quantity = quantity
 
-    if to_org_id and to_org_id != batch.custodian_org_id:
+    if to_org_id and to_org_id != batch.custodian_org_id and new_state != "RECALLED":
         transfer_custody(db, batch, org_id, to_org_id, occurred_at)
+
+    if biz_step == "receiving":
+        # Receipt recorded directly closes the shipment that was carrying the batch, so the
+        # shipment and the batch never disagree about whether the goods have arrived.
+        _deliver_open_shipments(db, batch, occurred_at)
 
     db.flush()
     audit.record(db, "supply.record_event", actor_id=actor_id, actor_role=actor_role,
                  org_id=org_id, entity_type="SupplyChainEvent", entity_id=event.id,
                  detail={"batch_code": batch.batch_code, "biz_step": biz_step,
                          "anchor_status": event.anchor_status})
+    if new_state == "RECALLED":
+        propagate_recall(db, batch, actor_id, actor_role, org_id)
     return event
+
+
+def _related_batches(db: Session, batch: Batch, max_depth: int = 12
+                     ) -> tuple[list[Batch], list[Batch]]:
+    """Every ancestor and every descendant of a batch, across organisations.
+
+    Deliberately unscoped: a recall has to reach whoever holds product made from the batch,
+    whichever organisation that is. Only codes are disclosed, in the notifications.
+    """
+    ancestors: list[Batch] = []
+    seen = {batch.id}
+    current, depth = batch, 0
+    while current.parent_batch_id and depth < max_depth:
+        current = db.get(Batch, current.parent_batch_id)
+        if current is None or current.id in seen:
+            break
+        ancestors.append(current)
+        seen.add(current.id)
+        depth += 1
+    descendants: list[Batch] = []
+    frontier, depth = [batch.id], 0
+    while frontier and depth < max_depth:
+        children = [child for child in db.execute(select(Batch).where(
+            Batch.parent_batch_id.in_(frontier))).scalars() if child.id not in seen]
+        for child in children:
+            seen.add(child.id)
+        descendants.extend(children)
+        frontier = [child.id for child in children]
+        depth += 1
+    return ancestors, descendants
+
+
+def propagate_recall(db: Session, batch: Batch, actor_id: str | None, actor_role: str | None,
+                     org_id: str) -> dict[str, Any]:
+    """Tell every party to a recalled batch, and flag every batch made from it.
+
+    The owner, the custodian and the owners and holders of every parent and child batch are
+    notified. Each descendant batch is marked SUSPECT and carries an open COMPLIANCE alert, so
+    product derived from a recalled lot is visible as such wherever it now is.
+    """
+    ancestors, descendants = _related_batches(db, batch)
+    title = f"Batch {batch.batch_code} has been recalled"
+    # org -> the batch its notification should point at (one the org can open).
+    recipients: dict[str, Batch] = {}
+    for related in [batch, *ancestors, *descendants]:
+        for party in (related.org_id, related.custodian_org_id):
+            if party and party not in recipients:
+                recipients[party] = related
+    for party, subject in recipients.items():
+        body = (f"{batch.batch_code} was recalled. "
+                + (f"Your batch {subject.batch_code} is in its lineage; "
+                   f"check and quarantine the stock." if subject.id != batch.id
+                   else "Stop distribution and quarantine the stock."))
+        notifications.notify_org(db, party, "RECALL", title, body, "Batch", subject.id,
+                                 severity="HIGH")
+    if not notifications.has_open_alert(db, "COMPLIANCE", batch.id):
+        notifications.raise_alert(
+            db, "COMPLIANCE", "HIGH", title,
+            detail=f"{len(descendants)} derived batch(es) flagged.", org_id=batch.org_id,
+            entity_type="Batch", entity_id=batch.id, reasons=["recall"], notify=True)
+    for child in descendants:
+        if child.integrity_status != "FAILED":
+            child.integrity_status = "SUSPECT"
+        if not notifications.has_open_alert(db, "COMPLIANCE", child.id):
+            notifications.raise_alert(
+                db, "COMPLIANCE", "HIGH",
+                f"Batch {child.batch_code} derives from recalled batch {batch.batch_code}",
+                detail="Quarantine the stock and decide whether to recall it too.",
+                org_id=child.org_id, entity_type="Batch", entity_id=child.id,
+                reasons=["parent_recalled"], notify=False)
+    db.flush()
+    audit.record(db, "supply.recall_propagated", actor_id=actor_id, actor_role=actor_role,
+                 org_id=org_id, entity_type="Batch", entity_id=batch.id,
+                 detail={"batch_code": batch.batch_code,
+                         "descendants": [b.batch_code for b in descendants],
+                         "ancestors": [b.batch_code for b in ancestors],
+                         "organisations_notified": len(recipients)})
+    return {"descendants": descendants, "ancestors": ancestors,
+            "organisations": list(recipients)}
+
+
+def _deliver_open_shipments(db: Session, batch: Batch, arrived_at: datetime) -> None:
+    arrived = _aware(arrived_at)
+    for shipment in db.execute(select(Shipment).where(
+            Shipment.batch_id == batch.id, Shipment.status == "IN_TRANSIT")).scalars():
+        shipment.status = "DELIVERED"
+        shipment.arrived_at = max(arrived, _aware(shipment.departed_at))
+    db.flush()
 
 
 def transfer_custody(db: Session, batch: Batch, from_org_id: str, to_org_id: str,
@@ -390,7 +493,15 @@ def lineage(db: Session, batch: Batch, role: str | None = None, org_id: str | No
 # --------------------------------------------------------------------------- #
 # Shipments
 # --------------------------------------------------------------------------- #
-def create_shipment(db: Session, org_id: str, actor_id: str, actor_role: str, **kwargs) -> Shipment:
+def create_shipment(db: Session, org_id: str, actor_id: str, actor_role: str, *,
+                    to_org_id: str | None = None, **kwargs) -> Shipment:
+    """Ship a batch: the `shipping` event, the custody hand-over and the shipment, together.
+
+    Recording a hand-over first and the shipment afterwards could not work, because the
+    hand-over moves custody and only the holder may ship. So the shipment is the hand-over:
+    custody moves to `to_org_id` when the shipment is created, and the receiver marks it
+    arrived (`arrive_shipment`), which records the batch's `receiving` event.
+    """
     if db.execute(select(Shipment).where(Shipment.sscc == kwargs["sscc"])).scalar_one_or_none():
         raise Conflict(f"Shipment {kwargs['sscc']} already exists")
     # A shipment must reference a batch the caller actually holds (audit P1). Visibility is
@@ -402,15 +513,116 @@ def create_shipment(db: Session, org_id: str, actor_id: str, actor_role: str, **
     departed = _aware(kwargs["departed_at"])
     if arrived and arrived < departed:
         raise ValidationFailed("arrived_at must not precede departed_at")
+    if to_org_id == batch.custodian_org_id:
+        to_org_id = None                     # shipping to yourself is an internal move
+    if to_org_id:
+        receiver = db.get(Organization, to_org_id)
+        if receiver is None or not receiver.is_active:
+            raise NotFound("Receiving organisation not found")
+        if arrived:
+            raise ValidationFailed(
+                "A shipment to another organisation is marked arrived by the receiver; "
+                "leave arrived_at empty")
+    device_id = kwargs.get("cold_chain_device_id")
+    if device_id:
+        device = db.get(Device, device_id)
+        if (device is None or device.deleted_at is not None
+                or device.org_id not in {org_id, batch.custodian_org_id}):
+            raise NotFound("Cold-chain sensor not found")
+        busy = db.execute(select(Shipment.sscc).where(
+            Shipment.cold_chain_device_id == device_id,
+            Shipment.status == "IN_TRANSIT")).first()
+        if busy is not None and not arrived:
+            raise Conflict(f"That sensor is already travelling with shipment {busy[0]}")
+    require_batch_transition(batch.state, "IN_TRANSIT")
+
+    # The batch's shipping event, carrying the hand-over. If the holder already recorded a
+    # shipping event without a hand-over, the shipment aligns with it instead of repeating it.
+    already_shipping = batch.state == "IN_TRANSIT"
+    if not already_shipping:
+        record_event(db, org_id, actor_id, actor_role, batch, "shipping", "in_transit", "OBJECT",
+                     None, kwargs["origin_name"], kwargs["origin_lat"], kwargs["origin_lon"],
+                     None, None, to_org_id, departed, {"sscc": kwargs["sscc"]})
+    elif to_org_id:
+        transfer_custody(db, batch, org_id, to_org_id, departed)
+
     kwargs["departed_at"] = departed
-    kwargs["arrived_at"] = arrived
-    shipment = Shipment(org_id=org_id, status="DELIVERED" if arrived else "IN_TRANSIT", **kwargs)
+    kwargs["arrived_at"] = None
+    shipment = Shipment(org_id=org_id, to_org_id=to_org_id, status="IN_TRANSIT", **kwargs)
     db.add(shipment)
     db.flush()
     audit.record(db, "supply.create_shipment", actor_id=actor_id, actor_role=actor_role,
                  org_id=org_id, entity_type="Shipment", entity_id=shipment.id,
-                 detail={"sscc": shipment.sscc, "batch_id": shipment.batch_id})
+                 detail={"sscc": shipment.sscc, "batch_id": shipment.batch_id,
+                         "to_org_id": to_org_id})
+    if arrived:
+        # A completed internal move entered after the fact.
+        arrive_shipment(db, shipment, org_id, actor_id, actor_role, arrived)
     return shipment
+
+
+def arrive_shipment(db: Session, shipment: Shipment, org_id: str, actor_id: str,
+                    actor_role: str, arrived_at: datetime,
+                    location_name: str | None = None) -> Shipment:
+    """The receiver marks a shipment arrived, which records the batch's `receiving` event."""
+    if shipment.status != "IN_TRANSIT":
+        raise Conflict(f"Shipment {shipment.sscc} is {shipment.status}, not in transit")
+    receiver = shipment.to_org_id or shipment.org_id
+    if not _is_cross_tenant(actor_role) and org_id != receiver:
+        raise PermissionDenied("Only the receiving organisation may mark this shipment arrived")
+    arrived = _aware(arrived_at)
+    if arrived < _aware(shipment.departed_at):
+        raise ValidationFailed("arrived_at must not precede departed_at")
+    batch = db.get(Batch, shipment.batch_id)
+    # Closed first, so the receiving event's own shipment sync finds nothing left to close.
+    shipment.status = "DELIVERED"
+    shipment.arrived_at = arrived
+    db.flush()
+    if batch is not None and batch.state == "IN_TRANSIT":
+        record_event(db, batch.custodian_org_id if _is_cross_tenant(actor_role) else org_id,
+                     actor_id, actor_role, batch, "receiving", "in_storage", "OBJECT", None,
+                     location_name or shipment.destination_name, shipment.destination_lat,
+                     shipment.destination_lon, None, None, None, arrived,
+                     {"sscc": shipment.sscc})
+    refresh_shipment_temperatures(db, shipment)
+    audit.record(db, "supply.shipment_arrived", actor_id=actor_id, actor_role=actor_role,
+                 org_id=org_id, entity_type="Shipment", entity_id=shipment.id,
+                 detail={"sscc": shipment.sscc, "batch_id": shipment.batch_id})
+    if shipment.to_org_id and shipment.org_id != org_id:
+        notifications.notify_org(
+            db, shipment.org_id, "SHIPMENT", f"Shipment {shipment.sscc} arrived",
+            f"Received at {location_name or shipment.destination_name}.", "Shipment",
+            shipment.id)
+    return shipment
+
+
+def shipment_views(db: Session, shipments: list[Shipment]) -> list[dict[str, Any]]:
+    """Shipments with their batch code, product and cold-chain verdict, for display."""
+    batch_ids = {s.batch_id for s in shipments}
+    batches = {b.id: b for b in db.execute(
+        select(Batch).where(Batch.id.in_(batch_ids))).scalars()} if batch_ids else {}
+    product_ids = {b.product_id for b in batches.values()}
+    products = {p.id: p for p in db.execute(
+        select(Product).where(Product.id.in_(product_ids))).scalars()} if product_ids else {}
+    views = []
+    for shipment in shipments:
+        batch = batches.get(shipment.batch_id)
+        product = products.get(batch.product_id) if batch else None
+        low = product.storage_temp_min_c if product else None
+        high = product.storage_temp_max_c if product else None
+        excursion = None
+        if shipment.temp_min_c is not None and (low is not None or high is not None):
+            excursion = (cold_chain.outside(shipment.temp_min_c, low, high)
+                         or cold_chain.outside(shipment.temp_max_c, low, high))
+        views.append({
+            **{column: getattr(shipment, column) for column in (
+                "id", "sscc", "batch_id", "org_id", "to_org_id", "carrier", "origin_name",
+                "destination_name", "departed_at", "arrived_at", "status", "temp_min_c",
+                "temp_max_c", "cold_chain_device_id")},
+            "batch_code": batch.batch_code if batch else None,
+            "product_name": product.name if product else None,
+            "storage_temp_min_c": low, "storage_temp_max_c": high, "excursion": excursion})
+    return views
 
 
 def refresh_shipment_temperatures(db: Session, shipment: Shipment) -> Shipment:

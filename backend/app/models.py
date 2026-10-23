@@ -579,8 +579,13 @@ class SupplyChainEvent(Base):
 
 class Shipment(Base):
     __tablename__ = "shipments"
+    # Both ends of a shipment are parties to it: the sender (org_id) and, for a hand-over, the
+    # receiver (to_org_id). repositories.scoped() reads this to make the row visible to both.
+    __party_columns__ = ("org_id", "to_org_id")
     id: Mapped[str] = _pk()
     org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    # Receiving organisation when the shipment hands the batch over; NULL for an internal move.
+    to_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"), index=True)
     sscc: Mapped[str] = mapped_column(String(18), unique=True, nullable=False, index=True)
     batch_id: Mapped[str] = mapped_column(ForeignKey("batches.id"), nullable=False, index=True)
     carrier: Mapped[str] = mapped_column(String(160), nullable=False)
