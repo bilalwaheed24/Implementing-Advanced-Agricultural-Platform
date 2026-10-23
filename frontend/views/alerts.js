@@ -57,7 +57,8 @@ export const render = listView({
   endpoint: '/security/alerts',
   filters: [
     { key: 'severity', label: 'Severity', options: ['INFO', 'WARNING', 'HIGH', 'CRITICAL'] },
-    { key: 'status', label: 'Status', options: ['OPEN', 'ACKNOWLEDGED', 'RESOLVED'] },
+    { key: 'status', label: 'Status', options: [['UNRESOLVED', 'Unresolved (open or acknowledged)'],
+      'OPEN', 'ACKNOWLEDGED', 'RESOLVED'] },
     { key: 'category', label: 'Category', options: ['DEVICE_ANOMALY', 'DEVICE_HEALTH',
         'DEVICE_AUTH', 'DATA_THEFT', 'BIOSECURITY', 'DURC', 'FRAUD', 'COMPLIANCE',
         'CERTIFICATION', 'AGRONOMY'] },

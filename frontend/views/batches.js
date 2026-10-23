@@ -172,15 +172,16 @@ export const render = listView({
       'UNVERIFIED'] },
     { key: 'gmo', label: 'GMO lineage', options: [['true', 'GMO lineage'],
       ['false', 'No GMO recorded']] },
-    // Batches handed to this organisation whose arrival has not been booked in yet (the
-    // dashboard's "Hand-overs to book in" tile).
+    // Batches handed to this organisation that have reached it (not in transit) but have no
+    // receiving, storing or processing event from it yet (the dashboard's "Hand-overs to
+    // book in" tile). Shipments still on the road are under Shipments, "Coming to us".
     { key: 'awaiting_receipt', label: 'Hand-over', allLabel: 'Any',
-      options: [['true', 'Received, not booked in']] },
+      options: [['true', 'With us, not booked in']] },
   ],
   emptyFor: (active) => {
     if (active.awaiting_receipt) {
       return { title: 'Nothing to book in',
-        message: 'Every batch handed to your organisation has a receiving event.' };
+        message: 'Every batch handed to your organisation has been received or stored.' };
     }
     if (active.gmo === 'true') {
       return { title: 'No GMO batches', message: 'No batch you hold has a GMO lineage.' };
@@ -196,7 +197,9 @@ export const render = listView({
     { label: 'Origin', render: (row) => row.origin_region
       ? `${row.origin_region}, ${row.origin_country}` : '—' },
     // A GMO lineage is a fact to disclose, not a fault: a neutral label, not a warning.
-    { label: 'GMO lineage', render: (row) => (row.gmo_event_id
+    // Lineage, not just a GMO event named on the batch itself: the seed lot or a parent batch
+    // can carry it (`gmo_lineage` from the API; gmo_event_id for an older server).
+    { label: 'GMO lineage', render: (row) => ((row.gmo_lineage ?? Boolean(row.gmo_event_id))
       ? el('span', { class: 'badge neutral', text: 'GMO' }) : 'None recorded') },
     { label: 'Held by', render: (row) => orgName(row.custodian_org_id) },
     { label: 'Anchor', render: (row) => badge(row.anchor_status) },

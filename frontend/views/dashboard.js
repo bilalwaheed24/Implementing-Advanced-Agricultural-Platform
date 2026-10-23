@@ -2,6 +2,9 @@ import { el, api, tile, badge, barChart, severityColour, empty, can, session,
          fmtNum, titleCase, humanize, humanizeText, entityHref,
          roleLabel } from '/static/assets/core.js';
 
+/* Unresolved = OPEN or ACKNOWLEDGED, the status set the "Open alerts" tile counts. */
+const UNRESOLVED_ALERTS = '#/alerts?status=UNRESOLVED';
+
 /* The server decides which tiles a role gets (only those that mean something to it); this
  * only lays them out, each one a link to the list it counts. */
 function buildTiles(dash) {
@@ -14,22 +17,31 @@ function buildTiles(dash) {
   if (sc && role === 'SUPPLY_CHAIN_OPERATOR') {
     tiles.push(tile('Batches held', sc.held, 'In your custody now', '#/batches'));
     tiles.push(tile('Shipments in transit', sc.shipments_in_transit,
-      'Sent or coming to you, not yet arrived', '#/shipments'));
+      'Sent or coming to you, not yet arrived', '#/shipments?status=IN_TRANSIT'));
     if (sc.awaiting_arrival) {
       tiles.push(tile('Awaiting your arrival', sc.awaiting_arrival,
-        'In transit to you — mark them arrived when they reach you', '#/shipments'));
+        'In transit to you — mark them arrived when they reach you',
+        '#/shipments?status=IN_TRANSIT&incoming=true'));
     }
-    tiles.push(tile('Hand-overs to book in', sc.pending_handovers,
-      'Received batches with no receiving event yet', '#/batches?awaiting_receipt=true'));
+    // Batches already with the operator (not in transit — those are counted above) that it
+    // has not received, stored or processed yet, e.g. handed over without a shipment.
+    if (sc.pending_handovers) {
+      tiles.push(tile('Hand-overs to book in', sc.pending_handovers,
+        'Handed to you, no receiving or storing event yet', '#/batches?awaiting_receipt=true'));
+    }
   }
-  // A certifier's day: its certificates and where they are claimed.
+  // A certifier's day: its certificates and where they are claimed. Each tile opens the list
+  // filtered to exactly what it counts (the server applies the same rules).
   if (certs) {
+    const mine = role === 'REGULATOR' ? '' : 'issued_by_me=true';
+    const join = (...parts) => `#/certifications?${parts.filter(Boolean).join('&')}`;
     tiles.push(tile('Certificates issued', certs.issued, `${certs.active} currently valid`,
-      '#/certifications'));
+      join(mine)));
     tiles.push(tile('Expiring soon', certs.expiring,
-      `Valid certificates ending within ${certs.expiry_window_days} days`, '#/certifications'));
+      `Valid certificates ending within ${certs.expiry_window_days} days`,
+      join(`expiring_within_days=${certs.expiry_window_days}`, mine)));
     tiles.push(tile('Claimed on batches', certs.claimed, 'Batches that cite your certificates',
-      '#/certifications'));
+      join('claimed=true', mine)));
   }
   if (dash.devices) {
     // `offline` is newer than the other device counts; shown only when the API sends it.
@@ -50,8 +62,9 @@ function buildTiles(dash) {
       `${dash.telemetry.suspect} suspect or quarantined`, '#/telemetry'));
   }
   if (dash.alerts) {
+    // Open or acknowledged: the tile, its link and the alert card below share one definition.
     tiles.push(tile('Open alerts', dash.alerts.open,
-      `${dash.alerts.critical_open} critical`, '#/alerts?status=OPEN'));
+      `${dash.alerts.critical_open} critical — open or acknowledged`, UNRESOLVED_ALERTS));
   }
   if (dash.biosecurity) {
     tiles.push(tile('Screenings', dash.biosecurity.screenings,
@@ -89,7 +102,7 @@ function alertItem(alert) {
   const target = entityHref(alert.entity_type, alert.entity_id);
   return el('li', { class: 'bad' }, [
     badge(alert.severity), ' ',
-    el('a', { href: target || '#/alerts?status=OPEN', text: alert.title }),
+    el('a', { href: target || UNRESOLVED_ALERTS, text: alert.title }),
     el('div', { class: 'hint',
       text: `${humanize(alert.category)} — ${humanizeText(alert.detail || '')}` }),
   ]);
@@ -98,7 +111,8 @@ function alertItem(alert) {
 export async function render() {
   const [dash, alerts] = await Promise.all([
     api('/dashboard'),
-    can('alert:read') ? api('/security/alerts?page_size=6&status=OPEN').catch(() => null) : null,
+    can('alert:read')
+      ? api('/security/alerts?page_size=6&status=UNRESOLVED').catch(() => null) : null,
   ]);
   const user = session.read();
 
@@ -135,17 +149,30 @@ export async function render() {
   ];
 
   if (alerts?.items?.length) {
-    const bySeverity = {};
-    for (const alert of alerts.items) {
-      bySeverity[alert.severity] = (bySeverity[alert.severity] || 0) + 1;
+    // The chart covers every unresolved alert (the server's breakdown, the same set the tile
+    // counts), not just the six listed below it.
+    let bySeverity = dash.alerts?.by_severity;
+    if (!bySeverity) {
+      bySeverity = {};
+      for (const alert of alerts.items) {
+        bySeverity[alert.severity] = (bySeverity[alert.severity] || 0) + 1;
+      }
     }
+    const order = ['CRITICAL', 'HIGH', 'WARNING', 'INFO'];
+    const rank = (severity) => (order.includes(severity) ? order.indexOf(severity) : order.length);
+    const total = alerts.total ?? alerts.items.length;
     sections.push(el('div', { class: 'card' }, [
       el('h2', { text: 'Open alerts needing attention' }),
-      barChart(Object.entries(bySeverity).map(([label, value]) => ({
-        label: titleCase(label), value, colour: severityColour(label),
-      })), { label: 'Open alerts by severity' }),
+      el('p', { class: 'hint', text: `${total} open or acknowledged`
+        + (total > alerts.items.length ? `; the ${alerts.items.length} most recent are listed.`
+          : '.') }),
+      barChart(Object.entries(bySeverity)
+        .sort(([a], [b]) => rank(a) - rank(b))
+        .map(([label, value]) => ({
+          label: titleCase(label), value, colour: severityColour(label),
+        })), { label: 'Open or acknowledged alerts by severity' }),
       el('ul', { class: 'reasons' }, alerts.items.map(alertItem)),
-      el('a', { href: '#/alerts', text: 'View all alerts →' }),
+      el('a', { href: UNRESOLVED_ALERTS, text: 'View all open alerts →' }),
     ]));
   } else if (can('alert:read')) {
     sections.push(el('div', { class: 'card' }, [

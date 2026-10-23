@@ -1,6 +1,7 @@
 """Products, batches, EPCIS events, shipments, certifications and verification."""
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
@@ -9,6 +10,7 @@ from sqlalchemy import select
 from ..core.deps import DbSession, PagingDep, rate_limit, require_permission
 from ..core.errors import NotFound, PermissionDenied
 from ..core.permissions import P
+from ..core.security import utcnow
 from ..models import (Batch, Certification, CertificationLink, FraudAssessment, Organization,
                       Product, Shipment, SupplyChainEvent)
 from ..repositories import get_or_404, paginate, visible
@@ -61,36 +63,58 @@ def list_batches(db: DbSession, paging: PagingDep,
                  state: str | None = Query(default=None),
                  integrity: str | None = Query(default=None),
                  gmo: bool | None = Query(
-                     default=None, description="true: only batches with a GMO lineage; "
-                     "false: only batches without one"),
+                     default=None, description="true: only batches with a GMO lineage (a GMO "
+                     "event on the batch, its seed lot or any ancestor batch); false: only "
+                     "batches without one"),
                  awaiting_receipt: bool = Query(
                      default=False, description="Only batches handed over to the caller's "
-                     "organisation whose arrival it has not yet booked in")
+                     "organisation that have reached it but that it has not booked in yet")
                  ) -> Page[BatchOut]:
     # Includes, read-only, the batches carrying a certificate the caller's organisation issued.
     query = service.readable_batches(principal.role, principal.org_id).order_by(
         Batch.created_at.desc())
     if gmo is True:
-        query = query.where(Batch.gmo_event_id.is_not(None))
+        query = query.where(Batch.id.in_(service.gmo_lineage_ids()))
     elif gmo is False:
-        query = query.where(Batch.gmo_event_id.is_(None))
+        query = query.where(Batch.id.not_in(service.gmo_lineage_ids()))
     if awaiting_receipt:
-        # Same rule as the dashboard's "Hand-overs to book in" tile: held by someone other
-        # than the originator, with no receiving event recorded by that holder.
-        received = select(SupplyChainEvent.id).where(
-            SupplyChainEvent.batch_id == Batch.id,
-            SupplyChainEvent.biz_step == "receiving",
-            SupplyChainEvent.org_id == Batch.custodian_org_id)
-        query = query.where(Batch.custodian_org_id != Batch.org_id, ~received.exists())
-        if not principal.is_cross_tenant:
-            query = query.where(Batch.custodian_org_id == principal.org_id)
+        # Same rule as the dashboard's "Hand-overs to book in" tile (service.awaiting_booking).
+        query = query.where(*service.awaiting_booking(
+            None if principal.is_cross_tenant else principal.org_id))
     if state:
         query = query.where(Batch.state == state.upper())
     if integrity:
         query = query.where(Batch.integrity_status == integrity.upper())
     rows, total = paginate(db, query, paging.page, paging.page_size)
-    return Page[BatchOut](items=[BatchOut.model_validate(r) for r in rows], total=total,
-                          page=paging.page, page_size=paging.page_size)
+    gmo_ids = _gmo_lineage_of(db, [r.id for r in rows]) if rows else set()
+    items = []
+    for row in rows:
+        item = BatchOut.model_validate(row)
+        item.gmo_lineage = row.id in gmo_ids
+        items.append(item)
+    return Page[BatchOut](items=items, total=total, page=paging.page,
+                          page_size=paging.page_size)
+
+
+def _gmo_lineage_of(db, batch_ids: list[str]) -> set[str]:
+    """Which of these batches have a GMO lineage."""
+    return set(db.execute(select(Batch.id).where(
+        Batch.id.in_(batch_ids), Batch.id.in_(service.gmo_lineage_ids()))).scalars())
+
+
+def _viewer_access(batch: Batch, principal) -> str:
+    """Why the caller can read the batch (see BatchOut.viewer_access)."""
+    if principal.org_id in {batch.org_id, batch.custodian_org_id}:
+        return "party"
+    if principal.is_cross_tenant:
+        return "oversight"
+    return "certificate"
+
+
+def _batch_out(batch: Batch, principal) -> BatchOut:
+    out = BatchOut.model_validate(batch)
+    out.viewer_access = _viewer_access(batch, principal)
+    return out
 
 
 @router.get("/batches/{batch_id}", response_model=BatchOut, summary="Get a batch")
@@ -98,8 +122,8 @@ def get_batch(batch_id: str, db: DbSession,
               principal: Annotated[object, Depends(require_permission(P.SUPPLY_READ))]) -> BatchOut:
     # Owner, custodian, oversight roles, and the issuer of a certificate claimed on the batch
     # (read-only: the write paths below keep plain get_or_404 and the custodian checks).
-    return BatchOut.model_validate(
-        service.readable_batch(db, batch_id, principal.role, principal.org_id))
+    return _batch_out(service.readable_batch(db, batch_id, principal.role, principal.org_id),
+                      principal)
 
 
 @router.get("/batches/{batch_id}/custody", summary="Chain of custody and lineage for a batch")
@@ -109,7 +133,7 @@ def custody(batch_id: str, db: DbSession,
     events = service.chain_of_custody(db, batch)
     lineage = service.lineage(db, batch, principal.role, principal.org_id)
     return {
-        "batch": BatchOut.model_validate(batch).model_dump(),
+        "batch": _batch_out(batch, principal).model_dump(),
         "events": [SupplyChainEventOut.model_validate(e).model_dump() for e in events],
         "lineage": [{"batch_code": b.batch_code, "state": b.state, "quantity": b.quantity}
                     for b in lineage],
@@ -185,12 +209,29 @@ def create_shipment(payload: ShipmentCreate, db: DbSession,
 def list_shipments(db: DbSession, paging: PagingDep,
                    principal: Annotated[object, Depends(require_permission(P.SUPPLY_READ))],
                    batch_id: str | None = Query(default=None),
-                   status: str | None = Query(default=None)) -> Page[ShipmentOut]:
+                   status: str | None = Query(default=None),
+                   incoming: bool | None = Query(
+                       default=None, description="true: only shipments coming to the caller's "
+                       "organisation (it is the one to mark them arrived); false: only those "
+                       "it sends to another organisation")) -> Page[ShipmentOut]:
     # Visible to the sender and, for a hand-over, the receiver (Shipment.__party_columns__).
     query = visible(Shipment, principal.role, principal.org_id).order_by(
         Shipment.departed_at.desc())
     if batch_id:
+        batch = db.execute(service.readable_batches(principal.role, principal.org_id).where(
+            Batch.id == batch_id)).scalar_one_or_none()
+        if batch is not None:
+            # Whoever may read the batch (its owner, holder, oversight, the issuer of a
+            # certificate claimed on it) reads its shipments, read-only, as it already reads
+            # the shipping and receiving events in its chain of custody. Otherwise only the
+            # shipments the caller is party to, as for the unfiltered list.
+            query = select(Shipment).order_by(Shipment.departed_at.desc())
         query = query.where(Shipment.batch_id == batch_id)
+    if incoming is not None and principal.org_id:
+        # The receiver of an internal move (no to_org_id) is its sender.
+        to_me = ((Shipment.to_org_id == principal.org_id)
+                 | (Shipment.to_org_id.is_(None) & (Shipment.org_id == principal.org_id)))
+        query = query.where(to_me if incoming else ~to_me)
     if status:
         query = query.where(Shipment.status == status.upper())
     rows, total = paginate(db, query, paging.page, paging.page_size)
@@ -262,8 +303,43 @@ def eligible_subjects(db: DbSession,
             summary="List certifications")
 def list_certifications(db: DbSession, paging: PagingDep,
                         principal: Annotated[object, Depends(require_permission(P.CERT_READ))],
-                        cert_type: str | None = Query(default=None)) -> Page[CertificationOut]:
+                        cert_type: str | None = Query(default=None),
+                        status: str | None = Query(
+                            default=None, description="Effective status: ACTIVE (and not "
+                            "past valid_to), EXPIRED (including past valid_to before the "
+                            "expiry sweep), REVOKED"),
+                        expiring_within_days: int | None = Query(
+                            default=None, ge=1, le=3650, description="Only certificates "
+                            "still valid that end within this many days (the dashboard's "
+                            "\"Expiring soon\")"),
+                        claimed: bool | None = Query(
+                            default=None, description="true: only certificates claimed on at "
+                            "least one batch; false: only unclaimed ones"),
+                        issued_by_me: bool = Query(
+                            default=False, description="Only certificates the caller's "
+                            "organisation issued (the dashboard tiles count these)"),
+                        ) -> Page[CertificationOut]:
     query = select(Certification).order_by(Certification.created_at.desc())
+    now = utcnow()
+    if status:
+        wanted = status.upper()
+        if wanted == "ACTIVE":
+            query = query.where(Certification.status == "ACTIVE", Certification.valid_to >= now)
+        elif wanted == "EXPIRED":
+            query = query.where((Certification.status == "EXPIRED")
+                                | ((Certification.status == "ACTIVE")
+                                   & (Certification.valid_to < now)))
+        else:
+            query = query.where(Certification.status == wanted)
+    if expiring_within_days is not None:
+        # The same rule as the dashboard's "Expiring soon" tile.
+        query = query.where(Certification.status == "ACTIVE", Certification.valid_to >= now,
+                            Certification.valid_to <= now + timedelta(days=expiring_within_days))
+    if claimed is not None:
+        has_claim = Certification.id.in_(select(CertificationLink.certification_id))
+        query = query.where(has_claim if claimed else ~has_claim)
+    if issued_by_me and not principal.is_cross_tenant:
+        query = query.where(Certification.issuer_org_id == principal.org_id)
     if not principal.is_cross_tenant:
         # The issuer, the certified organisation, and the owner or holder of a batch the
         # certificate is claimed on: all three are notified when it expires or is revoked, so

@@ -8,8 +8,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, select, update
+from sqlalchemy.orm import Session, aliased
 
 from ..core.config import get_settings
 from ..core.errors import Conflict, NotFound, PermissionDenied, ValidationFailed
@@ -18,7 +18,7 @@ from ..core.security import ensure_aware as _aware, content_hash, utcnow, verifi
 from ..repositories import get_or_404, visible
 from ..models import (Batch, Certification, CertificationLink, Crop, Device, Farm, Field,
                       FraudAssessment, GMOApproval, GMOEvent, Organization, Product, SeedLot,
-                      Shipment, SupplyChainEvent)
+                      Notification, Shipment, SupplyChainEvent, User)
 from . import ai_client, audit, cold_chain, gmo as gmo_service, ledger_client, notifications, telemetry as telemetry_service
 
 BIZ_STEP_TO_STATE = {
@@ -367,7 +367,7 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
     if to_org_id and to_org_id != batch.custodian_org_id and new_state != "RECALLED":
         transfer_custody(db, batch, org_id, to_org_id, occurred_at)
 
-    if biz_step == "receiving":
+    if biz_step in SHIPMENT_CLOSING_STEPS:
         # Receipt recorded directly closes the shipment that was carrying the batch, so the
         # shipment and the batch never disagree about whether the goods have arrived, with the
         # same side effects as marking the shipment arrived (sender told, temperatures, audit).
@@ -498,6 +498,57 @@ def propagate_recall(db: Session, batch: Batch, actor_id: str | None, actor_role
             "organisations": [*recipients, *handlers]}
 
 
+# The holder's first step after a shipment that shows the goods have reached it. Receiving is
+# the usual one, but a receiver that books the batch straight into storage (or processes it)
+# has equally taken delivery: each closes the open shipment with the arrival's side effects,
+# so a shipment can no longer stay IN_TRANSIT forever behind a `storing` event.
+SHIPMENT_CLOSING_STEPS = frozenset({"receiving", "storing", "transforming"})
+# The steps that book a handed-over batch in ("Hand-overs to book in").
+BOOKING_STEPS = SHIPMENT_CLOSING_STEPS
+
+
+def awaiting_booking(org_id: str | None) -> list[Any]:
+    """SQL conditions: a batch handed over to `org_id` (any holder when None) that has reached
+    it but that it has not booked in yet.
+
+    Held by someone other than its originator, not on the road (a batch IN_TRANSIT is counted
+    under "awaiting arrival" instead, by its shipment), and with no receiving, storing or
+    transforming event recorded by the holder since custody last moved to it.
+    """
+    handover = aliased(SupplyChainEvent)
+    handed_at = (select(func.max(handover.occurred_at))
+                 .where(handover.batch_id == Batch.id,
+                        handover.to_org_id == Batch.custodian_org_id)
+                 .scalar_subquery())
+    booked = select(SupplyChainEvent.id).where(
+        SupplyChainEvent.batch_id == Batch.id,
+        SupplyChainEvent.org_id == Batch.custodian_org_id,
+        SupplyChainEvent.biz_step.in_(BOOKING_STEPS),
+        or_(handed_at.is_(None), SupplyChainEvent.occurred_at >= handed_at))
+    conditions = [Batch.custodian_org_id != Batch.org_id, Batch.state != "IN_TRANSIT",
+                  ~booked.exists()]
+    if org_id is not None:
+        conditions.append(Batch.custodian_org_id == org_id)
+    return conditions
+
+
+def gmo_lineage_ids() -> Any:
+    """SELECT of the ids of every batch with a GMO lineage, matching `lineage_gmo_event`: a GMO
+    event named on the batch, carried by its seed lot, or inherited from any ancestor batch.
+
+    A recursive CTE from the batches that carry an event themselves down through their
+    descendants; UNION (not UNION ALL) also stops a corrupted parent cycle from looping.
+    """
+    lot = aliased(SeedLot)
+    roots = (select(Batch.id.label("id"))
+             .outerjoin(lot, lot.id == Batch.seed_lot_id)
+             .where(or_(Batch.gmo_event_id.is_not(None), lot.gmo_event_id.is_not(None)))
+             .cte("gmo_lineage", recursive=True))
+    child = aliased(Batch)
+    tree = roots.union(select(child.id).where(child.parent_batch_id == roots.c.id))
+    return select(tree.c.id)
+
+
 def _deliver_open_shipments(db: Session, batch: Batch, arrived_at: datetime, org_id: str,
                             actor_id: str | None, actor_role: str | None,
                             location_name: str | None = None) -> None:
@@ -525,6 +576,21 @@ def _shipment_arrived(db: Session, shipment: Shipment, org_id: str, actor_id: st
             db, shipment.org_id, "SHIPMENT", f"Shipment {shipment.sscc} arrived",
             f"Received at {location_name or shipment.destination_name}.", "Shipment",
             shipment.id)
+    if shipment.to_org_id:
+        _settle_handover_notifications(db, shipment.to_org_id, shipment.batch_id)
+
+
+def _settle_handover_notifications(db: Session, receiver_org_id: str, batch_id: str) -> None:
+    """The receiver's "handed over to you" notification asks it to mark the batch arrived;
+    once it has arrived nothing is left to do, so it is marked read for every user of the
+    receiving organisation rather than lingering in the unread count."""
+    db.execute(
+        update(Notification)
+        .where(Notification.category == "HANDOVER", Notification.entity_type == "Batch",
+               Notification.entity_id == batch_id, Notification.read_at.is_(None),
+               Notification.user_id.in_(select(User.id).where(User.org_id == receiver_org_id)))
+        .values(read_at=utcnow())
+        .execution_options(synchronize_session=False))
 
 
 def transfer_custody(db: Session, batch: Batch, from_org_id: str, to_org_id: str,
@@ -553,8 +619,9 @@ def transfer_custody(db: Session, batch: Batch, from_org_id: str, to_org_id: str
                              "ledger_status": receipt.get("status")})
     notifications.notify_org(
         db, to_org_id, "HANDOVER", f"Batch {batch.batch_code} handed over to you",
-        f"{batch.quantity:g} {batch.unit}. Record its receipt to continue the chain of "
-        f"custody.", "Batch", batch.id)
+        f"{batch.quantity:g} {batch.unit}. "
+        + ("Mark it arrived when it reaches you." if batch.state == "IN_TRANSIT"
+           else "Record its receipt to continue the chain of custody."), "Batch", batch.id)
     return receipt
 
 

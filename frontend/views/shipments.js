@@ -174,7 +174,17 @@ export const render = listView({
     + 'binds its temperature readings to the shipment; an excursion outside the product\'s '
     + 'storage range raises a compliance alert and feeds the batch integrity verdict.',
   endpoint: '/supply-chain/shipments',
-  filters: [{ key: 'status', label: 'Status', options: ['IN_TRANSIT', 'DELIVERED'] }],
+  // `incoming=true` (the dashboard's "Awaiting your arrival") lists only shipments coming to
+  // this organisation, which it is the one to mark arrived.
+  filters: [
+    { key: 'status', label: 'Status', options: ['IN_TRANSIT', 'DELIVERED'] },
+    { key: 'incoming', label: 'Direction', allLabel: 'Sent and received',
+      options: [['true', 'Coming to us'], ['false', 'Sent by us']] },
+  ],
+  emptyFor: (active) => (active.incoming === 'true' && active.status === 'IN_TRANSIT'
+    ? { title: 'Nothing on its way to you',
+      message: 'No shipment to your organisation is waiting to be marked arrived.' }
+    : null),
   actions: ({ reload }) => (can('supply:write') ? shipmentForm({ reload }) : null),
   columns: [
     { label: 'SSCC', render: (row) => el('span', { class: 'mono', text: row.sscc }) },

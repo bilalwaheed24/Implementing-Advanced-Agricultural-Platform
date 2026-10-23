@@ -54,7 +54,9 @@ class TestBatchListFilters:
         gmo_rows = client.get("/api/v1/supply-chain/batches?gmo=true&page_size=200",
                               headers=auth("FARM_OPERATOR"))
         assert plain.id not in _ids(gmo_rows)
-        assert all(row["gmo_event_id"] for row in gmo_rows.json()["items"])
+        # GMO lineage, not only a direct event: a batch may carry it through its seed lot or a
+        # parent (round 4), so the list's own lineage flag is what must be set.
+        assert all(row["gmo_lineage"] for row in gmo_rows.json()["items"])
         if event is not None:
             modified = _batch(db, orgs, product, gmo_event_id=event.id)
             again = client.get("/api/v1/supply-chain/batches?gmo=true&page_size=200",

@@ -15,6 +15,7 @@ from sqlalchemy import func, or_, select
 from ..core.deps import CurrentUser, DbSession, rate_limit
 from ..core.permissions import P, Role, has_permission
 from ..core.security import utcnow
+from ..services import supplychain as supply_service
 from ..models import (Alert, Batch, Certification, CertificationLink, Device, GMOEvent,
                       Notification, SeedLot, SequenceScreening, Shipment, SupplyChainEvent,
                       Telemetry)
@@ -35,6 +36,7 @@ _BATCH_ROLES = {Role.ADMIN, Role.SECURITY_ANALYST, Role.FARM_OPERATOR, Role.AGRO
                 Role.SUPPLY_CHAIN_OPERATOR, Role.REGULATOR}
 
 EXPIRY_WINDOW_DAYS = 30
+UNRESOLVED_ALERT_STATUSES = ("OPEN", "ACKNOWLEDGED")
 
 
 def _count(db, model, org_id: str | None, *conditions) -> int:
@@ -71,12 +73,6 @@ def _supply_tiles(db, org_id: str | None) -> dict:
     receiving = [] if org_id is None else [or_(
         Shipment.to_org_id == org_id,
         (Shipment.to_org_id.is_(None)) & (Shipment.org_id == org_id))]
-    # A hand-over is booked in when the receiver records a receiving event. Until then the
-    # batch sits with the receiver but its arrival has not been confirmed.
-    received = select(SupplyChainEvent.id).where(
-        SupplyChainEvent.batch_id == Batch.id,
-        SupplyChainEvent.biz_step == "receiving",
-        SupplyChainEvent.org_id == Batch.custodian_org_id)
     return {
         "batches": _count(db, Batch, org_id),
         "held": _scalar(db, select(func.count()).select_from(Batch).where(*held)),
@@ -88,8 +84,10 @@ def _supply_tiles(db, org_id: str | None) -> dict:
         # In transit to the caller, who is the one to mark them arrived.
         "awaiting_arrival": _scalar(db, select(func.count()).select_from(Shipment).where(
             Shipment.status == "IN_TRANSIT", *receiving)),
+        # Reached the caller but not booked in. A batch still IN_TRANSIT is counted once,
+        # under awaiting_arrival, not here as well (supply_service.awaiting_booking).
         "pending_handovers": _scalar(db, select(func.count()).select_from(Batch).where(
-            Batch.custodian_org_id != Batch.org_id, ~received.exists(), *held)),
+            *supply_service.awaiting_booking(org_id))),
     }
 
 
@@ -115,7 +113,8 @@ def _gmo_holdings(db, org_id: str | None) -> dict:
     return {
         "seed_lots": _scalar(db, select(func.count()).select_from(SeedLot).where(
             SeedLot.gmo_event_id.is_not(None), *lots)),
-        "batches": _count(db, Batch, org_id, Batch.gmo_event_id.is_not(None)),
+        # GMO lineage through the batch, its seed lot or a parent, as the batch list's filter.
+        "batches": _count(db, Batch, org_id, Batch.id.in_(supply_service.gmo_lineage_ids())),
     }
 
 
@@ -142,12 +141,21 @@ def dashboard(db: DbSession, principal: CurrentUser) -> dict:
             "suspect": _count(db, Telemetry, org_id, Telemetry.quality != "OK"),
         }
     if has_permission(principal.role, P.ALERT_READ):
+        # Unresolved (OPEN or ACKNOWLEDGED): an acknowledged alert still needs attention. The
+        # tile, its link (#/alerts?status=UNRESOLVED) and the dashboard's alert card all use
+        # this one definition, so their numbers agree.
+        unresolved = Alert.status.in_(UNRESOLVED_ALERT_STATUSES)
+        by_severity = select(Alert.severity, func.count()).where(unresolved)
+        if org_id is not None:
+            # The same parties as _count (owner or custodian side) and the alert list.
+            by_severity = by_severity.where(or_(Alert.org_id == org_id,
+                                                Alert.custodian_org_id == org_id))
         tiles["alerts"] = {
-            # Unresolved (OPEN or ACKNOWLEDGED): an acknowledged alert still needs attention.
-            "open": _count(db, Alert, org_id, Alert.status.in_(("OPEN", "ACKNOWLEDGED"))),
-            "critical_open": _count(db, Alert, org_id,
-                                    Alert.status.in_(("OPEN", "ACKNOWLEDGED")),
+            "open": _count(db, Alert, org_id, unresolved),
+            "critical_open": _count(db, Alert, org_id, unresolved,
                                     Alert.severity == "CRITICAL"),
+            "by_severity": {severity: int(count) for severity, count in db.execute(
+                by_severity.group_by(Alert.severity)).all()},
         }
     if has_permission(principal.role, P.BIOSECURITY_READ):
         tiles["biosecurity"] = {

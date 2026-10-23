@@ -758,6 +758,13 @@ class BatchOut(ORMModel):
     # product the receiver cannot list (products are scoped to their owner), so the name
     # travels with the batch the caller is already allowed to see.
     product_name: str | None = None
+    # GMO lineage through the batch, its seed lot or any ancestor (set by the list endpoint;
+    # None where it was not computed, and readers then fall back to gmo_event_id).
+    gmo_lineage: bool | None = None
+    # Why the caller can see the batch, so a page offers only the actions it can perform:
+    # "party" (owner or holder), "oversight" (a cross-tenant role) or "certificate" (read-only:
+    # it carries a certificate the caller's organisation issued). Set on the single-batch reads.
+    viewer_access: str | None = None
 
     @model_validator(mode="wrap")
     @classmethod
