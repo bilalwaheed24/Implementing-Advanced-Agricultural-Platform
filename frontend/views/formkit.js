@@ -16,6 +16,8 @@ export function remoteSelect({ endpoint, label, required = true, placeholder = '
   const select = el('select', required ? { required: 'required' } : {});
   select.appendChild(el('option', { value: '', text: 'Loading…' }));
   select.disabled = true;
+  // Known before any request, so a form can withdraw the field before it is first drawn.
+  if (requires && !can(requires)) select.unavailable = true;
 
   const ready = (async () => {
     // When the session plainly lacks the permission the source endpoint requires, do not
@@ -95,13 +97,19 @@ export function createPanel({ toggleLabel, submitLabel, controls, submit, onDone
   const button = el('button', { class: 'primary', type: 'submit', text: submitLabel });
   const wrappers = controls.map(([labelText, control, extras]) => {
     const wrapper = field(labelText, control, extras || []);
-    // An optional selector whose source this role may not read is withdrawn once its load
-    // settles, so no unauthorised-looking control is left on the form.
-    if (control && control.whenReady) {
-      control.whenReady.then(() => {
-        if (control.unavailable && !control.hasAttribute('required')) wrapper.hidden = true;
-      });
-    }
+    // An optional selector whose source this role may not read is withdrawn, so no
+    // unauthorised-looking control is left on the form. When the permission is plainly
+    // missing that is known at once (no flash of a dead control); a 403 from the source is
+    // known only once its load settles. The class as well as the attribute, so no layout
+    // rule giving .field a display value can bring it back.
+    const withdraw = () => {
+      if (control.unavailable && !control.hasAttribute('required')) {
+        wrapper.hidden = true;
+        wrapper.classList.add('u-hidden');
+      }
+    };
+    if (control && control.unavailable) withdraw();
+    if (control && control.whenReady) control.whenReady.then(withdraw);
     return wrapper;
   });
   const form = el('form', { class: 'u-hidden' }, [

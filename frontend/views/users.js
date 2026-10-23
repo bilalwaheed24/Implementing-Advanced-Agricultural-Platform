@@ -1,4 +1,5 @@
-import { el, api, badge, fmtDate, table, titleCase, toast, can, empty, roleLabel, refreshView } from '/static/assets/core.js';
+import { el, api, badge, fmtDate, fmtDay, table, titleCase, toast, can, empty, roleLabel,
+         refreshView, session, orgName, humanize } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, choiceSelect } from '/static/views/formkit.js';
 
@@ -51,7 +52,7 @@ function addUserPanel(orgs) {
       const created = await api('/admin/users', { method: 'POST', body: {
         email: email.value, full_name: fullName.value, org_id: org.value,
         role: roleSelect.value, password: password.value } });
-      return `${created.email} created (${titleCase(created.status)})`;
+      return `${created.email} created (${humanize(created.status).toLowerCase()})`;
     },
     onDone: () => refreshView(),
   });
@@ -83,16 +84,16 @@ const ROLES = ['ADMIN', 'SECURITY_ANALYST', 'FARM_OPERATOR', 'AGRONOMIST',
               'BIOTECH_RESEARCHER', 'BIOSAFETY_OFFICER', 'SUPPLY_CHAIN_OPERATOR',
               'CERTIFIER', 'REGULATOR'];
 
-function roleName(role) {
-  return String(role).toLowerCase().split('_')
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
-}
+/* One spelling of a role everywhere ("Administrator", not "Admin" in the menu and
+ * "Administrator" in the cell beside it). */
+const roleName = roleLabel;
 
 
 function roleCell(row, reload) {
-  if (!can('user:write')) return roleLabel(row.role);
+  // Your own role is not edited from here: demoting yourself would lock you out mid-session.
+  if (!can('user:write') || row.id === session.read()?.id) return roleLabel(row.role);
+  // The select shows the current role itself, so the role is not printed a second time.
   return el('div', { class: 'row' }, [
-    roleLabel(row.role),
     // A select, not a free-text prompt: a typo previously reached the API as an invalid role.
     el('select', { 'aria-label': `Role for ${row.email}`, onChange: async (event) => {
       const select = event.currentTarget;
@@ -141,7 +142,8 @@ function userActions(row, reload) {
       } catch (error) { toast(error.message, 'error'); }
     } }));
   }
-  if (row.status === 'ACTIVE') {
+  // No Suspend on your own row: it would end the session you are using to administer.
+  if (row.status === 'ACTIVE' && row.id !== session.read()?.id) {
     buttons.push(el('button', { class: 'danger', text: 'Suspend', onClick: async () => {
       const reason = window.prompt('Reason for suspension:');
       if (!reason) return;
@@ -160,12 +162,15 @@ export const render = listView({
   subtitle: 'Privileged roles are created Pending and require administrator approval.',
   endpoint: '/admin/users',
   extra: orgsCard,
+  search: { key: 'q', placeholder: 'Name or email' },
   filters: [{ key: 'status', label: 'Status', options: ['PENDING', 'ACTIVE', 'SUSPENDED'] }],
   columns: [
-    { label: 'Name', key: 'full_name' },
+    { label: 'Name', render: (row) => (row.id === session.read()?.id
+      ? `${row.full_name} (you)` : row.full_name) },
     { label: 'Email', render: (row) => el('span', { class: 'mono', text: row.email }) },
+    { label: 'Organisation', render: (row) => orgName(row.org_id) },
     { label: 'Role', render: (row, { reload }) => roleCell(row, reload) },
-    { label: 'Joined', render: (row) => fmtDate(row.created_at) },
+    { label: 'Joined', render: (row) => fmtDay(row.created_at) },
     { label: 'Last login', render: (row) => fmtDate(row.last_login_at) },
     { label: 'Status', render: (row, { reload }) => userActions(row, reload) },
   ],

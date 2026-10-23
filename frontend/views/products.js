@@ -60,12 +60,14 @@ export const render = listView({
   subtitle: 'Trade items identified by GS1 GTIN.',
   endpoint: '/supply-chain/products',
   actions: ({ reload }) => (can('supply:write') ? createForm(reload) : null),
+  // Client-side: routers/supplychain.py is owned by another change, so no ?q= was added.
+  search: { placeholder: 'Name, GTIN or category', fields: ['name', 'gtin', 'category'] },
   columns: [
     { label: 'GTIN', render: (row) => el('span', { class: 'mono', text: row.gtin }) },
     { label: 'Name', key: 'name' },
     { label: 'Category', key: 'category' },
-    { label: 'Organic', render: (row) => row.organic_claim ? '✓' : '—' },
-    { label: 'Non-GMO', render: (row) => row.non_gmo_claim ? '✓' : '—' },
+    { label: 'Organic claim', render: (row) => (row.organic_claim ? 'Yes' : 'No') },
+    { label: 'Non-GMO claim', render: (row) => (row.non_gmo_claim ? 'Yes' : 'No') },
     { label: 'Storage range', render: (row) => row.storage_temp_min_c === null ? '—'
       : `${fmtNum(row.storage_temp_min_c, 0)}–${fmtNum(row.storage_temp_max_c, 0)} °C` },
   ],

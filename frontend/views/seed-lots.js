@@ -1,4 +1,4 @@
-import { el, api, badge, can, fmtDate, fmtNum, toast, session, orgDirectory, orgName }
+import { el, api, badge, can, fmtDay, fmtNum, toast, session, orgDirectory, orgName }
   from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, dateInput, todayIso, atNoon } from '/static/views/formkit.js';
@@ -54,7 +54,7 @@ function createForm(reload) {
 /* Row action: the holder of a lot supplies it to a farm, which can then plant from it. */
 function supplyControl(row, reload) {
   const holder = row.custodian_org_id || row.org_id;
-  if (!can('gmo:write') || holder !== session.read()?.org_id) return orgName(holder);
+  if (!can('gmo:write') || holder !== session.read()?.org_id) return '—';
   const farms = el('select', { 'aria-label': `Farm to supply ${row.lot_code} to` },
     [el('option', { value: '', text: 'Supply to farm…' })]);
   orgDirectory().then((rows) => {
@@ -75,7 +75,16 @@ function supplyControl(row, reload) {
       send.disabled = false;
     }
   } });
-  return el('div', { class: 'row' }, [orgName(holder), farms, send]);
+  return el('div', { class: 'row' }, [farms, send]);
+}
+
+/* The lot's lineage in words. A farm cannot read the event register, so the router fills in
+ * the code; a lineage with no code still says it is GMO rather than showing an id. */
+function lineageCell(row) {
+  if (row.gmo_event_code) {
+    return el('span', {}, ['GMO, event ', el('span', { class: 'mono', text: row.gmo_event_code })]);
+  }
+  return row.gmo_event_id ? 'GMO' : 'Conventional (non-GMO)';
 }
 
 export const render = listView({
@@ -84,18 +93,21 @@ export const render = listView({
     + 'developer supplies a lot to a farm, which can then plant from it.',
   endpoint: '/gmo/seed-lots',
   actions: ({ reload }) => (can('gmo:write') ? createForm(reload) : null),
+  // Client-side: the seed-lot list endpoint has no text search parameter.
+  search: { placeholder: 'Lot code, crop or variety',
+    fields: ['lot_code', 'crop_type', 'variety', 'gmo_event_code'] },
   columns: [
     { label: 'Lot code', render: (row) => el('span', { class: 'mono', text: row.lot_code }) },
-    { label: 'GMO event', render: (row) => (row.gmo_event_code
-      ? el('span', { class: 'mono', text: row.gmo_event_code }) : 'Conventional') },
+    { label: 'Lineage', render: lineageCell },
     { label: 'Crop', key: 'crop_type' },
     { label: 'Variety', key: 'variety' },
     { label: 'Quantity (kg)', numeric: true, render: (row) => fmtNum(row.quantity_kg, 0) },
     { label: 'Germination', numeric: true, render: (row) =>
       row.germination_pct === null ? '—' : `${fmtNum(row.germination_pct, 1)}%` },
-    { label: 'Produced', render: (row) => fmtDate(row.produced_at) },
+    { label: 'Produced', render: (row) => fmtDay(row.produced_at) },
     { label: 'Anchor', render: (row) => badge(row.anchor_status) },
-    { label: 'Held by', render: (row, { reload }) => supplyControl(row, reload) },
+    { label: 'Held by', render: (row) => orgName(row.custodian_org_id || row.org_id) },
+    { label: 'Action', render: (row, { reload }) => supplyControl(row, reload) },
   ],
   emptyTitle: 'No seed lots',
   emptyMessage: can('gmo:write')

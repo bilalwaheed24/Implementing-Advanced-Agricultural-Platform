@@ -10,8 +10,9 @@ from ..core.deps import DbSession, PagingDep, rate_limit, require_permission
 from ..core.errors import NotFound, ValidationFailed
 from ..core.permissions import P
 from ..models import Crop, Farm, Field, GMOEvent, SeedLot
-from ..repositories import get_or_404, paginate, visible
-from ..schemas import (CropCreate, CropOut, FarmCreate, FarmOut, FieldCreate, FieldOut, Page)
+from ..repositories import get_or_404, paginate, scoped, visible
+from ..schemas import (CropCreate, CropOut, CropStatusUpdate, FarmCreate, FarmOut, FieldCreate,
+                       FieldOut, Page)
 from ..services import audit, gmo as gmo_service
 
 router = APIRouter(tags=["Farms"], dependencies=[Depends(rate_limit)])
@@ -120,3 +121,22 @@ def list_crops(db: DbSession, paging: PagingDep,
     rows, total = paginate(db, query, paging.page, paging.page_size)
     return Page[CropOut](items=[CropOut.model_validate(r) for r in rows], total=total,
                          page=paging.page, page_size=paging.page_size)
+
+
+@router.patch("/crops/{crop_id}", response_model=CropOut, summary="Update a crop's status")
+def update_crop_status(crop_id: str, payload: CropStatusUpdate, db: DbSession,
+                       principal: Annotated[object, Depends(require_permission(P.FARM_WRITE))]
+                       ) -> CropOut:
+    """Only the grower's own organisation records what happened in its field, so this is
+    scoped to the caller's organisation even for a cross-tenant role."""
+    crop = db.execute(scoped(Crop, principal.org_id).where(Crop.id == crop_id)
+                      ).scalar_one_or_none()
+    if crop is None:
+        raise NotFound("Crop not found")
+    previous = crop.status
+    crop.status = payload.status
+    audit.record(db, "crop.status", actor_id=principal.id, actor_role=principal.role,
+                 org_id=principal.org_id, entity_type="Crop", entity_id=crop.id,
+                 detail={"from": previous, "to": crop.status})
+    db.commit()
+    return CropOut.model_validate(crop)

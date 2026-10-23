@@ -9,7 +9,7 @@ import re
 from datetime import datetime
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from . import gs1
 
@@ -195,6 +195,10 @@ class CropCreate(BaseModel):
     seed_lot_id: str | None = None
     planted_at: datetime | None = None
     expected_harvest: datetime | None = None
+
+
+class CropStatusUpdate(BaseModel):
+    status: str = Field(pattern=r"^(PLANTED|GROWING|HARVESTED|FAILED)$")
 
 
 class CropOut(ORMModel):
@@ -733,6 +737,7 @@ class BatchOut(ORMModel):
     product_id: str
     parent_batch_id: str | None = None
     seed_lot_id: str | None = None
+    crop_id: str | None = None
     farm_id: str | None = None
     gmo_event_id: str | None = None
     state: str
@@ -746,6 +751,25 @@ class BatchOut(ORMModel):
     anchor_status: str
     integrity_status: str
     created_at: datetime
+    # The product's name, for lists. A batch received from another organisation names a
+    # product the receiver cannot list (products are scoped to their owner), so the name
+    # travels with the batch the caller is already allowed to see.
+    product_name: str | None = None
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _with_product_name(cls, data: Any, handler: Any) -> "BatchOut":
+        model = handler(data)
+        if model.product_name is None and hasattr(data, "_sa_instance_state"):
+            from sqlalchemy.orm import object_session
+
+            from .models import Product
+
+            session = object_session(data)
+            product = session.get(Product, model.product_id) if session is not None else None
+            if product is not None:
+                model.product_name = product.name
+        return model
 
 
 BIZ_STEPS = {"commissioning", "harvesting", "transforming", "packing", "shipping",

@@ -5,8 +5,9 @@ function fabricCard(fabric) {
   if (!fabric.enabled) {
     return el('div', { class: 'card' }, [
       el('h2', { text: 'Hyperledger Fabric network' }),
-      el('p', { class: 'hint', text: 'Not connected. Start it with scripts/fabric_up.sh and set '
-        + 'FABRIC_BRIDGE_URL to mirror every anchor onto a real two-organisation Fabric network.' }),
+      el('p', { class: 'hint', text: 'Not connected. When a platform operator connects the '
+        + 'Fabric network, every anchor is also mirrored onto a two-organisation Fabric '
+        + 'network and its status appears here.' }),
     ]);
   }
   const bridge = fabric.bridge || {};
