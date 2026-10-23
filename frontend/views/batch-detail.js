@@ -366,7 +366,7 @@ export async function render({ id }) {
               el('td', { text: batch.origin_region
                 ? `${batch.origin_region}, ${batch.origin_country}` : '—' })]),
             el('tr', {}, [rowHeader('Harvested'),
-              el('td', { text: fmtDate(batch.harvested_at) })]),
+              el('td', { text: fmtDay(batch.harvested_at) })]),
             el('tr', {}, [rowHeader('GMO lineage'), gmoCell(context.gmo)]),
             el('tr', {}, [rowHeader('Ledger transaction'),
               el('td', { class: 'mono', text: batch.tx_id ? batch.tx_id.slice(0, 24) + '…' : '—' })]),

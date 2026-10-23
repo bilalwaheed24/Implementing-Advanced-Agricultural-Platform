@@ -83,7 +83,10 @@ def record_reading(db: Session, shipment: Shipment, record: Telemetry) -> None:
     limits = _limits_text(low, high)
     when = _aware(record.recorded_at)
     title = f"Cold-chain excursion on shipment {shipment.sscc} (batch {batch_code})"
-    detail = (f"Sensor {record.device_id[:8]} read {temperature:g} °C on "
+    from .devices import device_label           # the name the device list and alerts use
+    sensor = db.get(Device, record.device_id)
+    sensor_name = device_label(sensor) if sensor else f"Sensor {record.device_id[:8]}"
+    detail = (f"{sensor_name} read {temperature:g} °C on "
               f"{notifications.human_date(when)} at {when:%H:%M} UTC. The product must stay "
               f"{limits}.")
     receiver = shipment.to_org_id if shipment.to_org_id != shipment.org_id else None
