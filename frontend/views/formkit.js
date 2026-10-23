@@ -80,11 +80,26 @@ export function dateInput(value = null, attrs = {}) {
   return input;
 }
 
-export function todayIso() { return new Date().toISOString().slice(0, 10); }
+/* Today as yyyy-mm-dd in the operator's own time zone (a date input's `max`), not in UTC,
+ * which near midnight is already tomorrow or still yesterday. */
+export function todayIso() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
 
-/* Turn a yyyy-mm-dd value into the ISO instant the API expects. */
+/* Turn a yyyy-mm-dd value into the ISO instant the API expects.
+ *
+ * A date carries no time of day, so it is read as local noon (noon UTC is 17:00 at UTC+5,
+ * which put a shipment that left at 15:00 "in the future"). When the date is today the
+ * current instant is used instead, so a record is never stamped later than it was made.
+ * The name is kept for the many forms that import it. */
 export function atNoon(dayValue) {
-  return dayValue ? new Date(`${dayValue}T12:00:00Z`).toISOString() : null;
+  if (!dayValue) return null;
+  const [year, month, day] = String(dayValue).split('-').map(Number);
+  if (!year || !month || !day) return null;
+  if (dayValue === todayIso()) return new Date().toISOString();
+  return new Date(year, month - 1, day, 12, 0, 0, 0).toISOString();
 }
 
 /* A toggle button plus a hidden form, with one place for errors and the busy state.

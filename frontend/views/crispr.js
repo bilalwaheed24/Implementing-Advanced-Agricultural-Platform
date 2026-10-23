@@ -1,4 +1,5 @@
-import { session, el, api, badge, field, fmtDate, toast, can, reasonList, titleCase } from '/static/assets/core.js';
+import { session, el, api, badge, field, fmtDate, toast, can, reasonList, humanize, plural }
+  from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 
 // Readable labels; a field name is not a label ("guide rna", "pam").
@@ -17,12 +18,12 @@ function assessForm() {
     target_gene: el('input', { required: 'required', value: 'DREB2A' }),
     organism: el('input', { required: 'required', value: 'Zea mays' }),
     organism_class: el('select', {}, ['CROP', 'MODEL_PLANT', 'PLANT_PATHOGEN', 'INSECT_VECTOR',
-      'SOIL_MICROBE'].map((v) => el('option', { value: v, text: titleCase(v) }))),
+      'SOIL_MICROBE'].map((v) => el('option', { value: v, text: humanize(v) }))),
     guide_rna: el('input', { required: 'required', minlength: '17', maxlength: '25',
       value: 'ACGTACGTACGTACGTACGT' }),
     pam: el('input', { required: 'required', value: 'NGG' }),
     edit_type: el('select', {}, ['KNOCKOUT', 'KNOCK_IN', 'BASE_EDIT', 'PRIME_EDIT',
-      'MULTIPLEX'].map((v) => el('option', { value: v, text: titleCase(v) }))),
+      'MULTIPLEX'].map((v) => el('option', { value: v, text: humanize(v) }))),
     intent: el('input', { required: 'required', value: 'drought tolerance improvement' }),
   };
   const reference = el('textarea', { placeholder:
@@ -48,14 +49,16 @@ function assessForm() {
         Object.entries(fields).map(([key, input]) => [key, input.value]));
       if (reference.value.trim()) body.reference_sequence = reference.value.trim();
       const assessment = await api('/biosecurity/crispr', { method: 'POST', body });
-      toast(`Risk ${assessment.risk_level} (${assessment.risk_score})`,
+      toast(`Risk ${humanize(assessment.risk_level).toLowerCase()} `
+        + `(score ${assessment.risk_score})`,
         assessment.risk_level === 'LOW' ? 'ok' : 'error');
       result.replaceChildren(el('div', { class: 'card u-mt-12' }, [
         el('h3', {}, [badge(assessment.risk_level), ` score ${assessment.risk_score}`,
           assessment.durc_flag ? el('span', { class: 'u-ml-8' },
             [badge('CRITICAL')]) : null]),
         el('p', { class: 'hint',
-          text: `${assessment.off_target_count} potential off-target site(s) found.` }),
+          text: `${plural(assessment.off_target_count, 'potential off-target site')} `
+            + 'found.' }),
         reasonList(assessment.reasons),
       ]));
     } catch (error) {
@@ -71,12 +74,45 @@ function assessForm() {
   return el('div', { class: 'u-flex-1' }, [toggle, form]);
 }
 
+/* The proposal a link asked for (#/crispr?focus=<id>, from the review queue). Its row is
+ * highlighted and scrolled to, and its review dialog opened once, so the reviewer lands on
+ * the item rather than on the whole list. */
+let focusHandled = null;
+function focusId() {
+  return new URLSearchParams(window.location.hash.split('?')[1] || '').get('focus');
+}
+
+function focusRow(row, control) {
+  const wanted = focusId();
+  if (!wanted || wanted !== row.id || focusHandled === wanted) return;
+  focusHandled = wanted;
+  // The cell is placed into the table after this returns; wait for it to be mounted.
+  const tryFocus = (attempt = 0) => {
+    if (!control.isConnected) {
+      if (attempt < 40) setTimeout(() => tryFocus(attempt + 1), 50);
+      return;
+    }
+    const tr = control.closest('tr');
+    if (tr) tr.classList.add('row-focus');
+    control.scrollIntoView({ block: 'center' });
+    if (control.tagName === 'BUTTON') control.click();
+  };
+  tryFocus();
+}
+
 /* Four-eyes review of a dual-use gene-edit proposal.
  *
  * The server is the authority: it refuses a review by the submitter with 409. The control is
  * hidden from the submitter here as well, so a reviewer is not offered an action that can only
  * fail, but hiding it is presentation only and is not what enforces the rule. */
 function reviewCell(row, reload) {
+  const control = reviewControl(row, reload);
+  const node = typeof control === 'string' ? el('span', { text: control }) : control;
+  focusRow(row, node);
+  return node;
+}
+
+function reviewControl(row, reload) {
   if (row.review_rationale) {
     return el('span', { class: 'hint', text: `Reviewed — ${row.review_rationale.slice(0, 40)}` });
   }
@@ -107,7 +143,7 @@ function reviewCell(row, reload) {
 
     const dialog = el('dialog', { class: 'card' }, [
       el('h2', { text: `Review: ${row.target_gene}` }),
-      el('p', { class: 'hint', text: `${row.organism} — ${titleCase(row.edit_type)}, `
+      el('p', { class: 'hint', text: `${row.organism} — ${humanize(row.edit_type)}, `
         + `risk ${row.risk_level.toLowerCase()} (${row.risk_score})` }),
       el('p', { text: row.intent }),
       field('Rationale', rationale),
@@ -124,7 +160,7 @@ function reviewCell(row, reload) {
   } });
 }
 
-export const render = listView({
+const listing = listView({
   title: 'CRISPR risk and dual-use monitoring',
   subtitle: 'Every score component is returned as a citable reason, because the output can '
     + 'block a research proposal and must withstand challenge.',
@@ -141,7 +177,7 @@ export const render = listView({
     { label: 'Assessed', render: (row) => fmtDate(row.created_at) },
     { label: 'Target gene', key: 'target_gene' },
     { label: 'Organism', key: 'organism' },
-    { label: 'Edit type', render: (row) => titleCase(row.edit_type) },
+    { label: 'Edit type', render: (row) => humanize(row.edit_type) },
     { label: 'Off-targets', numeric: true, render: (row) => row.off_target_count },
     { label: 'Risk', render: (row) => badge(row.risk_level) },
     { label: 'Score', numeric: true, render: (row) => row.risk_score },
@@ -152,3 +188,8 @@ export const render = listView({
   emptyTitle: 'No assessments yet',
   emptyMessage: 'Assess a gene-edit proposal to see its risk breakdown.',
 });
+
+export async function render(context = {}) {
+  focusHandled = null;   // a fresh visit (from the review queue, say) may focus again
+  return listing(context);
+}

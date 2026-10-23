@@ -10,16 +10,28 @@ const SEARCH_WINDOW = 200;
  *   { key: 'q', placeholder, label }            the term is sent to the endpoint as ?key=
  *   { fields: ['batch_code'] | (row) => text }  the endpoint has no search parameter, so the
  *                                               most recent SEARCH_WINDOW rows are fetched
- *                                               and filtered in the browser. */
+ *                                               and filtered in the browser.
+ *
+ * `emptyFor` (optional) is called with the active filter values ({key: value}) when the
+ * list comes back empty and no search term is set; it may return {title, message} to
+ * replace the generic empty state ("No events are awaiting a decision" rather than "No
+ * events registered" while a filter is on). Returning nothing keeps emptyTitle/Message.
+ *
+ * Filter values are read from the hash query (#/devices?offline=true), so a link from a
+ * dashboard tile opens the list already filtered. A filter may carry `fromParams(params)`
+ * to translate a legacy or alternative parameter into its own value. `columns` may be a
+ * function returning the column list, evaluated on every load (to drop a column the role
+ * cannot use). */
 export function listView({ title, subtitle, endpoint, columns, filters = [], actions = null,
                            emptyTitle, emptyMessage, extra = null, pageSize = 25,
-                           search = null }) {
+                           search = null, emptyFor = null }) {
   /* Column renderers receive (row, { reload }) so a row action can refresh the list
    * without the caller wiring a callback through module scope. */
   return async function render(context = {}) {
     const state = { page: 1, filters: {}, term: '' };
     for (const filter of filters) {
-      const fromUrl = context.params?.get(filter.key);
+      const fromUrl = context.params?.get(filter.key)
+        || (filter.fromParams && context.params ? filter.fromParams(context.params) : null);
       if (fromUrl) state.filters[filter.key] = fromUrl;
     }
     const clientSearch = Boolean(search && search.fields);
@@ -109,12 +121,18 @@ export function listView({ title, subtitle, endpoint, columns, filters = [], act
               text: `Searched the ${SEARCH_WINDOW} most recent of ${total} records.` }));
           }
         }
-        const bound = columns.map((column) => (column.render
+        const activeColumns = typeof columns === 'function' ? columns() : columns;
+        const bound = activeColumns.map((column) => (column.render
           ? { ...column, render: (row) => column.render(row, { reload: load }) }
           : column));
+        const active = Object.fromEntries(
+          Object.entries(state.filters).filter(([, value]) => value));
+        const fitted = !state.term && emptyFor && Object.keys(active).length
+          ? emptyFor(active) : null;
         const children = [...notes, table(bound, rows, state.term
           ? { emptyTitle: 'No matches', emptyMessage: `Nothing matches “${state.term}”.` }
-          : { emptyTitle, emptyMessage })];
+          : (fitted ? { emptyTitle: fitted.title, emptyMessage: fitted.message }
+            : { emptyTitle, emptyMessage }))];
         if (!filtering && result.total !== undefined && total > pageSize) {
           children.push(pager(state.page, pageSize, total, (page) => {
             state.page = page;

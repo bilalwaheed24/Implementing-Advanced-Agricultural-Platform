@@ -55,8 +55,11 @@ export const render = listView({
   title: 'Farms and fields',
   subtitle: 'Farms are scoped to your organisation. A competitor cannot see these records.',
   endpoint: '/farms',
+  // Client-side: the farm list endpoint has no text search parameter.
+  search: { placeholder: 'Farm name, region, country or GLN',
+    fields: (row) => `${row.name} ${row.region} ${row.country} ${row.gln || ''}` },
   columns: [
-    { label: 'Name', key: 'name' },
+    { label: 'Name', render: (row) => el('a', { href: `#/farm/${row.id}`, text: row.name }) },
     { label: 'Region', render: (row) => `${row.region}, ${row.country}` },
     { label: 'Area (ha)', numeric: true, render: (row) => fmtNum(row.area_ha, 1) },
     { label: 'Coordinates', render: (row) =>

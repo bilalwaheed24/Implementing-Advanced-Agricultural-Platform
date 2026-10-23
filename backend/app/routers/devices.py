@@ -36,8 +36,16 @@ def list_devices(db: DbSession, paging: PagingDep,
                  principal: Annotated[object, Depends(require_permission(P.DEVICE_READ))],
                  farm_id: str | None = Query(default=None),
                  device_type: str | None = Query(default=None),
-                 status_filter: str | None = Query(default=None, alias="status")) -> Page[DeviceOut]:
+                 status_filter: str | None = Query(default=None, alias="status"),
+                 offline: bool | None = Query(
+                     default=None, description="true: only devices the health sweep has "
+                     "marked silent (offline_since set); false: only devices reporting")
+                 ) -> Page[DeviceOut]:
     query = visible(Device, principal.role, principal.org_id).order_by(Device.created_at.desc())
+    if offline is True:
+        query = query.where(Device.offline_since.is_not(None))
+    elif offline is False:
+        query = query.where(Device.offline_since.is_(None))
     if farm_id:
         query = query.where(Device.farm_id == farm_id)
     if device_type:

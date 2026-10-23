@@ -96,7 +96,9 @@ export const render = listView({
   // Client-side: the seed-lot list endpoint has no text search parameter.
   search: { placeholder: 'Lot code, crop or variety',
     fields: ['lot_code', 'crop_type', 'variety', 'gmo_event_code'] },
-  columns: [
+  // The Action column only for a role that can supply a lot; a grower would see a column of
+  // dashes.
+  columns: () => [
     { label: 'Lot code', render: (row) => el('span', { class: 'mono', text: row.lot_code }) },
     { label: 'Lineage', render: lineageCell },
     { label: 'Crop', key: 'crop_type' },
@@ -107,8 +109,9 @@ export const render = listView({
     { label: 'Produced', render: (row) => fmtDay(row.produced_at) },
     { label: 'Anchor', render: (row) => badge(row.anchor_status) },
     { label: 'Held by', render: (row) => orgName(row.custodian_org_id || row.org_id) },
-    { label: 'Action', render: (row, { reload }) => supplyControl(row, reload) },
-  ],
+    can('gmo:write')
+      ? { label: 'Action', render: (row, { reload }) => supplyControl(row, reload) } : null,
+  ].filter(Boolean),
   emptyTitle: 'No seed lots',
   emptyMessage: can('gmo:write')
     ? 'Create a seed lot from an approved GMO event with the button above.'

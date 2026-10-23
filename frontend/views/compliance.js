@@ -1,5 +1,5 @@
 import { el, api, badge, field, fmtDate, fmtPct, jurisdictionLabel, toast, can,
-         reasonList, titleCase } from '/static/assets/core.js';
+         reasonList, titleCase, humanize } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { remoteSelect } from '/static/views/formkit.js';
 
@@ -7,8 +7,11 @@ function evaluateForm(reload) {
   // Chosen from the batches this role can see, so no raw identifier is typed.
   const batchId = remoteSelect({
     endpoint: '/supply-chain/batches',
-    label: (row) => `${row.batch_code} — ${row.origin_region || '?'}, ${row.origin_country || '?'}`
-      + ` (${titleCase(row.state)})`,
+    label: (row) => {
+      const origin = [row.origin_region, row.origin_country].filter(Boolean).join(', ');
+      return `${row.batch_code}${origin ? ` — ${origin}` : ''}`
+        + ` (${humanize(row.state).toLowerCase()})`;
+    },
     placeholder: 'Select a batch',
     emptyLabel: 'No batch is visible to your role',
     requires: 'supply:read',
@@ -31,7 +34,8 @@ function evaluateForm(reload) {
       const report = await api('/compliance/evaluate', { method: 'POST', body: {
         subject_type: 'BATCH', subject_id: batchId.value,
         jurisdiction: jurisdiction.value } });
-      toast(`Report ${report.status}`, report.status === 'COMPLIANT' ? 'ok' : 'error');
+      toast(`Report: ${humanize(report.status).toLowerCase()}`,
+        report.status === 'COMPLIANT' ? 'ok' : 'error');
       form.classList.add('u-hidden');
       reload();
     } catch (error) { message.textContent = error.message; }
@@ -47,7 +51,7 @@ function evaluateForm(reload) {
 function releaseForm() {
   const batchId = remoteSelect({
     endpoint: '/supply-chain/batches',
-    label: (row) => `${row.batch_code} — ${titleCase(row.state)}`,
+    label: (row) => `${row.batch_code} — ${humanize(row.state).toLowerCase()}`,
     placeholder: 'Select a batch you hold',
     emptyLabel: 'No batch is visible to your role',
     requires: 'supply:read',
@@ -119,6 +123,9 @@ export function render(context) {
     subtitle: 'Rules modelled on published USDA, FDA, EU, Codex Alimentarius and GS1 '
       + 'requirements — an engineering control, not legal advice.',
     endpoint: '/compliance/reports',
+    // Client-side: the report list endpoint has no text search parameter.
+    search: { placeholder: 'Batch code or GMO event code',
+      fields: (row) => `${row.summary?.batch_code || ''} ${row.summary?.event_code || ''}` },
     filters: [
       { key: 'jurisdiction', label: 'Jurisdiction', optionLabel: jurisdictionLabel,
         options: ['US-USDA', 'US-FDA', 'EU', 'CODEX', 'GS1'] },

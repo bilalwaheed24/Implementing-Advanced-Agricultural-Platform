@@ -16,7 +16,7 @@ function buildTiles(dash) {
     tiles.push(tile('Shipments in transit', sc.shipments_in_transit, 'Dispatched, not yet arrived',
       '#/shipments'));
     tiles.push(tile('Hand-overs to book in', sc.pending_handovers,
-      'Received batches with no receiving event yet', '#/batches'));
+      'Received batches with no receiving event yet', '#/batches?awaiting_receipt=true'));
   }
   // A certifier's day: its certificates and where they are claimed.
   if (certs) {
@@ -34,6 +34,12 @@ function buildTiles(dash) {
     tiles.push(tile('Devices', dash.devices.total,
       `${dash.devices.active} active, ${dash.devices.quarantined} quarantined${offline}`,
       '#/devices'));
+    // A silent fleet is the thing to act on, so it gets its own tile that opens the list
+    // filtered to it.
+    if (dash.devices.offline) {
+      tiles.push(tile('Devices offline', dash.devices.offline,
+        'Active devices that have stopped reporting', '#/devices?offline=true'));
+    }
   }
   if (dash.telemetry) {
     tiles.push(tile('Telemetry readings', fmtNum(dash.telemetry.readings, 0),
@@ -56,7 +62,7 @@ function buildTiles(dash) {
     tiles.push(tile('GMO seed lots', dash.gmo_holdings.seed_lots,
       'GMO seed supplied to or held by you', '#/seed-lots'));
     tiles.push(tile('GMO batches', dash.gmo_holdings.batches,
-      'Batches with a GMO lineage', '#/batches'));
+      'Batches with a GMO lineage', '#/batches?gmo=true'));
   }
   if (sc && role !== 'SUPPLY_CHAIN_OPERATOR') {
     tiles.push(tile('Batches', sc.batches, `${sc.events} chain events`, '#/batches'));

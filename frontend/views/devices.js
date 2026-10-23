@@ -1,4 +1,5 @@
-import { session, el, api, badge, can, fmtDate, fmtNum, tile, toast, titleCase } from '/static/assets/core.js';
+import { session, el, api, badge, can, fmtDate, fmtNum, tile, toast, titleCase, humanize }
+  from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, choiceSelect } from '/static/views/formkit.js';
 
@@ -11,6 +12,9 @@ const DEVICE_TYPES = [
   ['COLD_CHAIN_SENSOR', 'Cold-chain sensor'],
   ['LAB_INSTRUMENT', 'Lab instrument (biotech lab)'],
 ];
+
+const deviceTypeLabel = (code) =>
+  (DEVICE_TYPES.find(([value]) => value === code) || [code, titleCase(code)])[1];
 
 /* The provisioning secret is returned by the API exactly once. It is rendered here rather
  * than in a toast so the operator can copy it deliberately before dismissing it. */
@@ -111,7 +115,7 @@ async function postureCard() {
     return el('div', { class: 'grid cols-4 u-mb-16' }, [
       tile('Fleet size', posture.devices_total,
         Object.entries(posture.devices_by_status || {})
-          .map(([k, v]) => `${v} ${k.toLowerCase()}`).join(', ')),
+          .map(([k, v]) => `${v} ${humanize(k).toLowerCase()}`).join(', ')),
       tile('Open vulnerabilities', posture.vulnerabilities_open,
         `${severities.CRITICAL || 0} critical, ${severities.HIGH || 0} high`),
       tile('Devices affected', posture.devices_affected,
@@ -171,17 +175,28 @@ const listing = listView({
   extra: postureCard,
   actions: ({ reload, host }) => (can('device:write') ? registerForm(reload, host) : null),
   filters: [
-    { key: 'device_type', label: 'Type', options: ['DRONE', 'SOIL_SENSOR', 'WEATHER_STATION',
-      'YIELD_MONITOR', 'IRRIGATION_CONTROLLER', 'COLD_CHAIN_SENSOR', 'LAB_INSTRUMENT'] },
+    { key: 'device_type', label: 'Type', options: DEVICE_TYPES },
     { key: 'status', label: 'Status', options: ['PROVISIONED', 'ACTIVE', 'SUSPENDED',
       'QUARANTINED', 'RETIRED'] },
+    // Silence is not a status (an offline device stays Active so it can come back), so it is
+    // its own filter.
+    { key: 'offline', label: 'Reporting', allLabel: 'All devices',
+      options: [['true', 'Offline (silent)'], ['false', 'Reporting']] },
   ],
+  // Client-side: the device list endpoint has no text search parameter.
+  search: { placeholder: 'Model, serial number, farm or field',
+    fields: (row) => [row.model, row.serial_number, row.id, row.firmware_version,
+      places.farms.get(row.farm_id), places.fields.get(row.field_id)].filter(Boolean)
+      .join(' ') },
+  emptyFor: (active) => (active.offline === 'true'
+    ? { title: 'No device is offline', message: 'Every active device has reported within '
+      + 'three of its reporting intervals.' } : null),
   columns: [
     { label: 'Device', render: (row) => el('div', {}, [
       el('a', { href: `#/device/${row.id}`, text: row.model }),
       el('div', { class: 'hint mono', text: row.id.slice(0, 8) }),
     ]) },
-    { label: 'Type', render: (row) => titleCase(row.device_type) },
+    { label: 'Type', render: (row) => deviceTypeLabel(row.device_type) },
     { label: 'Location', render: (row) => locationCell(row) },
     { label: 'Firmware', render: (row) => el('span', { class: 'mono', text: row.firmware_version }) },
     { label: 'Status', render: (row) => statusCell(row) },
@@ -196,5 +211,12 @@ const listing = listView({
 
 export async function render(context = {}) {
   await loadPlaces();
-  return listing(context);
+  // An older link said ?status=OFFLINE, which is not a device status: read it as the
+  // offline filter rather than sending a status no device has.
+  const params = new URLSearchParams(context.params || '');
+  if (params.get('status') === 'OFFLINE') {
+    params.delete('status');
+    params.set('offline', 'true');
+  }
+  return listing({ ...context, params });
 }

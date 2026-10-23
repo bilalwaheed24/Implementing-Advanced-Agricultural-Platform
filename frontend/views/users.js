@@ -168,7 +168,9 @@ export const render = listView({
     { label: 'Name', render: (row) => (row.id === session.read()?.id
       ? `${row.full_name} (you)` : row.full_name) },
     { label: 'Email', render: (row) => el('span', { class: 'mono', text: row.email }) },
-    { label: 'Organisation', render: (row) => orgName(row.org_id) },
+    // "(you)" belongs to the caller's own row, not to every colleague's organisation cell.
+    { label: 'Organisation', render: (row) => orgName(row.org_id, '—',
+      { ownSuffix: ' (your organisation)' }) },
     { label: 'Role', render: (row, { reload }) => roleCell(row, reload) },
     { label: 'Joined', render: (row) => fmtDay(row.created_at) },
     { label: 'Last login', render: (row) => fmtDate(row.last_login_at) },

@@ -1,7 +1,7 @@
-import { el, api, badge, field, fmtDate, fmtDay, can, toast, jurisdictionLabel }
+import { el, api, badge, field, fmtDate, fmtDay, can, toast, jurisdictionLabel, humanize }
   from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
-import { createPanel, remoteSelect, choiceSelect } from '/static/views/formkit.js';
+import { createPanel, remoteSelect, choiceSelect, atNoon } from '/static/views/formkit.js';
 
 // The same codes the compliance rules and labelling rules evaluate (services/compliance.py,
 // services/gmo.py LABELLING_RULES). A code outside this list would record an approval that
@@ -35,7 +35,9 @@ function approvalForm(reload) {
   const approvedOn = el('input', { type: 'date' });
   const expiresOn = el('input', { type: 'date' });
   const decided = el('div', { class: 'hint' });
-  const asInstant = (input) => (input.value ? `${input.value}T00:00:00Z` : null);
+  // Local noon (or now, for today), as every other date form: midnight UTC is the
+  // previous evening west of Greenwich.
+  const asInstant = (input) => atNoon(input.value);
 
   // Show what is already on record for the chosen event, so a decision is never taken blind.
   event.addEventListener('change', async () => {
@@ -44,7 +46,8 @@ function approvalForm(reload) {
     try {
       const approvals = await api(`/gmo/events/${event.value}/approvals`);
       decided.textContent = approvals.length
-        ? `On record: ${approvals.map((a) => `${a.jurisdiction} ${a.status}`).join(', ')}`
+        ? `On record: ${approvals.map((a) => `${jurisdictionLabel(a.jurisdiction)} — `
+          + `${humanize(a.status).toLowerCase()}`).join(', ')}`
         : 'No jurisdictional decision recorded yet.';
     } catch { decided.textContent = ''; }
   });
@@ -72,7 +75,8 @@ function approvalForm(reload) {
         reference: reference.value || null,
         approved_at: asInstant(approvedOn), expires_at: asInstant(expiresOn),
       } });
-      return `Decision recorded: ${jurisdiction.value} ${decision.value}`;
+      return `Decision recorded: ${jurisdictionLabel(jurisdiction.value)} — `
+        + `${humanize(decision.value).toLowerCase()}`;
     },
     onDone: reload,
   });
@@ -182,6 +186,12 @@ export const render = listView({
       ? el('span', { class: 'mono', title: row.tx_id, text: `${row.tx_id.slice(0, 12)}…` })
       : '—' },
   ],
+  // Client-side: the event list endpoint has no text search parameter.
+  search: { placeholder: 'Event code, crop, trait or developer',
+    fields: (row) => `${row.event_code} ${row.crop_type} ${row.trait} ${row.developer}` },
+  emptyFor: (active) => (active.awaiting_decision
+    ? { title: 'No events are awaiting a decision.',
+      message: 'Every registered event has a jurisdictional decision on record.' } : null),
   emptyTitle: 'No GMO events registered',
   emptyMessage: 'Screen a sequence first, then register the event against that screening.',
 });

@@ -1,5 +1,5 @@
 import { el, api, badge, fmtDate, fmtNum, table, toast, can, empty, lineChart,
-         confirmDialog, rowHeader, termLabel,
+         confirmDialog, rowHeader, channelLabel,
          titleCase, refreshView } from '/static/assets/core.js';
 import { createPanel, choiceSelect } from '/static/views/formkit.js';
 import { incidentLink, incidentTitle } from '/static/views/entity-links.js';
@@ -131,8 +131,8 @@ function telemetryCharts(series) {
     return [empty('No telemetry', 'This device has not reported in the last 48 hours.')];
   }
   return channels.map((key) => el('div', { class: 'u-m-12-0' }, [
-    el('h3', { text: termLabel(key) }),
-    lineChart(series.points, { valueKey: key, label: termLabel(key), threshold: null }),
+    el('h3', { text: channelLabel(key) }),
+    lineChart(series.points, { valueKey: key, label: channelLabel(key), threshold: null }),
   ]));
 }
 
@@ -305,7 +305,7 @@ export async function render({ id }) {
     el('div', { class: 'card' }, [
       el('h2', { text: 'Anomaly score' }),
       series.points.some((p) => p.anomaly_score !== null)
-        ? lineChart(series.points, { valueKey: 'anomaly_score', label: 'anomaly score',
+        ? lineChart(series.points, { valueKey: 'anomaly_score', label: 'Anomaly score',
           threshold: 0.65 })
         : empty('No scored readings', 'Anomaly scoring may be deferred; the health sweep '
           + 'scores readings that were stored while the AI service was unavailable.'),

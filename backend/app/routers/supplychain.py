@@ -59,8 +59,29 @@ def create_batch(payload: BatchCreate, db: DbSession,
 def list_batches(db: DbSession, paging: PagingDep,
                  principal: Annotated[object, Depends(require_permission(P.SUPPLY_READ))],
                  state: str | None = Query(default=None),
-                 integrity: str | None = Query(default=None)) -> Page[BatchOut]:
+                 integrity: str | None = Query(default=None),
+                 gmo: bool | None = Query(
+                     default=None, description="true: only batches with a GMO lineage; "
+                     "false: only batches without one"),
+                 awaiting_receipt: bool = Query(
+                     default=False, description="Only batches handed over to the caller's "
+                     "organisation whose arrival it has not yet booked in")
+                 ) -> Page[BatchOut]:
     query = visible(Batch, principal.role, principal.org_id).order_by(Batch.created_at.desc())
+    if gmo is True:
+        query = query.where(Batch.gmo_event_id.is_not(None))
+    elif gmo is False:
+        query = query.where(Batch.gmo_event_id.is_(None))
+    if awaiting_receipt:
+        # Same rule as the dashboard's "Hand-overs to book in" tile: held by someone other
+        # than the originator, with no receiving event recorded by that holder.
+        received = select(SupplyChainEvent.id).where(
+            SupplyChainEvent.batch_id == Batch.id,
+            SupplyChainEvent.biz_step == "receiving",
+            SupplyChainEvent.org_id == Batch.custodian_org_id)
+        query = query.where(Batch.custodian_org_id != Batch.org_id, ~received.exists())
+        if not principal.is_cross_tenant:
+            query = query.where(Batch.custodian_org_id == principal.org_id)
     if state:
         query = query.where(Batch.state == state.upper())
     if integrity:

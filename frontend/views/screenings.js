@@ -1,4 +1,5 @@
-import { el, api, badge, field, fmtDate, fmtPct, titleCase, toast, can } from '/static/assets/core.js';
+import { el, api, badge, field, fmtDate, fmtPct, humanize, termLabel, toast, can }
+  from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 
 function submitForm(reload) {
@@ -42,7 +43,7 @@ function submitForm(reload) {
         name: name.value, sequence: sequence.value, intent: intent.value,
         organism: organism.value || null,
       } });
-      toast(`Verdict ${result.verdict} — status ${result.status}`,
+      toast(`Verdict: ${humanize(result.verdict)} — ${humanize(result.status).toLowerCase()}`,
         result.verdict === 'CLEAR' ? 'ok' : 'error');
       window.location.hash = `#/screening/${result.id}`;
     } catch (error) {
@@ -65,6 +66,9 @@ export const render = listView({
     + 'database. Detects diverged homology, not just exact matches. Hazard sequences '
     + 'shipped here are synthetic motifs.',
   endpoint: '/biosecurity/screenings',
+  // Client-side: the screening list endpoint has no text search parameter.
+  search: { placeholder: 'Name, intent or organism',
+    fields: (row) => `${row.name} ${row.intent || ''} ${row.organism || ''}` },
   filters: [
     { key: 'verdict', label: 'Verdict', options: ['CLEAR', 'FLAG', 'BLOCK'] },
     { key: 'status', label: 'Status', options: ['APPROVED_AUTO', 'PENDING_REVIEW', 'BLOCKED',
@@ -79,7 +83,7 @@ export const render = listView({
     { label: 'Max identity', numeric: true, render: (row) => fmtPct(row.max_identity, 1) },
     { label: 'Hazard classes', render: (row) => (row.hazard_classes || []).length
       ? el('span', { class: 'hint',
-        text: row.hazard_classes.map(titleCase).join(', ') }) : '—' },
+        text: row.hazard_classes.map(termLabel).join(', ') }) : '—' },
     { label: 'DURC', render: (row) => row.durc_flag ? badge('CRITICAL') : '—' },
     { label: 'Status', render: (row) => badge(row.status) },
   ],

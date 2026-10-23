@@ -10,6 +10,8 @@ export const render = listView({
     + 'anomaly model contributes a novelty component. Visible to the batch owner and to the '
     + 'organisation holding it when the check ran.',
   endpoint: '/supply-chain/fraud-assessments',
+  // Client-side: the assessment list endpoint has no text search parameter.
+  search: { placeholder: 'Batch code', fields: (row) => `${row.batch_code || ''} ${row.batch_id}` },
   columns: [
     { label: 'Assessed', render: (row) => fmtDate(row.created_at) },
     // The business batch code is what a supply-chain operator recognises; the internal id
@@ -30,9 +32,10 @@ export const render = listView({
     { label: 'Ledger', render: (row) => badge(row.ledger_status) },
     { label: 'Reasons', render: (row) => (row.reasons || []).length
       ? el('details', {}, [
-        el('summary', { class: 'hint', text: `${row.reasons.length} finding(s)` }),
+        el('summary', { class: 'hint', text: row.reasons.length === 1 ? '1 finding'
+          : `${row.reasons.length} findings` }),
         reasonList(row.reasons),
-      ]) : el('span', { class: 'hint', text: 'none' }) },
+      ]) : el('span', { class: 'hint', text: 'None' }) },
   ],
   emptyTitle: 'No fraud assessments yet',
   emptyMessage: 'Run an integrity verification from a batch detail page to produce one.',

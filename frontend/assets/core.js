@@ -89,7 +89,7 @@ export function titleCase(value) {
 /* Terms whose natural English form is not simply the title-cased enum. Everything else
  * falls through to titleCase, so this stays short rather than becoming a dictionary. */
 const TERM_LABELS = {
-  KNOCK_IN: 'Knock-in', KNOCK_OUT: 'Knock-out', KNOCKOUT: 'Knockout',
+  KNOCK_IN: 'Knock-in', KNOCK_OUT: 'Knock-out', KNOCKOUT: 'Knock-out', KNOCKIN: 'Knock-in',
   BASE_EDIT: 'Base edit', PRIME_EDIT: 'Prime edit', MULTIPLEX: 'Multiplex',
   NON_GMO: 'Non-GMO', CONTAINS_GMO: 'Contains GMO', NO_GMO_RECORDED: 'No GMO recorded',
 };
@@ -219,6 +219,68 @@ export function entityLabel(value) {
     const lower = word.toLowerCase();
     return index === 0 ? lower.charAt(0).toUpperCase() + lower.slice(1) : lower;
   }).join(' ');
+}
+
+/* "1 finding", "3 findings": a count with its noun, never "finding(s)". */
+export function plural(count, singular, pluralForm = `${singular}s`) {
+  const number = Number(count) || 0;
+  return `${number.toLocaleString()} ${number === 1 ? singular : pluralForm}`;
+}
+
+/* ---------------- sensor channels ---------------- */
+/* Telemetry channel keys (ai/anomaly.py FEATURES) as a reader names them, with the unit.
+ * One table for every screen that shows a channel, so "yield_t_ha" never reaches the page
+ * as "Yield t ha". */
+const CHANNELS = {
+  air_temp_c: ['Air temperature', '°C'], soil_temp_c: ['Soil temperature', '°C'],
+  temp_c: ['Temperature', '°C'], chamber_temp_c: ['Chamber temperature', '°C'],
+  freezer_temp_c: ['Freezer temperature', '°C'],
+  humidity_pct: ['Humidity', '%'], soil_moisture_pct: ['Soil moisture', '%'],
+  moisture_pct: ['Moisture', '%'], co2_pct: ['CO₂', '%'], battery_pct: ['Battery', '%'],
+  ph: ['Soil pH', ''], ec_ds_m: ['Conductivity', 'dS/m'],
+  nitrogen_ppm: ['Nitrogen', 'ppm'], phosphorus_ppm: ['Phosphorus', 'ppm'],
+  potassium_ppm: ['Potassium', 'ppm'], rainfall_mm: ['Rainfall', 'mm'],
+  solar_w_m2: ['Solar radiation', 'W/m²'], wind_speed_ms: ['Wind speed', 'm/s'],
+  speed_ms: ['Speed', 'm/s'], speed_kmh: ['Speed', 'km/h'],
+  cabinet_airflow_ms: ['Cabinet airflow', 'm/s'], altitude_m: ['Altitude', 'm'],
+  swath_m: ['Swath width', 'm'], images_captured: ['Images captured', ''],
+  yield_t_ha: ['Yield', 't/ha'], flow_l_min: ['Flow', 'L/min'],
+  pressure_bar: ['Pressure', 'bar'], duration_s: ['Duration', 's'], shock_g: ['Shock', 'g'],
+  anomaly_score: ['Anomaly score', ''],
+};
+/* Fallback for a channel not in the table: compound units first, then single suffixes. */
+const UNIT_SUFFIXES = [
+  [['t', 'ha'], 't/ha'], [['l', 'min'], 'L/min'], [['w', 'm2'], 'W/m²'], [['ds', 'm'], 'dS/m'],
+  [['kmh'], 'km/h'], [['ms'], 'm/s'], [['pct'], '%'], [['c'], '°C'], [['mm'], 'mm'],
+  [['ppm'], 'ppm'], [['kg'], 'kg'], [['m'], 'm'], [['g'], 'g'], [['ha'], 'ha'],
+  [['bar'], 'bar'], [['s'], 's'],
+];
+
+/* [name, unit] for a channel key; unit is '' when the quantity has none. */
+export function channelParts(key) {
+  const known = CHANNELS[String(key || '').toLowerCase()];
+  if (known) return known;
+  const parts = String(key || '').toLowerCase().split('_').filter(Boolean);
+  for (const [suffix, unit] of UNIT_SUFFIXES) {
+    const tail = parts.slice(-suffix.length);
+    if (parts.length > suffix.length && tail.join('_') === suffix.join('_')) {
+      return [termLabel(parts.slice(0, -suffix.length).join('_')), unit];
+    }
+  }
+  return [termLabel(parts.join('_')), ''];
+}
+
+/* "Yield (t/ha)", "Moisture (%)", "Soil pH": a heading or axis caption for a channel. */
+export function channelLabel(key) {
+  const [name, unit] = channelParts(key);
+  return unit ? `${name} (${unit})` : name;
+}
+
+/* "Yield 7.2 t/ha", "Moisture 14%": one reading in running text. */
+export function channelReading(key, value, digits = 1) {
+  const [name, unit] = channelParts(key);
+  const tight = unit === '%' || unit === '°C';
+  return `${name} ${fmtNum(value, digits)}${unit && !tight ? ' ' : ''}${unit}`;
 }
 
 /* ---------------- severity ---------------- */
@@ -369,7 +431,7 @@ export function orgDirectory() {
 /* A span that shows an organisation's name once the directory has loaded. The caller's own
  * organisation is named from the session, so it reads correctly even for a role that has
  * no directory access. */
-export function orgName(orgId, fallback = '—') {
+export function orgName(orgId, fallback = '—', { ownSuffix = ' (you)' } = {}) {
   const span = el('span', { text: orgId ? '…' : fallback });
   if (orgId) {
     orgDirectory().then((rows) => {
@@ -378,7 +440,7 @@ export function orgName(orgId, fallback = '—') {
       const own = orgId === current?.org_id;
       span.textContent = found ? found.name
         : (own ? (current?.org_name || 'Your organisation') : fallback);
-      if (own && (found || current?.org_name)) span.textContent += ' (you)';
+      if (own && ownSuffix && (found || current?.org_name)) span.textContent += ownSuffix;
     });
   }
   return span;
@@ -483,7 +545,7 @@ export function pager(page, pageSize, total, onChange) {
     el('button', {
       disabled: page <= 1, onClick: () => onChange(page - 1), text: 'Previous',
     }),
-    el('span', { class: 'hint', text: `Page ${page} of ${pages} — ${total} record(s)` }),
+    el('span', { class: 'hint', text: `Page ${page} of ${pages} — ${plural(total, 'record')}` }),
     el('button', {
       disabled: page >= pages, onClick: () => onChange(page + 1), text: 'Next',
     }),

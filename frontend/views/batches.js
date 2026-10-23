@@ -1,4 +1,4 @@
-import { el, api, badge, can, fmtDay, fmtNum, orgName } from '/static/assets/core.js';
+import { el, api, badge, can, fmtDay, fmtNum, orgName, humanize } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, dateInput, todayIso, atNoon } from '/static/views/formkit.js';
 
@@ -6,7 +6,30 @@ function wantedCrop() {
   return new URLSearchParams(window.location.hash.split('?')[1] || '').get('crop');
 }
 
+/* Field and farm names, so the crops in the harvest selector can be told apart: four
+ * plantings of the same hybrid on the same day otherwise read identically. */
+async function cropPlaces() {
+  const places = { farms: new Map(), fields: new Map() };
+  if (!can('farm:read')) return places;
+  const [farms, fields] = await Promise.all([
+    api('/farms?page=1&page_size=200').catch(() => ({ items: [] })),
+    api('/fields?page=1&page_size=200').catch(() => ({ items: [] })),
+  ]);
+  for (const row of farms.items || []) places.farms.set(row.id, row.name);
+  for (const row of fields.items || []) places.fields.set(row.id, row);
+  return places;
+}
+
+function cropLabel(row, places = null) {
+  const base = `${row.crop_type}${row.variety ? ` ${row.variety}` : ''}`;
+  const fieldRow = places?.fields.get(row.field_id);
+  const farmName = fieldRow ? places.farms.get(fieldRow.farm_id) : null;
+  const where = fieldRow ? ` — ${fieldRow.name}${farmName ? `, ${farmName}` : ''}` : '';
+  return `${base}${where} — planted ${fmtDay(row.planted_at)}${row.gmo_event_id ? ' (GMO)' : ''}`;
+}
+
 function createForm(reload) {
+  const placesReady = cropPlaces();
   const code = el('input', { required: 'required', minlength: '3', maxlength: '60',
     placeholder: 'your own batch code, e.g. MAIZE-2026-014' });
   // Every selector is fed from a tenant-scoped list endpoint, so a foreign batch, farm, seed
@@ -18,7 +41,7 @@ function createForm(reload) {
   });
   const parent = remoteSelect({
     endpoint: '/supply-chain/batches', required: false,
-    label: (row) => `${row.batch_code} — ${row.state.toLowerCase()}`,
+    label: (row) => `${row.batch_code} — ${humanize(row.state).toLowerCase()}`,
     placeholder: 'None (this is an origin batch)',
     emptyLabel: 'No existing batch to derive from',
   });
@@ -26,8 +49,7 @@ function createForm(reload) {
   // planting on the server, so they need not be chosen again below.
   const crop = remoteSelect({
     endpoint: '/crops', required: false, requires: 'farm:read',
-    label: (row) => `${row.crop_type}${row.variety ? ` ${row.variety}` : ''} — planted `
-      + `${fmtDay(row.planted_at)}${row.gmo_event_id ? ' (GMO)' : ''}`,
+    label: (row) => cropLabel(row),
     // A crop already marked harvested (or failed) cannot be harvested into a batch again.
     filter: (row) => !['HARVESTED', 'FAILED'].includes(row.status),
     placeholder: 'Not harvested from one of your crops',
@@ -46,7 +68,17 @@ function createForm(reload) {
   const gmoEvent = remoteSelect({
     endpoint: '/gmo/events', required: false, requires: 'gmo:read',
     label: (row) => `${row.event_code} — ${row.crop_type}, ${row.trait}`,
-    placeholder: 'Not a GMO batch', emptyLabel: 'No GMO events registered',
+    // An empty list here usually means the events belong to the developer, not that none
+    // exist: a grower's GMO lineage comes from the planting, not from this selector.
+    placeholder: 'Not a GMO batch',
+    emptyLabel: 'GMO lineage is taken from the harvested crop',
+  });
+  Promise.all([crop.whenReady, placesReady]).then(([rows, places]) => {
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    for (const option of crop.options) {
+      const row = byId.get(option.value);
+      if (row) option.textContent = cropLabel(row, places);
+    }
   });
   // The server takes farm, seed lot and GMO event from the chosen crop and rejects a request
   // naming different ones, so they are cleared and locked while a crop is chosen.
@@ -138,7 +170,23 @@ export const render = listView({
       'IN_TRANSIT', 'RECEIVED', 'STORED', 'RETAILED', 'RECALLED'] },
     { key: 'integrity', label: 'Integrity', options: ['VERIFIED', 'SUSPECT', 'FAILED',
       'UNVERIFIED'] },
+    { key: 'gmo', label: 'GMO lineage', options: [['true', 'GMO lineage'],
+      ['false', 'No GMO recorded']] },
+    // Batches handed to this organisation whose arrival has not been booked in yet (the
+    // dashboard's "Hand-overs to book in" tile).
+    { key: 'awaiting_receipt', label: 'Hand-over', allLabel: 'Any',
+      options: [['true', 'Received, not booked in']] },
   ],
+  emptyFor: (active) => {
+    if (active.awaiting_receipt) {
+      return { title: 'Nothing to book in',
+        message: 'Every batch handed to your organisation has a receiving event.' };
+    }
+    if (active.gmo === 'true') {
+      return { title: 'No GMO batches', message: 'No batch you hold has a GMO lineage.' };
+    }
+    return null;
+  },
   columns: [
     { label: 'Batch', render: (row) => el('a', { href: `#/batch/${row.id}`, class: 'mono',
       text: row.batch_code }) },
