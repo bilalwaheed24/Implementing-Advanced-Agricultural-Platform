@@ -30,6 +30,15 @@ DEFAULT_ORGS = {
     "RegulatorMSP": "Regulator and Certification Body",
 }
 
+# Organisation type of each consortium identity. Submit rights are granted per type
+# (contracts.SUBMIT_RIGHTS); other organisations register theirs via MSPRegistry.ensure.
+DEFAULT_ORG_TYPES = {
+    "BiotechMSP": "BIOTECH",
+    "FarmMSP": "FARM",
+    "SupplyMSP": "SUPPLY",
+    "RegulatorMSP": "REGULATOR",
+}
+
 
 class Ledger:
     def __init__(self, data_dir: str | Path = "./ledger_data", channel: str = "agri-channel") -> None:
@@ -43,7 +52,7 @@ class Ledger:
         self.state: dict[str, Any] = {}
         self._tx_index: dict[str, tuple[int, int]] = {}     # tx_id -> (block number, position)
         for msp_id, name in DEFAULT_ORGS.items():
-            self.msp.ensure(msp_id, name)
+            self.msp.ensure(msp_id, name, DEFAULT_ORG_TYPES[msp_id])
         self._load()
 
     # -- persistence -----------------------------------------------------
@@ -107,9 +116,11 @@ class Ledger:
             if identity is None:
                 raise LedgerError(f"Unknown submitting organisation {submitter_msp}")
             allowed = SUBMIT_RIGHTS.get(key)
-            if allowed is not None and submitter_msp not in allowed:
+            org_type = identity.org_type
+            if allowed is not None and org_type not in allowed:
                 raise ContractError(
-                    f"{submitter_msp} is not authorised to submit {key}; allowed: {sorted(allowed)}")
+                    f"{submitter_msp} (organisation type {org_type or 'unregistered'}) is not "
+                    f"authorised to submit {key}; allowed organisation types: {sorted(allowed)}")
 
             # 1. simulate against the current world state
             handler = resolve(contract, function)
@@ -156,9 +167,17 @@ class Ledger:
                     raise EndorsementError(f"Endorsing organisation {msp_id} is unavailable")
                 endorsements.append({"msp_id": msp_id, "signature": identity.sign(payload)})
         else:
+            # The submitter endorses its own transaction when it is a listed MSP or of the
+            # same organisation type as one (an admin-created SUPPLY organisation endorses
+            # like SupplyMSP); otherwise the first available listed MSP endorses.
+            required_types = {self.msp.org_type(m) for m in required} - {None}
+            submitter_type = self.msp.org_type(submitter)
+            eligible = set(required)
+            if submitter_type is not None and submitter_type in required_types:
+                eligible.add(submitter)
             candidates = [submitter] + [o for o in required if o != submitter]
             for msp_id in candidates:
-                if msp_id in required:
+                if msp_id in eligible:
                     identity = self.msp.get(msp_id)
                     if identity is not None:
                         endorsements.append({"msp_id": msp_id, "signature": identity.sign(payload)})

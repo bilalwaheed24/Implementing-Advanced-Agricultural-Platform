@@ -45,6 +45,23 @@ def main() -> None:
 
         seed_demo.seed(reset_first=False)
 
+    # Register every organisation's ledger identity with its organisation type: submit
+    # rights are granted per type, and organisations created before types were registered
+    # (or while the ledger was down) would otherwise be refused. Never fatal.
+    from app.core.database import SessionLocal                        # noqa: PLC0415
+    from app.services import fabric_bridge, ledger_client             # noqa: PLC0415
+
+    try:
+        with SessionLocal() as db:
+            print(f"Ledger identities synced: {ledger_client.sync_identities(db)}")
+    except Exception as exc:                                          # noqa: BLE001
+        print(f"Ledger identity sync skipped: {exc}")
+
+    # Anything that started a background Fabric mirror above (the seed) must not lose it to
+    # exec/exit: wait, bounded, so the mirror records its outcome in the journal.
+    if fabric_bridge.enabled() and not fabric_bridge.flush(timeout=90):
+        print("Fabric mirror still in flight; the scheduled re-mirror sweep will finish it.")
+
     if args.no_serve:
         return
     os.execvp(sys.executable, [

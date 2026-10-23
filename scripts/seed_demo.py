@@ -22,7 +22,7 @@ from app.core.database import SessionLocal, create_all, drop_all          # noqa
 from app.core.security import (device_signature, encrypt_at_rest,         # noqa: E402
                                generate_device_secret, hash_password, utcnow,
                                verification_code)
-from app.models import (Certification, Crop, Device, DeviceVulnerability, Farm,  # noqa: E402
+from app.models import (Crop, Device, DeviceVulnerability, Farm,  # noqa: E402
                         Field, HazardSequence, Organization, Product, User)
 
 DEMO_PASSWORD = "DemoPassw0rd!2026"      # documented demo credential, not a production secret
@@ -74,8 +74,12 @@ DEVICE_PLAN = [
     ("SOIL_SENSOR", "TerraProbe TP-200", "2.3.1", 900),
     ("SOIL_SENSOR", "TerraProbe TP-200", "2.1.0", 900),
     ("WEATHER_STATION", "AeroStat WS-40", "4.0.2", 600),
-    ("DRONE", "AgriWing X5", "1.9.4", 30),
-    ("YIELD_MONITOR", "HarvestSense YM-9", "3.2.0", 10),
+    # Reporting intervals are what the silent-device sweep measures against (three missed
+    # intervals). A drone uplinks a status summary per flight and a yield monitor batches its
+    # readings, not every few seconds: the earlier 30 s / 10 s made both "silent" within a
+    # minute of seeding whenever the simulator was not running.
+    ("DRONE", "AgriWing X5", "1.9.4", 1800),
+    ("YIELD_MONITOR", "HarvestSense YM-9", "3.2.0", 600),
     ("IRRIGATION_CONTROLLER", "AquaFlow IC-12", "1.4.7", 1800),
     ("COLD_CHAIN_SENSOR", "ChillGuard CC-3", "2.0.5", 300),
     # The cooperative's seed-testing lab (GMO PCR screening): biosafety cabinet with incubator
@@ -98,6 +102,9 @@ PRODUCTS = [
     ("09501101530027", "Chilled Sweetcorn 750g", "Chilled vegetables", False, False, 0.0, 4.0),
 ]
 
+
+# Longest the seeder waits for its background Fabric mirrors before returning.
+FABRIC_FLUSH_SECONDS = 90.0
 
 # Readings per device across the observation window, and how far back that window runs.
 TELEMETRY_READINGS_PER_DEVICE = 6
@@ -220,7 +227,36 @@ def _seed_crop_vision(db, fields, farm_org) -> int:
     return seeded
 
 
-def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now) -> dict:
+def _seed_in_transit_readings(db, sensor, secret, rng, departed, arrived, count=4) -> int:
+    """Cold-chain readings taken during a shipment's journey, through the real ingestion
+    path while the shipment is in transit, so they bind to it as a travelling sensor's would.
+    Held within the product's 0-4 °C storage range: the seeded shipment demonstrates cold-
+    chain evidence within limits (excursions are demonstrated from iot/simulator.py)."""
+    import secrets as _secrets
+
+    from ai.data.generate import telemetry_reading
+    from app.services import telemetry as telemetry_service
+
+    stored = 0
+    for step in range(count):
+        recorded_at = departed + (arrived - departed) * (step + 1) / (count + 1)
+        readings = telemetry_reading("COLD_CHAIN_SENSOR", recorded_at, rng)
+        readings["temp_c"] = round(min(3.6, max(1.2, readings["temp_c"])), 2)
+        timestamp = utcnow().isoformat().replace("+00:00", "Z")
+        nonce = _secrets.token_hex(16)
+        signature = device_signature(secret, sensor.id, timestamp, nonce, readings)
+        try:
+            telemetry_service.verify_and_ingest(db, sensor.id, timestamp, nonce, signature,
+                                                recorded_at, readings, score_inline=True)
+            stored += 1
+        except Exception as error:                                  # noqa: BLE001
+            print(f"  in-transit cold-chain reading skipped: {error}")
+    db.flush()
+    return stored
+
+
+def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now,
+                                   device_secrets=None) -> dict:
     """Seed the biotechnology and supply-chain story through the real service layer.
 
     Without this, a clean reset leaves ten screens empty: screenings, CRISPR, review
@@ -349,6 +385,10 @@ def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now) -> 
                 departed_at=now - timedelta(days=departed_days), arrived_at=None,
                 cold_chain_device_id=sensor.id if sensor else None)
             db.flush()
+            if sensor is not None and (device_secrets or {}).get(sensor.id):
+                _seed_in_transit_readings(db, sensor, device_secrets[sensor.id], rng,
+                                          now - timedelta(days=departed_days),
+                                          now - timedelta(days=arrived_days))
             supplychain.arrive_shipment(db, shipment, receiver_org.id, receiver.id,
                                         receiver.role, now - timedelta(days=arrived_days))
             db.flush()
@@ -409,33 +449,58 @@ def _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now) -> 
             print(f"  compliance seed skipped for {jurisdiction}: {error}")
 
     # Two further batches at earlier points in their journeys. A single row made the supply
-    # chain screens look like nothing had happened; a mix of states shows the lifecycle.
-    for code, gtin, qty, lot, gmo_event, steps, region in [
-            ("B-2026-0211", "09501101530003", 2400.0, seed_lot, event,
-             [("harvesting", "in_progress", "Green Valley South", 41.88, -93.41, 4)], "Iowa"),
-            ("B-2026-0298", "09501101530010", 950.0, None, None,
-             [("harvesting", "in_progress", "Riverbend Estate", 40.81, -96.68, 6),
-              ("transforming", "in_progress", "Continental Foods Plant A", 41.88, -93.41, 3)],
-             "Nebraska")]:
-        try:
-            other_product = db.execute(
-                select(Product).where(Product.gtin == gtin)).scalar_one()
-            extra = supplychain.create_batch(
-                db, supply_org.id, supply_user.id, supply_user.role, code, other_product.id,
-                qty, "kg", None, lot.id if lot else None, None, farms[1].id,
-                gmo_event.id if gmo_event else None, region, "US",
-                now - timedelta(days=steps[-1][5] + 2))
-            db.flush()
-            for biz_step, disposition, place, lat, lon, days_ago in steps:
-                supplychain.record_event(
-                    db, supply_org.id, supply_user.id, supply_user.role, extra, biz_step,
-                    disposition, "OBJECT", None, place, lat, lon, extra.quantity, "kg", None,
-                    now - timedelta(days=days_ago), {"seeded": True})
-                db.flush()
-            supplychain.verify_batch(db, extra, supply_user.id, supply_user.role)
-            db.flush()
-        except Exception as error:                                  # noqa: BLE001
-            print(f"  extra batch seed skipped for {code}: {error}")
+    # chain screens look like nothing had happened; a mix of states shows the lifecycle. Both
+    # follow the cross-organisation model: a batch with farm lineage is created by the farm
+    # from its own crop and handed over, and the processor's own batch carries no farm lineage
+    # it could not see.
+    south_field = next(f for f in fields if f.farm_id == farms[1].id)
+    try:
+        # B-2026-0211: harvested by the farm from a second planting of the supplied seed lot
+        # and on its way to the processor (in transit: the processor will mark it arrived).
+        south_crop = Crop(org_id=farm_org.id, field_id=south_field.id, crop_type="Maize",
+                          variety="GV-Hybrid-12", gmo_event_id=event.id,
+                          seed_lot_id=seed_lot.id, planted_at=now - timedelta(days=140),
+                          expected_harvest=now - timedelta(days=5), status="HARVESTED")
+        db.add(south_crop)
+        db.flush()
+        extra = supplychain.create_batch(
+            db, farm_org.id, farmer.id, farmer.role, "B-2026-0211", product.id, 2400.0, "kg",
+            None, None, south_crop.id, None, None, "Iowa", "US", now - timedelta(days=5))
+        db.flush()
+        supplychain.record_event(
+            db, farm_org.id, farmer.id, farmer.role, extra, "harvesting", "in_progress",
+            "OBJECT", None, "Green Valley South", 41.88, -93.41, extra.quantity, "kg", None,
+            now - timedelta(days=4), {"seeded": True})
+        db.flush()
+        supplychain.create_shipment(
+            db, farm_org.id, farmer.id, farmer.role, to_org_id=supply_org.id,
+            sscc="003123450000001155", batch_id=extra.id, carrier="Green Valley Haulage",
+            origin_name="Green Valley South", origin_lat=41.88, origin_lon=-93.41,
+            destination_name=plant[0], destination_lat=plant[1], destination_lon=plant[2],
+            departed_at=now - timedelta(hours=10), arrived_at=None, cold_chain_device_id=None)
+        db.flush()
+        supplychain.verify_batch(db, extra, farmer.id, farmer.role)
+        db.flush()
+    except Exception as error:                                      # noqa: BLE001
+        print(f"  extra batch seed skipped for B-2026-0211: {error}")
+
+    try:
+        # B-2026-0298: the processor's own batch of soy bought in from a grower outside the
+        # platform, so no farm, seed lot or GMO lineage is recorded for it.
+        soy = db.execute(select(Product).where(Product.gtin == "09501101530010")).scalar_one()
+        extra = supplychain.create_batch(
+            db, supply_org.id, supply_user.id, supply_user.role, "B-2026-0298", soy.id, 950.0,
+            "kg", None, None, None, None, None, "Nebraska", "US", now - timedelta(days=6))
+        db.flush()
+        supplychain.record_event(
+            db, supply_org.id, supply_user.id, supply_user.role, extra, "transforming",
+            "in_progress", "OBJECT", None, plant[0], plant[1], plant[2], extra.quantity, "kg",
+            None, now - timedelta(days=3), {"seeded": True})
+        db.flush()
+        supplychain.verify_batch(db, extra, supply_user.id, supply_user.role)
+        db.flush()
+    except Exception as error:                                      # noqa: BLE001
+        print(f"  extra batch seed skipped for B-2026-0298: {error}")
 
     try:
         compliance.environmental_impact(
@@ -596,20 +661,29 @@ def seed(reset_first: bool) -> dict:
         db.flush()
 
         # --- certifications -------------------------------------------------
+        # Issued through the service, so each is anchored on the ledger and journalled like
+        # any other certificate: inserting the rows directly left them PENDING for ever, with
+        # nothing on the ledger for a later revocation to act on.
+        from app.services import supplychain                          # noqa: PLC0415
+
         regulator = orgs[3]
-        db.add(Certification(
-            cert_code="ORG-2026-0001", cert_type="ORGANIC", standard="USDA-NOP",
-            issuer_org_id=regulator.id, subject_org_id=supply_org.id,
-            scope="Organic milled products, Continental Foods Processing",
-            valid_from=now - timedelta(days=200), valid_to=now + timedelta(days=165),
-            status="ACTIVE", anchor_status="PENDING"))
-        db.add(Certification(
-            cert_code="NGM-2026-0002", cert_type="NON_GMO", standard="NON-GMO-PROJECT",
-            issuer_org_id=regulator.id, subject_org_id=supply_org.id,
-            scope="Non-GMO soy products",
-            valid_from=now - timedelta(days=400), valid_to=now - timedelta(days=30),
-            status="ACTIVE", anchor_status="PENDING"))     # deliberately expired for the demo
-        db.flush()
+        certifier = users["CERTIFIER"]
+        for cert_code, cert_type, standard, scope, valid_from, valid_to in [
+                ("ORG-2026-0001", "ORGANIC", "USDA-NOP",
+                 "Organic milled products, Continental Foods Processing",
+                 now - timedelta(days=200), now + timedelta(days=165)),
+                # Deliberately expired: the expiry sweep and the EXPIRED status have
+                # something real to show.
+                ("NGM-2026-0002", "NON_GMO", "NON-GMO-PROJECT", "Non-GMO soy products",
+                 now - timedelta(days=400), now - timedelta(days=30))]:
+            try:
+                supplychain.issue_certification(
+                    db, regulator.id, certifier.id, certifier.role, cert_code=cert_code,
+                    cert_type=cert_type, standard=standard, subject_org_id=supply_org.id,
+                    scope=scope, valid_from=valid_from, valid_to=valid_to)
+                db.flush()
+            except Exception as error:                              # noqa: BLE001
+                print(f"  certification seed skipped for {cert_code}: {error}")
 
         # --- crops ----------------------------------------------------------
         for field in fields[:4]:
@@ -626,7 +700,8 @@ def seed(reset_first: bool) -> dict:
         vision = _seed_crop_vision(db, fields, farm_org)
 
         # --- biotechnology and supply chain (FR-B/C/D/F) --------------------
-        domain = _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now)
+        domain = _seed_biotech_and_supply_chain(db, orgs, users, farms, fields, rng, now,
+                                                device_secrets)
         db.commit()
 
         summary = {
@@ -641,6 +716,16 @@ def seed(reset_first: bool) -> dict:
             "crop_vision_analyses": vision,
             **domain,
         }
+
+    # The commit above started a background Fabric mirror per anchored write. Wait for them
+    # (bounded) before returning: callers exit or exec right after (start_api.py replaces
+    # itself with uvicorn, the Kubernetes seed job exits), which would kill the threads
+    # before they record MIRRORED, leaving every seeded anchor PENDING until a re-mirror.
+    from app.services import fabric_bridge                              # noqa: PLC0415
+
+    if fabric_bridge.enabled() and not fabric_bridge.flush(timeout=FABRIC_FLUSH_SECONDS):
+        print(f"  Fabric mirror still in flight after {FABRIC_FLUSH_SECONDS:.0f}s; the "
+              "scheduled re-mirror sweep will finish it.")
 
     from app.core.config import get_settings
 
@@ -675,10 +760,13 @@ def main() -> int:
     from app.services import fabric_bridge                              # noqa: PLC0415
 
     if fabric_bridge.enabled():
-        fabric_bridge.flush()            # the last anchors must reach Fabric before exit
-        mirrored = fabric_bridge.status()
-        print(f"  Hyperledger Fabric mirror: {mirrored.get('mirrored_ok', 0)} recent anchor(s) "
-              f"written, {mirrored.get('mirrored_failed', 0)} failed.")
+        fabric_bridge.flush()            # seed() already waited; this is a no-op normally
+        from app.services import anchoring                              # noqa: PLC0415
+
+        with SessionLocal() as db:
+            mirrored = anchoring.mirror_counts(db)
+        print(f"  Hyperledger Fabric mirror: {mirrored['mirrored_ok']} anchor(s) mirrored, "
+              f"{mirrored['mirrored_failed']} failed, {mirrored['mirror_pending']} pending.")
     return 0
 
 
