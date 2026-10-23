@@ -6,7 +6,9 @@ is set, every successful anchor that carries a content hash is also written to t
 then be repeated against Fabric, which the platform's own signing keys cannot rewrite.
 
 A Fabric outage must never block or fail a business write: mirroring runs on a background
-thread, and failures are recorded for the status page and logged.
+thread, and failures are logged. Each journalled anchor's mirror outcome is persisted in
+`ledger_writes` (services/anchoring.py), which re-mirrors anything that failed or never ran
+and supplies the counts on the status page; the in-memory list below is only a recent feed.
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlencode
 
 from ..core.config import get_settings
@@ -56,6 +58,12 @@ def key_for(contract: str, function: str, args: dict[str, Any]) -> tuple[str, st
     if len(digest) != 64 or not identifier:
         return None
     return f"{prefix}:{identifier}", digest
+
+
+def hash_arg(contract: str, function: str) -> str | None:
+    """Name of the argument carrying the mirrored hash, or None for an unmirrored function."""
+    spec = _KEYS.get(f"{contract}.{function}")
+    return spec[2] if spec else None
 
 
 def _call(method: str, path: str, body: dict[str, Any] | None = None,
@@ -106,13 +114,20 @@ def anchor_now(contract: str, function: str, args: dict[str, Any], local_tx_id: 
 
 
 def mirror(contract: str, function: str, args: dict[str, Any], local_tx_id: str,
-           source_msp: str) -> None:
-    """Fire-and-forget mirror, used by ledger_client after a successful local anchor."""
+           source_msp: str,
+           on_done: Callable[[dict[str, Any] | None], None] | None = None) -> None:
+    """Background mirror, used after a successful local anchor. `on_done` receives the
+    outcome on the mirror thread (anchoring.py persists it); without it the outcome is only
+    logged and kept in the recent feed."""
     if not enabled() or key_for(contract, function, args) is None:
         return
     def run() -> None:
         try:
-            anchor_now(contract, function, dict(args), local_tx_id, source_msp)
+            entry = anchor_now(contract, function, dict(args), local_tx_id, source_msp)
+            if on_done is not None:
+                on_done(entry)
+        except Exception as exc:                                   # noqa: BLE001
+            log_event(app_log, logging.WARNING, "fabric mirror thread failed", error=str(exc))
         finally:
             with _lock:
                 _pending.discard(threading.current_thread())
@@ -155,12 +170,13 @@ def history(key: str) -> dict[str, Any]:
 
 
 def status() -> dict[str, Any]:
+    """Bridge reachability and this process's recent mirror feed. The durable counts
+    (mirrored_ok, mirrored_failed, mirror_pending) are added by the router from the database
+    (anchoring.mirror_counts), because the feed here resets with the process."""
     if not enabled():
         return {"enabled": False, "detail": "FABRIC_BRIDGE_URL is not set: the platform runs "
                                             "its single-node ledger only."}
     code, body = _call("GET", "/health", timeout=5)
     with _lock:
         recent = list(_recent)
-    return {"enabled": True, "reachable": code == 200, "bridge": body, "recent": recent,
-            "mirrored_ok": sum(1 for r in recent if r["ok"]),
-            "mirrored_failed": sum(1 for r in recent if not r["ok"])}
+    return {"enabled": True, "reachable": code == 200, "bridge": body, "recent": recent}

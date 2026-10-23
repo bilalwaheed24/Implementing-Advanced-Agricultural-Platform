@@ -87,20 +87,26 @@ services:
     restart: unless-stopped
     networks: [backend]
 
-  # Scheduled security sweeps every 15 minutes: silent devices, data-theft scoring,
-  # certification expiry (scripts/scheduled_tasks.py). Same image as the api.
-  # Opt-in so a quiet demo stack is not flooded with "device stopped reporting" warnings:
-  #   docker compose --profile scheduler up -d
+  # Scheduled sweeps every 5 minutes (scripts/scheduled_tasks.py), same image as the api:
+  # replay of ledger anchors that were left PENDING/FAILED by a ledger outage, re-mirroring
+  # to Fabric, silent devices, data-theft scoring, certification expiry. Runs by default:
+  # without it an anchor missed during an outage is never retried. One short pass then
+  # sleep; repeated passes do not duplicate open alerts.
   scheduler:
     <<: *hardened
     image: absp-api:local
-    profiles: [scheduler]
-    entrypoint: ["python", "scripts/scheduled_tasks.py", "--every", "900"]
+    entrypoint: ["python", "scripts/scheduled_tasks.py", "--every", "300"]
     environment:
       ENV: development
       DATABASE_URL: *db-url
       JWT_SECRET: ${JWT_SECRET:?}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?}
+      # The anchor sweep submits to the same ledger and Fabric bridge as the api.
+      LEDGER_SERVICE_URL: http://ledger:8200
+      SERVICE_TOKEN: ${SERVICE_TOKEN:?}
+      FABRIC_BRIDGE_URL: ${COMPOSE_FABRIC_BRIDGE_URL:-}
+      FABRIC_BRIDGE_TOKEN: ${FABRIC_BRIDGE_TOKEN:-}
+    extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       api: { condition: service_healthy }
     healthcheck: { disable: true }

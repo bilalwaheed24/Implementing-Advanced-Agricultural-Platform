@@ -1,5 +1,6 @@
-# Scheduled security sweeps: silent devices, agricultural data-theft scoring and
-# certification expiry. Runs scripts/scheduled_tasks.py once every 15 minutes.
+# Scheduled sweeps: ledger anchor retry and Fabric re-mirror, silent devices, agricultural
+# data-theft scoring and certification expiry. Runs scripts/scheduled_tasks.py once every
+# 15 minutes; the anchor retry reaches the ledger through LEDGER_SERVICE_URL (absp-config).
 # Labelled as a backend client so the NetworkPolicy lets it reach the database.
 apiVersion: batch/v1
 kind: CronJob

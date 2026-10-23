@@ -661,6 +661,43 @@ class BlockchainTx(Base):
     created_at: Mapped[datetime] = _created()
 
 
+class LedgerWrite(Base):
+    """Journal of every ledger submission made on behalf of a stored record (services/anchoring).
+
+    Keeps the exact (contract, function, args, submitter) so a write that could not be anchored
+    is replayed later in its original order, and records whether each anchored write reached
+    the Hyperledger Fabric mirror, so neither survives only in process memory.
+    """
+    __tablename__ = "ledger_writes"
+    __table_args__ = (Index("ix_ledger_writes_status_created", "anchor_status", "created_at"),)
+    id: Mapped[str] = _pk()
+    contract: Mapped[str] = mapped_column(String(40), nullable=False)
+    function: Mapped[str] = mapped_column(String(60), nullable=False)
+    args: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    submitter_msp: Mapped[str] = mapped_column(String(40), nullable=False)
+    # The world-state key this write creates or advances, and the keys it needs to exist.
+    # A write waits behind any unanchored earlier write to one of them.
+    chain_key: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    requires: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    entity_type: Mapped[str | None] = mapped_column(String(40))
+    entity_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    anchor_status: Mapped[str] = mapped_column(String(16), nullable=False)   # PENDING|FAILED|ANCHORED|REJECTED
+    tx_id: Mapped[str | None] = mapped_column(String(64))
+    block_number: Mapped[int | None] = mapped_column(Integer)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    anchored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Fabric mirror: NULL when the write carries no content hash; else PENDING|MIRRORED|FAILED.
+    fabric_key: Mapped[str | None] = mapped_column(String(160))
+    fabric_status: Mapped[str | None] = mapped_column(String(16), index=True)
+    fabric_tx_id: Mapped[str | None] = mapped_column(String(128))
+    fabric_error: Mapped[str | None] = mapped_column(Text)
+    fabric_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    mirrored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
 class AuditLog(Base):
     """Append-only hash-chained audit trail (ADR-010). Never updated or deleted."""
     __tablename__ = "audit_logs"
