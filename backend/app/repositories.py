@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 from .core import request_flags
 from .core.errors import NotFound, PermissionDenied
 from .core.permissions import (CROSS_TENANT_ROLES, OVERSIGHT_ALERT_CATEGORIES, Role,
-                               cross_tenant_categories, is_security_oversight)
+                               cross_tenant_categories, is_security_oversight,
+                               may_read_oversight_alerts)
 
 T = TypeVar("T")
 
@@ -72,7 +73,10 @@ def category_limit_conditions(model: type, role: str, org_id: str | None = None)
     """WHERE conditions narrowing a category-limited cross-tenant role (a biosafety officer)
     to alerts and incidents of its oversight categories in any organisation, plus everything
     its own organisation is a party to (round 6). Without `org_id` only the oversight
-    categories match. Empty for every other role and model."""
+    categories match. Empty for every other role and model.
+
+    Her categories now include DATA_THEFT and LEDGER, which she reads but may not work; see
+    permissions.CATEGORY_LIMITED_CROSS_TENANT for why that reach was widened."""
     limited = cross_tenant_categories(role)
     if not limited:
         return []
@@ -93,8 +97,12 @@ def oversight_conditions(model: type, role: str, org_id: str | None = None) -> l
     hold alert:read and incident:read, so the suspect (and colleagues) could read "Possible
     data exfiltration by ..." and the analysts' notes on its incident (round 5). Alerts in
     OVERSIGHT_ALERT_CATEGORIES, and incidents of those categories, opened from such an alert
-    or carrying one, are visible to SECURITY_OVERSIGHT_ROLES only. Empty for those roles and
-    for every other model.
+    or carrying one, are hidden from every role but OVERSIGHT_ALERT_READER_ROLES. Empty for
+    the roles that may read them unrestrictedly and for every other model.
+
+    A read gate only. A regulator and a biosafety officer read these alerts for oversight but
+    may not acknowledge, resolve or be assigned them: those checks ask is_security_oversight,
+    not this function.
 
     A category-limited cross-tenant role is further narrowed by `category_limit_conditions`
     (pass the caller's `org_id` so its own organisation's alerts stay visible)."""
@@ -103,6 +111,11 @@ def oversight_conditions(model: type, role: str, org_id: str | None = None) -> l
     from .models import Alert, Incident                          # noqa: PLC0415 (cycle)
 
     limits = category_limit_conditions(model, role, org_id)
+    if may_read_oversight_alerts(role):
+        # A reader, not a worker: nothing is hidden by category, but a category-limited role
+        # (the biosafety officer) still reads outside her own organisation only within the
+        # categories she oversees — DATA_THEFT and LEDGER among them.
+        return limits
     categories = sorted(OVERSIGHT_ALERT_CATEGORIES)
     if model is Alert:
         return [Alert.category.not_in(categories), *limits]

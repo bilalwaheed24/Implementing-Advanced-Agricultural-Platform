@@ -318,6 +318,8 @@ def notify_org(db: Session, org_id: str, category: str, title: str, body: str,
 
 
 def _oversight_role_names() -> set[str]:
+    """Who is *told* about a security-oversight alert. The roles that work them, not the
+    wider set that may read them: notification routing is a push, and reading is a pull."""
     return {r.value for r in SECURITY_OVERSIGHT_ROLES}
 
 
@@ -332,6 +334,11 @@ def fan_out(db: Session, category: str, severity: str, title: str, body: str,
     if category in OVERSIGHT_ALERT_CATEGORIES:
         # Security operations only, whatever CATEGORY_ROLES says: a DATA_THEFT finding is
         # filed under the suspect's organisation and must not reach the suspect (round 5).
+        # A regulator and a biosafety officer may now READ these alerts
+        # (permissions.OVERSIGHT_ALERT_READER_ROLES) but are deliberately left out of the
+        # fan-out: an unconfirmed finding about one user's access pattern is something they
+        # may look up when overseeing a case, not something to push at them unbidden, and a
+        # notification per sweep hit would bury the ones they are meant to act on.
         roles = [role for role in roles if role in _oversight_role_names()]
     query = select(User).where(User.role.in_(roles), User.status == "ACTIVE",
                                User.deleted_at.is_(None))

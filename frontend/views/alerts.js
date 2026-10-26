@@ -11,20 +11,25 @@ async function alertAction(row, action, done, reload) {
   } catch (error) { toast(error.message, 'error'); }
 }
 
-/* Mirrors core/permissions.py: data-theft and ledger alerts can be acknowledged or resolved
- * only by security oversight, so nobody clears an alert raised about themselves. */
+/* Mirrors core/permissions.py. Two different sets, because reading and working these alerts
+ * are now two different rights: OVERSIGHT_READER_ROLES (SECURITY_OVERSIGHT_ROLES plus
+ * OVERSIGHT_ALERT_READER_ROLES) may see a data-theft or ledger alert, but only
+ * OVERSIGHT_ROLES (SECURITY_OVERSIGHT_ROLES) may acknowledge or resolve one, so nobody clears
+ * an alert raised about themselves and an overseer is never offered a button the API refuses. */
 const OVERSIGHT_CATEGORIES = new Set(['DATA_THEFT', 'LEDGER']);
 const OVERSIGHT_ROLES = new Set(['ADMIN', 'SECURITY_ANALYST']);
+const OVERSIGHT_READER_ROLES = new Set([...OVERSIGHT_ROLES, 'REGULATOR', 'BIOSAFETY_OFFICER']);
 
 const CATEGORIES = ['DEVICE_ANOMALY', 'DEVICE_HEALTH', 'DEVICE_AUTH', 'DATA_THEFT',
   'BIOSECURITY', 'DURC', 'FRAUD', 'COMPLIANCE', 'CERTIFICATION', 'LEDGER', 'AGRONOMY'];
 
-/* Data-theft and ledger alerts are never listed for other roles (the server hides them), so
- * those filter options would only ever give an empty list (round 6). Evaluated per render:
- * the role is known only once someone is signed in. */
+/* Data-theft and ledger alerts are never listed for a tenant role (the server hides them), so
+ * those filter options would only ever give an empty list (round 6). A role that may read
+ * them keeps the filter. Evaluated per render: the role is known only once someone is
+ * signed in. */
 async function categoryOptions() {
-  const oversight = OVERSIGHT_ROLES.has(role());
-  return CATEGORIES.filter((category) => oversight || !OVERSIGHT_CATEGORIES.has(category));
+  const reader = OVERSIGHT_READER_ROLES.has(role());
+  return CATEGORIES.filter((category) => reader || !OVERSIGHT_CATEGORIES.has(category));
 }
 
 function actionButtons(row, reload) {

@@ -371,8 +371,10 @@ def timeline(db: Session, incident_id: str) -> list[IncidentEvent]:
 def security_dashboard(db: Session, org_id: str | None,
                        role: str | None = None,
                        viewer_org_id: str | None = None) -> dict[str, Any]:
-    """Counts for the security board. With a `role` outside SECURITY_OVERSIGHT_ROLES, alerts
-    and incidents that role may not read (DATA_THEFT, LEDGER) are left out of every count.
+    """Counts for the security board. Alerts and incidents `role` may not read (DATA_THEFT and
+    LEDGER for a tenant role) are left out of every count — the board never shows a number
+    whose rows the viewer cannot open. A regulator and a biosafety officer read those
+    categories, so they are counted for them.
 
     A category-limited cross-tenant role (a biosafety officer, round 6) counts its categories
     across tenants plus `viewer_org_id`'s own alerts, and only its own organisation's devices
