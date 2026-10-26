@@ -86,13 +86,15 @@ def run(status_only: bool = False) -> int:
                     else:
                         connection.execute(text(statement))
                 except Exception as error:                      # noqa: BLE001
-                    # A column added by create_all() on a fresh database is not an
-                    # error: record the version and move on. SQLite says "duplicate
-                    # column"; PostgreSQL says "column ... already exists".
+                    # A column or index added by create_all() on a fresh database is not
+                    # an error: skip that one statement and carry on with the rest of the
+                    # file (a `break` here used to drop every later statement, such as a
+                    # backfill, while still recording the version). SQLite says
+                    # "duplicate column"; PostgreSQL says "column ... already exists".
                     message = str(error).lower()
                     if "duplicate column" in message or "already exists" in message:
-                        print(f"  already present, recording {version}")
-                        break
+                        print(f"  already present, skipping one statement of {version}")
+                        continue
                     raise
             connection.execute(
                 text("INSERT INTO schema_version (version, applied_at) "

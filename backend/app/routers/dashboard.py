@@ -15,6 +15,7 @@ from sqlalchemy import func, or_, select
 from ..core.deps import CurrentUser, DbSession, rate_limit
 from ..core.permissions import P, Role, has_permission
 from ..core.security import utcnow
+from ..repositories import oversight_conditions
 from ..services import supplychain as supply_service
 from ..models import (Alert, Batch, Certification, CertificationLink, Device, GMOEvent,
                       Notification, SeedLot, SequenceScreening, Shipment, SupplyChainEvent,
@@ -65,7 +66,11 @@ def _role(value: str) -> Role | None:
 
 
 def _supply_tiles(db, org_id: str | None) -> dict:
-    held = [] if org_id is None else [Batch.custodian_org_id == org_id]
+    # "In your custody now": a batch still on the road to the caller is counted once, under
+    # awaiting_arrival, not here as well (round 5).
+    held = [Batch.state != "IN_TRANSIT"]
+    if org_id is not None:
+        held.append(Batch.custodian_org_id == org_id)
     # Both ends of a shipment work with it: the sender dispatched it, and the receiver must
     # mark it arrived. The receiver of an internal move (no to_org_id) is the sender itself.
     shipped = [] if org_id is None else [or_(Shipment.org_id == org_id,
@@ -144,15 +149,19 @@ def dashboard(db: DbSession, principal: CurrentUser) -> dict:
         # Unresolved (OPEN or ACKNOWLEDGED): an acknowledged alert still needs attention. The
         # tile, its link (#/alerts?status=UNRESOLVED) and the dashboard's alert card all use
         # this one definition, so their numbers agree.
+        # Security-oversight alerts (DATA_THEFT, LEDGER) are not counted for other roles: they
+        # cannot open them (repositories.oversight_conditions), and a count that moved when
+        # an exfiltration finding about a colleague was raised would itself tip them off.
         unresolved = Alert.status.in_(UNRESOLVED_ALERT_STATUSES)
-        by_severity = select(Alert.severity, func.count()).where(unresolved)
+        hidden = oversight_conditions(Alert, principal.role)
+        by_severity = select(Alert.severity, func.count()).where(unresolved, *hidden)
         if org_id is not None:
             # The same parties as _count (owner or custodian side) and the alert list.
             by_severity = by_severity.where(or_(Alert.org_id == org_id,
                                                 Alert.custodian_org_id == org_id))
         tiles["alerts"] = {
-            "open": _count(db, Alert, org_id, unresolved),
-            "critical_open": _count(db, Alert, org_id, unresolved,
+            "open": _count(db, Alert, org_id, unresolved, *hidden),
+            "critical_open": _count(db, Alert, org_id, unresolved, *hidden,
                                     Alert.severity == "CRITICAL"),
             "by_severity": {severity: int(count) for severity, count in db.execute(
                 by_severity.group_by(Alert.severity)).all()},

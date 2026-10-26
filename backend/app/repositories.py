@@ -14,7 +14,8 @@ from sqlalchemy.orm import Session
 
 from .core import request_flags
 from .core.errors import NotFound, PermissionDenied
-from .core.permissions import CROSS_TENANT_ROLES, Role
+from .core.permissions import (CROSS_TENANT_ROLES, OVERSIGHT_ALERT_CATEGORIES, Role,
+                               is_security_oversight)
 
 T = TypeVar("T")
 
@@ -67,16 +68,49 @@ def unscoped(model: type[T], role: str, *, include_deleted: bool = False) -> Sel
     return query
 
 
+def oversight_conditions(model: type, role: str) -> list[Any]:
+    """Extra WHERE conditions hiding security-oversight material from every other role.
+
+    A DATA_THEFT alert is filed under the suspect user's own organisation, and tenant roles
+    hold alert:read and incident:read, so the suspect (and colleagues) could read "Possible
+    data exfiltration by ..." and the analysts' notes on its incident (round 5). Alerts in
+    OVERSIGHT_ALERT_CATEGORIES, and incidents of those categories, opened from such an alert
+    or carrying one, are visible to SECURITY_OVERSIGHT_ROLES only. Empty for those roles and
+    for every other model."""
+    if is_security_oversight(role):
+        return []
+    from .models import Alert, Incident                          # noqa: PLC0415 (cycle)
+
+    categories = sorted(OVERSIGHT_ALERT_CATEGORIES)
+    if model is Alert:
+        return [Alert.category.not_in(categories)]
+    if model is Incident:
+        oversight_alerts = select(Alert.id).where(Alert.category.in_(categories))
+        return [
+            or_(Incident.category.is_(None), Incident.category.not_in(categories)),
+            or_(Incident.source_alert_id.is_(None),
+                Incident.source_alert_id.not_in(oversight_alerts)),
+            ~select(Alert.id).where(Alert.incident_id == Incident.id,
+                                    Alert.category.in_(categories)).exists(),
+        ]
+    return []
+
+
 def visible(model: type[T], role: str, org_id: str | None, *,
             include_deleted: bool = False, also: Any = None) -> Select:
-    """Scoped for ordinary roles, unscoped for cross-tenant roles (`also`: see `scoped`)."""
+    """Scoped for ordinary roles, unscoped for cross-tenant roles (`also`: see `scoped`).
+
+    Alerts and incidents are further narrowed by `oversight_conditions`."""
     try:
         cross = Role(role) in CROSS_TENANT_ROLES
     except ValueError:
         cross = False
     if cross:
-        return unscoped(model, role, include_deleted=include_deleted)
-    return scoped(model, org_id, include_deleted=include_deleted, also=also)
+        query = unscoped(model, role, include_deleted=include_deleted)
+    else:
+        query = scoped(model, org_id, include_deleted=include_deleted, also=also)
+    hidden = oversight_conditions(model, role)
+    return query.where(*hidden) if hidden else query
 
 
 def get_or_404(db: Session, model: type[T], entity_id: str, role: str, org_id: str | None,
@@ -91,8 +125,10 @@ def get_or_404(db: Session, model: type[T], entity_id: str, role: str, org_id: s
     if entity is None:
         # The caller still gets a plain 404, but if the row exists in another tenant this
         # was a cross-tenant probe, which the data-theft detector must count.
+        # A row hidden by oversight_conditions is not another tenant's, so not a probe.
         if db.execute(select(getattr(model, "id")).where(
-                getattr(model, "id") == entity_id).limit(1)).first() is not None:
+                getattr(model, "id") == entity_id, *oversight_conditions(model, role))
+                .limit(1)).first() is not None:
             request_flags.raise_flag("cross_tenant_probe")
         raise NotFound(f"{name or model.__name__} not found")
     return entity

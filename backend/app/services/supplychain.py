@@ -101,7 +101,23 @@ def certified_by(org_id: str | None) -> Any:
     return Batch.id.in_(
         select(CertificationLink.batch_id)
         .join(Certification, Certification.id == CertificationLink.certification_id)
-        .where(Certification.issuer_org_id == org_id))
+        .where(Certification.issuer_org_id == org_id, *_live_certificate()))
+
+
+def _live_certificate() -> list[Any]:
+    """A certificate still in force: ACTIVE and not past valid_to. A revoked or expired one
+    no longer gives its issuer read access to the batches it was claimed on (round 5)."""
+    return [Certification.status == "ACTIVE", Certification.valid_to >= utcnow()]
+
+
+def certified_subjects(org_id: str | None, batch_id: str) -> Any:
+    """SELECT of the organisations certified, by a live certificate `org_id` issued, on a
+    certificate claimed on this batch. A certifier reads the batch's shipments only where one
+    of these is the sender or the receiver: it never dealt with the downstream holders."""
+    return (select(Certification.subject_org_id)
+            .join(CertificationLink, CertificationLink.certification_id == Certification.id)
+            .where(CertificationLink.batch_id == batch_id,
+                   Certification.issuer_org_id == org_id, *_live_certificate()))
 
 
 def readable_batch(db: Session, batch_id: str, role: str, org_id: str | None) -> Batch:
@@ -340,6 +356,7 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
     target_state = BIZ_STEP_TO_STATE.get(biz_step)
     if target_state:
         require_batch_transition(batch.state, target_state)
+    _require_after_latest_handover(db, batch, occurred_at)
 
     event = SupplyChainEvent(
         batch_id=batch.id, org_id=org_id, event_type=event_type, biz_step=biz_step,
@@ -383,6 +400,12 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
         # same side effects as marking the shipment arrived (sender told, temperatures, audit).
         _deliver_open_shipments(db, batch, occurred_at, org_id, actor_id, actor_role,
                                 location_name)
+    if biz_step in BOOKING_STEPS and batch.custodian_org_id \
+            and org_id == batch.custodian_org_id:
+        # Booked in by its holder: the "handed over to you" notification has nothing left to
+        # ask for. A hand-over by a bare shipping event has no shipment, so _shipment_arrived
+        # never ran to settle it (round 5).
+        _settle_handover_notifications(db, batch.custodian_org_id, batch.id)
 
     db.flush()
     audit.record(db, "supply.record_event", actor_id=actor_id, actor_role=actor_role,
@@ -392,6 +415,22 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
     if new_state == "RECALLED":
         propagate_recall(db, batch, actor_id, actor_role, org_id)
     return event
+
+
+def _require_after_latest_handover(db: Session, batch: Batch, occurred_at: datetime) -> None:
+    """Refuse an event dated before the batch's latest custody hand-over.
+
+    The chain of custody is ordered by occurred_at. An event backdated before the hand-over
+    lands in the previous holder's time with the batch; a booking dated so never counts as
+    booking the hand-over in, and the batch stayed "awaiting booking" for good (round 5)."""
+    latest = db.execute(select(func.max(SupplyChainEvent.occurred_at)).where(
+        SupplyChainEvent.batch_id == batch.id,
+        SupplyChainEvent.to_org_id.is_not(None))).scalar_one_or_none()
+    if latest is not None and _aware(occurred_at) < _aware(latest):
+        raise ValidationFailed(
+            f"occurred_at {_aware(occurred_at).isoformat()} is before the batch's latest "
+            f"custody hand-over ({_aware(latest).isoformat()}); an event cannot be dated "
+            f"before the batch reached its current holder")
 
 
 def _related_batches(db: Session, batch: Batch, max_depth: int = 12

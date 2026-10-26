@@ -151,7 +151,8 @@ def _require_alert_authority(principal, alert: Alert) -> None:
 
     A DATA_THEFT alert is filed under the suspect's own organisation, so alert:write in that
     tenant let a colleague, or the suspect, clear "Possible data exfiltration by ..." and close
-    the incident with it. The tenant can still read the alert; it cannot dismiss it."""
+    the incident with it. Since round 5 a tenant cannot even read such an alert
+    (repositories.oversight_conditions), so this is a second line of defence."""
     if alert.category in OVERSIGHT_ALERT_CATEGORIES and not is_security_oversight(principal.role):
         security_event("authorisation denied", actor_id=principal.id, role=principal.role,
                        required="security oversight", alert_id=alert.id,
@@ -319,4 +320,4 @@ def sweep(db: DbSession,
 def dashboard(db: DbSession,
               principal: Annotated[object, Depends(require_permission(P.ALERT_READ))]) -> dict:
     org_id = None if principal.is_cross_tenant else principal.org_id
-    return service.security_dashboard(db, org_id)
+    return service.security_dashboard(db, org_id, role=principal.role)

@@ -89,9 +89,11 @@ def rule_gmo_approval(db: Session, batch: Batch, ctx: dict) -> dict[str, Any]:
     return _result(
         "GMO-001", "GMO approval in the destination jurisdiction",
         "EU 1829/2003 / USDA APHIS 7 CFR 340", passed, "CRITICAL",
-        f"Event {event.event_code} is approved in {jurisdiction}" if passed
+        f"Event {event.event_code} is approved in {notifications.jurisdiction_label(jurisdiction)}"
+        if passed
         else f"Event {event.event_code} has approval status {status}"
-             + (" and the approval has expired" if expired else "") + f" in {jurisdiction}",
+             + (" and the approval has expired" if expired else "")
+             + f" in {notifications.jurisdiction_label(jurisdiction)}",
         event_code=event.event_code, approval_status=status, expired=expired)
 
 
@@ -300,7 +302,7 @@ def evaluate_batch(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
         notifications.alert_parties(
             db, "COMPLIANCE", "CRITICAL" if critical_failures else "HIGH",
             f"Batch {batch.batch_code} is {notifications.human_status(status)} "
-            f"in {jurisdiction}",
+            f"in {notifications.jurisdiction_label(jurisdiction)}",
             detail="; ".join(r["detail"] for r in failed[:3]), org_id=batch.org_id,
             party_org_ids=parties, entity_type="Batch", entity_id=batch.id,
             reasons=[r["rule_id"] for r in failed], kind=kind,
@@ -308,10 +310,12 @@ def evaluate_batch(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
     else:
         notifications.resolve_alerts(
             db, "COMPLIANCE", batch.id, kind=kind, actor_id=actor_id,
-            note=f"A later evaluation found the batch compliant in {jurisdiction}")
+            note=f"A later evaluation found the batch compliant in "
+                 f"{notifications.jurisdiction_label(jurisdiction)}")
         notifications.notify_parties(
             db, [batch.org_id, *parties], "COMPLIANCE",
-            f"Batch {batch.batch_code} is compliant in {jurisdiction}",
+            f"Batch {batch.batch_code} is compliant in "
+            f"{notifications.jurisdiction_label(jurisdiction)}",
             f"All {len(results)} rules passed.", "Batch", batch.id)
     return report
 

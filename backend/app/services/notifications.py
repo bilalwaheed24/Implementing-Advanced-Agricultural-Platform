@@ -4,10 +4,11 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import Any, Iterable
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from ..core.permissions import CROSS_TENANT_ROLES, Role
+from ..core.permissions import (CROSS_TENANT_ROLES, OVERSIGHT_ALERT_CATEGORIES,
+                                SECURITY_OVERSIGHT_ROLES, Role)
 from ..core.security import ensure_aware, utcnow
 from ..core.errors import Conflict
 from ..models import Alert, Incident, IncidentEvent, Notification, User
@@ -53,6 +54,20 @@ CATEGORY_LABELS = {
 
 def category_label(category: str | None) -> str:
     return CATEGORY_LABELS.get(category or "", (category or "").replace("_", " ").lower())
+
+
+# How a jurisdiction code reads in a sentence, the same names the web app uses
+# (frontend/assets/core.js jurisdictionLabel): "compliant in USDA (US)", not "in US-USDA".
+# Codes stay as they are in kinds, filters and anchored payloads.
+JURISDICTION_LABELS = {
+    "US-USDA": "USDA (US)", "US-FDA": "FDA (US)", "EU": "EU",
+    "CODEX": "Codex Alimentarius", "GS1": "GS1 data standard",
+}
+
+
+def jurisdiction_label(code: str | None) -> str:
+    """ "US-USDA" -> "USDA (US)"; an unknown code is returned as given."""
+    return JURISDICTION_LABELS.get((code or "").upper(), code or "")
 
 
 def human_date(value: date | datetime | None) -> str:
@@ -130,12 +145,17 @@ def sync_custodian(db: Session, entity_type: str, entity_id: str, owner_org_id: 
     no longer open, and the new holder saw none (round 4). NULL when custody is back with the
     owner. Returns (alerts, incidents) changed."""
     party = custodian_org_id if custodian_org_id and custodian_org_id != owner_org_id else None
+    # Security-oversight alerts (a LEDGER rejection on the batch, say) are not the holder's to
+    # work, so a hand-over does not move them or their incidents (round 5).
+    oversight = sorted(OVERSIGHT_ALERT_CATEGORIES)
     alerts = list(db.execute(select(Alert).where(
         Alert.entity_type == entity_type, Alert.entity_id == entity_id,
+        Alert.category.not_in(oversight),
         Alert.status.in_(UNRESOLVED_ALERT_STATES))).scalars())
     incident_ids = {a.incident_id for a in alerts if a.incident_id}
     incidents = list(db.execute(select(Incident).where(
         Incident.status.in_(ACTIVE_INCIDENT_STATES),
+        or_(Incident.category.is_(None), Incident.category.not_in(oversight)),
         (Incident.entity_id == entity_id) | Incident.id.in_(incident_ids or {""}))).scalars())
     changed_alerts = changed_incidents = 0
     for alert in alerts:
@@ -287,12 +307,20 @@ def notify_org(db: Session, org_id: str, category: str, title: str, body: str,
     return len(recipients)
 
 
+def _oversight_role_names() -> set[str]:
+    return {r.value for r in SECURITY_OVERSIGHT_ROLES}
+
+
 def fan_out(db: Session, category: str, severity: str, title: str, body: str,
             org_id: str | None, entity_type: str | None, entity_id: str | None, *,
             party_org_id: str | None = None) -> int:
     """Notify every active user holding a role that owns this alert category, in the alert's
     organisation and its party organisation (the batch custodian), if it has one."""
     roles = [r.value for r in CATEGORY_ROLES.get(category, (Role.ADMIN,))]
+    if category in OVERSIGHT_ALERT_CATEGORIES:
+        # Security operations only, whatever CATEGORY_ROLES says: a DATA_THEFT finding is
+        # filed under the suspect's organisation and must not reach the suspect (round 5).
+        roles = [role for role in roles if role in _oversight_role_names()]
     query = select(User).where(User.role.in_(roles), User.status == "ACTIVE",
                                User.deleted_at.is_(None))
     recipients = list(db.execute(query).scalars())
@@ -346,7 +374,8 @@ def acknowledge(db: Session, alert: Alert, actor_id: str) -> Alert:
 
 
 def resolve(db: Session, alert: Alert, actor_id: str | None = None,
-            note: str | None = None, *, close_incident: bool = True) -> Alert:
+            note: str | None = None, *, close_incident: bool = True,
+            automatic: bool = False) -> Alert:
     """Resolve an alert. When it was the last unresolved alert on an active incident, the
     incident is resolved with it: nothing is left on it to respond to.
 
@@ -355,7 +384,13 @@ def resolve(db: Session, alert: Alert, actor_id: str | None = None,
 
     `close_incident=False` leaves the incident as it is: the router passes it when the user
     resolving the alert could not update the incident directly (no incident:write), so
-    resolving an alert is never a back door to closing an incident (round 4)."""
+    resolving an alert is never a back door to closing an incident (round 4).
+
+    `automatic=True` marks a resolution by the platform (a passing re-check, a renewed
+    record) rather than by a person. Such a resolution never closes an incident in
+    OVERSIGHT_ALERT_CATEGORIES: those are security operations' to close (round 5). Whenever
+    the incident is left open with nothing on it, the security analysts are told it needs
+    review, so it does not sit open unnoticed."""
     _require_alert_transition(alert, "RESOLVED")
     alert.status = "RESOLVED"
     alert.resolved_at = utcnow()
@@ -369,10 +404,18 @@ def resolve(db: Session, alert: Alert, actor_id: str | None = None,
             remaining = db.execute(select(Alert.id).where(
                 Alert.incident_id == incident.id,
                 Alert.status.in_(UNRESOLVED_ALERT_STATES)).limit(1)).first()
+            if automatic and incident.category in OVERSIGHT_ALERT_CATEGORIES:
+                close_incident = False
             if remaining is None and not close_incident:
                 add_incident_event(db, incident.id, "NOTE",
                                    "Every linked alert is resolved. The incident stays open "
                                    "until someone who works incidents closes it.", None)
+                title = (incident.title or "").removeprefix("Incident:").strip()
+                notify_roles(db, [Role.SECURITY_ANALYST], incident.category or alert.category,
+                             f"Incident needs review: {title}"[:255],
+                             "Every alert on this incident has been resolved, but the incident "
+                             "is still open. Review it and close it, or keep working it.",
+                             "Incident", incident.id, severity=incident.severity)
             elif remaining is None:
                 incident.status = "RESOLVED"
                 incident.closed_at = utcnow()
@@ -474,12 +517,16 @@ def notify_parties(db: Session, org_ids: Iterable[str | None], category: str, ti
     `exclude_org_ids` are skipped (already told the same thing another way).
     """
     parties = {org_id for org_id in org_ids if org_id}
+    if category in OVERSIGHT_ALERT_CATEGORIES:
+        parties = set()           # never the tenant (the suspect's organisation), see fan_out
+        include_oversight = True
     recipients: list[User] = []
     if parties:
         recipients += list(db.execute(
             _active_users().where(User.org_id.in_(parties))).scalars())
     if include_oversight:
-        platform = {r.value for r in CROSS_TENANT_ROLES}
+        platform = (_oversight_role_names() if category in OVERSIGHT_ALERT_CATEGORIES
+                    else {r.value for r in CROSS_TENANT_ROLES})
         roles = [r.value for r in CATEGORY_ROLES.get(category, (Role.ADMIN,))
                  if r.value in platform]
         if roles:
@@ -534,7 +581,7 @@ def resolve_alerts(db: Session, category: str, entity_id: str | None, *,
         query = query.where(Alert.kind.startswith(kind_prefix, autoescape=True))
     alerts = list(db.execute(query.order_by(Alert.created_at.asc())).scalars())
     for alert in alerts:
-        resolve(db, alert, actor_id, note=note)
+        resolve(db, alert, actor_id, note=note, automatic=True)
     return alerts
 
 
@@ -545,11 +592,15 @@ def resolve_entity_alerts(db: Session, entity_type: str, entity_id: str, actor_i
 
     The incident moves to RESOLVED when none of its alerts remain open; an analyst can still
     reopen it from there (security_ops.INCIDENT_TRANSITIONS). resolve() carries the note, so
-    the timeline gets a single RESOLVED entry; this used to add a second one repeating it."""
+    the timeline gets a single RESOLVED entry; this used to add a second one repeating it.
+
+    Security-oversight alerts on the record (a LEDGER rejection, say) are left for security
+    operations: the record's business cause being dealt with does not clear them (round 5)."""
     alerts = list(db.execute(select(Alert).where(
         Alert.entity_type == entity_type, Alert.entity_id == entity_id,
+        Alert.category.not_in(sorted(OVERSIGHT_ALERT_CATEGORIES)),
         Alert.status.in_(UNRESOLVED_ALERT_STATES))).scalars())
     for alert in alerts:
-        resolve(db, alert, actor_id, note=note)
+        resolve(db, alert, actor_id, note=note, automatic=True)
     db.flush()
     return alerts

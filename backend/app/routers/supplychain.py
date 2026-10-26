@@ -5,7 +5,7 @@ from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from ..core.deps import DbSession, PagingDep, rate_limit, require_permission
 from ..core.errors import NotFound, PermissionDenied
@@ -220,18 +220,35 @@ def list_shipments(db: DbSession, paging: PagingDep,
     if batch_id:
         batch = db.execute(service.readable_batches(principal.role, principal.org_id).where(
             Batch.id == batch_id)).scalar_one_or_none()
-        if batch is not None:
-            # Whoever may read the batch (its owner, holder, oversight, the issuer of a
-            # certificate claimed on it) reads its shipments, read-only, as it already reads
-            # the shipping and receiving events in its chain of custody. Otherwise only the
-            # shipments the caller is party to, as for the unfiltered list.
+        party = batch is not None and db.execute(
+            visible(Batch, principal.role, principal.org_id).where(Batch.id == batch_id)
+            .with_only_columns(Batch.id)).first() is not None
+        if party:
+            # A party to the batch (its owner, holder, oversight) reads all its shipments,
+            # read-only, as it already reads the shipping and receiving events in its chain
+            # of custody.
             query = select(Shipment).order_by(Shipment.departed_at.desc())
+        elif batch is not None:
+            # Read only through a live certificate claimed on it: the shipments the certified
+            # organisation sent or received, besides those the caller is party to itself. Not
+            # downstream hand-overs between holders the certifier never dealt with (round 5).
+            subjects = service.certified_subjects(principal.org_id, batch_id)
+            query = select(Shipment).where(or_(
+                Shipment.org_id == principal.org_id, Shipment.to_org_id == principal.org_id,
+                Shipment.org_id.in_(subjects), Shipment.to_org_id.in_(subjects))
+            ).order_by(Shipment.departed_at.desc())
         query = query.where(Shipment.batch_id == batch_id)
     if incoming is not None and principal.org_id:
-        # The receiver of an internal move (no to_org_id) is its sender.
-        to_me = ((Shipment.to_org_id == principal.org_id)
-                 | (Shipment.to_org_id.is_(None) & (Shipment.org_id == principal.org_id)))
-        query = query.where(to_me if incoming else ~to_me)
+        # The receiver of an internal move (no to_org_id) is its sender. Spelled out with
+        # IS NULL: `NOT (to_org_id = x OR ...)` is NULL, not true, for a row whose to_org_id
+        # is NULL, so incoming=false used to drop every internal move of another sender.
+        internal = Shipment.to_org_id.is_(None)
+        to_me = or_(Shipment.to_org_id == principal.org_id,
+                    internal & (Shipment.org_id == principal.org_id))
+        not_to_me = or_(and_(Shipment.to_org_id.is_not(None),
+                             Shipment.to_org_id != principal.org_id),
+                        internal & (Shipment.org_id != principal.org_id))
+        query = query.where(to_me if incoming else not_to_me)
     if status:
         query = query.where(Shipment.status == status.upper())
     rows, total = paginate(db, query, paging.page, paging.page_size)

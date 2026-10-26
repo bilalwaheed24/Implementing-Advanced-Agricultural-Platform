@@ -317,9 +317,17 @@ def timeline(db: Session, incident_id: str) -> list[IncidentEvent]:
         .order_by(IncidentEvent.created_at.asc())).scalars())
 
 
-def security_dashboard(db: Session, org_id: str | None) -> dict[str, Any]:
+def security_dashboard(db: Session, org_id: str | None,
+                       role: str | None = None) -> dict[str, Any]:
+    """Counts for the security board. With a `role` outside SECURITY_OVERSIGHT_ROLES, alerts
+    and incidents that role may not read (DATA_THEFT, LEDGER) are left out of every count."""
+    from ..repositories import oversight_conditions                  # noqa: PLC0415
+
     alert_query = select(Alert)
     incident_query = select(Incident)
+    if role is not None:
+        alert_query = alert_query.where(*oversight_conditions(Alert, role))
+        incident_query = incident_query.where(*oversight_conditions(Incident, role))
     device_query = select(Device).where(Device.deleted_at.is_(None))
     if org_id:
         alert_query = alert_query.where(or_(Alert.org_id == org_id,
