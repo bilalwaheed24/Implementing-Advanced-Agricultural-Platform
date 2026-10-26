@@ -24,6 +24,22 @@ class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+def _org_display_name(data: Any, org_id: str | None) -> str | None:
+    """The display name of organisation `org_id`, looked up in the session `data` (an ORM row)
+    was loaded from; None when there is no session or no such organisation. Used to name a
+    record's holder: whoever may read the record may know who holds it, while the
+    organisation directory is closed to most roles (round 6: "Held by —")."""
+    if not org_id or not hasattr(data, "_sa_instance_state"):
+        return None
+    from sqlalchemy.orm import object_session
+
+    from .models import Organization
+
+    session = object_session(data)
+    organization = session.get(Organization, org_id) if session is not None else None
+    return organization.name if organization is not None else None
+
+
 class Page(BaseModel, Generic[T]):
     items: list[T]
     total: int
@@ -676,6 +692,17 @@ class SeedLotOut(ORMModel):
     custodian_org_id: str | None = None
     gmo_event_code: str | None = None      # filled by the router: the farm cannot read the event
     created_at: datetime
+    # Who holds the lot now (custodian, else the producer), by name, computed server-side.
+    holder_name: str | None = None
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _with_holder_name(cls, data: Any, handler: Any) -> "SeedLotOut":
+        model = handler(data)
+        if model.holder_name is None:
+            model.holder_name = _org_display_name(
+                data, getattr(data, "custodian_org_id", None) or getattr(data, "org_id", None))
+        return model
 
 
 class TransferRequest(BaseModel):
@@ -765,11 +792,16 @@ class BatchOut(ORMModel):
     # "party" (owner or holder), "oversight" (a cross-tenant role) or "certificate" (read-only:
     # it carries a certificate the caller's organisation issued). Set on the single-batch reads.
     viewer_access: str | None = None
+    # The current holder's name, computed server-side (round 6): the organisation directory is
+    # closed to agronomists and biosafety officers, whose lists showed "Held by —".
+    custodian_name: str | None = None
 
     @model_validator(mode="wrap")
     @classmethod
     def _with_product_name(cls, data: Any, handler: Any) -> "BatchOut":
         model = handler(data)
+        if model.custodian_name is None:
+            model.custodian_name = _org_display_name(data, getattr(data, "custodian_org_id", None))
         if model.product_name is None and hasattr(data, "_sa_instance_state"):
             from sqlalchemy.orm import object_session
 

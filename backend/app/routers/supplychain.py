@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, or_, select
+from sqlalchemy.orm import object_session
 
 from ..core.deps import DbSession, PagingDep, rate_limit, require_permission
 from ..core.errors import NotFound, PermissionDenied
@@ -91,6 +92,8 @@ def list_batches(db: DbSession, paging: PagingDep,
     for row in rows:
         item = BatchOut.model_validate(row)
         item.gmo_lineage = row.id in gmo_ids
+        if _viewer_access(row, principal) == "certificate":
+            _mask_custodian(db, principal, row, item)
         items.append(item)
     return Page[BatchOut](items=items, total=total, page=paging.page,
                           page_size=paging.page_size)
@@ -114,7 +117,16 @@ def _viewer_access(batch: Batch, principal) -> str:
 def _batch_out(batch: Batch, principal) -> BatchOut:
     out = BatchOut.model_validate(batch)
     out.viewer_access = _viewer_access(batch, principal)
+    if out.viewer_access == "certificate":
+        _mask_custodian(object_session(batch), principal, batch, out)
     return out
+
+
+def _mask_custodian(db, principal, batch: Batch, out: BatchOut) -> None:
+    """A certifier reading through its certificate learns the holder's name only when the
+    holder is an organisation it certified (round 6, as the chain of custody)."""
+    if db is None or batch.custodian_org_id not in certificate_subjects(db, principal, batch.id):
+        out.custodian_name = ANOTHER_ORGANISATION
 
 
 @router.get("/batches/{batch_id}", response_model=BatchOut, summary="Get a batch")
@@ -132,14 +144,52 @@ def custody(batch_id: str, db: DbSession,
     batch = service.readable_batch(db, batch_id, principal.role, principal.org_id)
     events = service.chain_of_custody(db, batch)
     lineage = service.lineage(db, batch, principal.role, principal.org_id)
+    out = _batch_out(batch, principal)
+    context = service.batch_context(db, batch, events)
+    if out.viewer_access == "certificate":
+        events, context = _certificate_view(db, principal, batch, events, context)
     return {
-        "batch": _batch_out(batch, principal).model_dump(),
+        "batch": out.model_dump(),
         "events": [SupplyChainEventOut.model_validate(e).model_dump() for e in events],
         "lineage": [{"batch_code": b.batch_code, "state": b.state, "quantity": b.quantity}
                     for b in lineage],
         "certifications": service.authenticate_certifications(db, batch),
-        "context": service.batch_context(db, batch, events),
+        "context": context,
     }
+
+
+ANOTHER_ORGANISATION = "another organisation"
+
+
+def certificate_subjects(db, principal, batch_id: str) -> set[str]:
+    """The organisations the caller certified on a live certificate claimed on this batch."""
+    return set(db.execute(service.certified_subjects(principal.org_id, batch_id)).scalars())
+
+
+def event_involves(event: SupplyChainEvent, org_ids: set[str]) -> bool:
+    return bool({event.org_id, event.from_org_id, event.to_org_id} & org_ids)
+
+
+def _certificate_view(db, principal, batch: Batch, events, context: dict):
+    """What a certifier reading the batch only through its certificate may see (round 6):
+    the events its certified organisation(s) took part in, and only their names. Shipments
+    were already limited that way; the chain of custody named every downstream holder ("shipping
+    farm -> Retail Co") and the current custodian. Any other organisation reads as "another
+    organisation"."""
+    subjects = certificate_subjects(db, principal, batch.id)
+    events = [e for e in events if event_involves(e, subjects)]
+
+    def party(org: dict | None) -> dict:
+        if org and org.get("id") in subjects:
+            return org
+        return {"id": None, "name": ANOTHER_ORGANISATION}
+
+    context = {**context,
+               "owner": party(context.get("owner")),
+               "custodian": party(context.get("custodian")),
+               "organisations": {k: v for k, v in (context.get("organisations") or {}).items()
+                                 if k in subjects}}
+    return events, context
 
 
 @router.post("/batches/{batch_id}/verify", response_model=VerificationResult,

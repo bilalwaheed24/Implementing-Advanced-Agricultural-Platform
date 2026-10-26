@@ -16,6 +16,17 @@ async function alertAction(row, action, done, reload) {
 const OVERSIGHT_CATEGORIES = new Set(['DATA_THEFT', 'LEDGER']);
 const OVERSIGHT_ROLES = new Set(['ADMIN', 'SECURITY_ANALYST']);
 
+const CATEGORIES = ['DEVICE_ANOMALY', 'DEVICE_HEALTH', 'DEVICE_AUTH', 'DATA_THEFT',
+  'BIOSECURITY', 'DURC', 'FRAUD', 'COMPLIANCE', 'CERTIFICATION', 'LEDGER', 'AGRONOMY'];
+
+/* Data-theft and ledger alerts are never listed for other roles (the server hides them), so
+ * those filter options would only ever give an empty list (round 6). Evaluated per render:
+ * the role is known only once someone is signed in. */
+async function categoryOptions() {
+  const oversight = OVERSIGHT_ROLES.has(role());
+  return CATEGORIES.filter((category) => oversight || !OVERSIGHT_CATEGORIES.has(category));
+}
+
 function actionButtons(row, reload) {
   // Mirrors the server's alert lifecycle (notifications.ALERT_TRANSITIONS): an OPEN alert
   // may be acknowledged or resolved, an ACKNOWLEDGED one may still be resolved, and a
@@ -67,9 +78,7 @@ export const render = listView({
     { key: 'severity', label: 'Severity', options: ['INFO', 'WARNING', 'HIGH', 'CRITICAL'] },
     { key: 'status', label: 'Status', options: [['UNRESOLVED', 'Unresolved (open or acknowledged)'],
       'OPEN', 'ACKNOWLEDGED', 'RESOLVED'] },
-    { key: 'category', label: 'Category', options: ['DEVICE_ANOMALY', 'DEVICE_HEALTH',
-        'DEVICE_AUTH', 'DATA_THEFT', 'BIOSECURITY', 'DURC', 'FRAUD', 'COMPLIANCE',
-        'CERTIFICATION', 'LEDGER', 'AGRONOMY'] },
+    { key: 'category', label: 'Category', options: categoryOptions },
     ],
   columns: [
     { label: 'Raised', render: (row) => el('div', {}, [fmtDate(row.created_at),

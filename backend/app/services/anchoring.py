@@ -351,6 +351,64 @@ def _alert_rejected(db: Session, row: LedgerWrite) -> None:
         # The REJECTED status is already recorded; an alert failure must not undo it.
         log_event(app_log, logging.WARNING, "ledger rejection alert failed", write_id=row.id,
                   error=str(exc))
+    if org_id is None:
+        return
+    # The LEDGER alert is security operations' only, so the organisation whose record it is
+    # never heard that its record is unanchored (round 6). Tell its people who write that kind
+    # of record, plainly: no alert, nothing for them to resolve.
+    try:
+        what = record_description(row.chain_key)
+        notifications.notify_org_roles(
+            db, org_id, _RECORD_WRITERS.get(row.contract, ()), "LEDGER",
+            f"Could not anchor {what} on the ledger"[:255],
+            f"The ledger rejected the {_FUNCTION_WORDS.get(row.function, 'write')} for {what}, "
+            f"so this record is not anchored and its blockchain proof is unavailable for now. "
+            f"Security analysts have been alerted and are handling it; you do not need to do "
+            f"anything.",
+            entity_type, entity_id, severity="WARNING", skip_oversight=True)
+    except Exception as exc:                                         # noqa: BLE001
+        log_event(app_log, logging.WARNING, "ledger rejection notice failed", write_id=row.id,
+                  error=str(exc))
+
+
+# Who in the submitting organisation hears that one of its records could not be anchored: the
+# roles that write that kind of record. An organisation with none of them hears it anyway
+# (notify_org_roles falls back to every active member).
+_RECORD_WRITERS: dict[str, tuple[str, ...]] = {
+    "provenance": ("SUPPLY_CHAIN_OPERATOR", "FARM_OPERATOR"),
+    "certification": ("CERTIFIER",),
+    "gmo_registry": ("BIOTECH_RESEARCHER", "BIOSAFETY_OFFICER", "REGULATOR"),
+    "compliance_anchor": ("SUPPLY_CHAIN_OPERATOR", "CERTIFIER", "REGULATOR"),
+    "imagery": ("FARM_OPERATOR", "AGRONOMIST"),
+}
+_FUNCTION_WORDS = {
+    "RegisterEvent": "registration", "RecordApproval": "approval decision",
+    "RegisterSeedLot": "registration", "CreateBatch": "creation", "RecordEvent": "event",
+    "TransferCustody": "custody hand-over", "Issue": "issue", "Revoke": "revocation",
+    "AnchorReport": "anchoring", "AnchorAuditHead": "checkpoint", "AnchorScene": "anchoring",
+}
+_KEY_WORDS = {
+    "batch": "batch", "gmo": "GMO event", "seedlot": "seed lot", "cert": "certificate",
+    "report": "compliance report", "scene": "satellite scene",
+}
+
+
+def record_description(chain_key: str | None) -> str:
+    """ "batch:B-1024" -> "batch B-1024"; "gmoapproval:MON87411:US-USDA" -> "the USDA (US)
+    approval of GMO event MON87411"; anything unknown -> "a record"."""
+    from .notifications import jurisdiction_label                    # noqa: PLC0415
+
+    parts = (chain_key or "").split(":")
+    kind = parts[0]
+    if kind == "gmoapproval" and len(parts) >= 3:
+        return f"the {jurisdiction_label(parts[2])} approval of GMO event {parts[1]}"
+    if kind == "audithead":
+        return "the audit trail checkpoint"
+    if kind == "report" and len(parts) >= 2:
+        return f"compliance report {parts[1][:8]}"
+    if kind in _KEY_WORDS and len(parts) >= 2 and parts[1]:
+        return f"{_KEY_WORDS[kind]} {':'.join(parts[1:])}"
+    return "a record"
 
 
 def _resolve(db: Session, row: LedgerWrite, receipt: dict[str, Any] | None) -> None:

@@ -1,4 +1,15 @@
-import { el, api, badge, fmtDate, fmtPct, table, empty, humanize } from '/static/assets/core.js';
+import { el, api, badge, fmtDate, fmtPct, table, empty, humanize, session }
+  from '/static/assets/core.js';
+
+/* Four-eyes: the officer who submitted a record cannot review it (the API refuses), so the
+ * queue offers "Review" only on other people's submissions (round 6). */
+function reviewAction(row, href) {
+  if (row.submitted_by && row.submitted_by === session.read()?.id) {
+    return el('span', { class: 'hint', text: 'Awaiting another officer',
+      title: 'You submitted this; an independent biosafety officer must decide.' });
+  }
+  return el('a', { href, text: 'Review' });
+}
 
 export async function render() {
   const queue = await api('/biosecurity/screenings/queue');
@@ -22,8 +33,7 @@ export async function render() {
         { label: 'Identity', numeric: true, render: (row) => fmtPct(row.max_identity, 1) },
         { label: 'DURC', render: (row) => row.durc_flag ? badge('CRITICAL') : '—' },
         { label: 'Status', render: (row) => badge(row.status) },
-        { label: 'Action', render: (row) => el('a', { href: `#/screening/${row.id}`,
-          text: 'Review' }) },
+        { label: 'Action', render: (row) => reviewAction(row, `#/screening/${row.id}`) },
       ], queue) : empty('Queue is empty', 'No screening currently requires review.'),
     ]),
     el('div', { class: 'card' }, [
@@ -39,9 +49,8 @@ export async function render() {
         { label: 'Status', render: (row) => badge(row.status) },
         // The CRISPR register carries the review control (four-eyes aware); `focus` makes
         // it pick out this proposal and open its review dialog.
-        { label: 'Action', render: (row) => el('a', {
-          href: `#/crispr?status=PENDING_REVIEW&focus=${encodeURIComponent(row.id)}`,
-          text: 'Review' }) },
+        { label: 'Action', render: (row) => reviewAction(row,
+          `#/crispr?status=PENDING_REVIEW&focus=${encodeURIComponent(row.id)}`) },
       ], crispr.items) : empty('No proposals awaiting review',
         'No gene-edit proposal currently requires a decision.'),
     ]),

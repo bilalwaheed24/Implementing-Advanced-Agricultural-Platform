@@ -323,9 +323,11 @@ def _oversight_role_names() -> set[str]:
 
 def fan_out(db: Session, category: str, severity: str, title: str, body: str,
             org_id: str | None, entity_type: str | None, entity_id: str | None, *,
-            party_org_id: str | None = None) -> int:
+            party_org_id: str | None = None, exclude_user_ids: Iterable[str] = ()) -> int:
     """Notify every active user holding a role that owns this alert category, in the alert's
-    organisation and its party organisation (the batch custodian), if it has one."""
+    organisation and its party organisation (the batch custodian), if it has one.
+    `exclude_user_ids` are skipped (told about the same event another way)."""
+    excluded = set(exclude_user_ids)
     roles = [r.value for r in CATEGORY_ROLES.get(category, (Role.ADMIN,))]
     if category in OVERSIGHT_ALERT_CATEGORIES:
         # Security operations only, whatever CATEGORY_ROLES says: a DATA_THEFT finding is
@@ -339,6 +341,8 @@ def fan_out(db: Session, category: str, severity: str, title: str, body: str,
     platform_roles = {r.value for r in CROSS_TENANT_ROLES}
     sent = 0
     for user in recipients:
+        if user.id in excluded:
+            continue
         if org_id and user.org_id not in {org_id, party_org_id} \
                 and user.role not in platform_roles:
             continue
@@ -495,6 +499,32 @@ def _send(db: Session, recipients: Iterable[User], category: str, title: str, bo
     return sent
 
 
+def unread_role_notices(db: Session, roles: Iterable[Role | str], category: str,
+                        entity_type: str, entity_id: str) -> list[str]:
+    """Ids of the unread notifications of `category` about one record held by users of
+    `roles`, e.g. the regulators' "GMO event X awaits a jurisdictional decision"."""
+    names = [r.value if isinstance(r, Role) else str(r) for r in roles]
+    return list(db.execute(
+        select(Notification.id).join(User, User.id == Notification.user_id).where(
+            User.role.in_(names), Notification.category == category,
+            Notification.entity_type == entity_type, Notification.entity_id == entity_id,
+            Notification.read_at.is_(None))).scalars())
+
+
+def mark_read(db: Session, notification_ids: Iterable[str]) -> int:
+    """Mark these notifications read: what they asked for has been done."""
+    ids = list(notification_ids)
+    if not ids:
+        return 0
+    rows = list(db.execute(select(Notification).where(
+        Notification.id.in_(ids), Notification.read_at.is_(None))).scalars())
+    now = utcnow()
+    for row in rows:
+        row.read_at = now
+    db.flush()
+    return len(rows)
+
+
 def notify_user(db: Session, user_id: str | None, category: str, title: str, body: str,
                 entity_type: str | None, entity_id: str | None, severity: str = "INFO") -> int:
     """Notify one person, e.g. the researcher whose submission was decided."""
@@ -511,6 +541,22 @@ def notify_roles(db: Session, roles: Iterable[Role | str], category: str, title:
     names = [r.value if isinstance(r, Role) else str(r) for r in roles]
     recipients = db.execute(_active_users().where(User.role.in_(names))).scalars()
     return _send(db, recipients, category, title, body, entity_type, entity_id, severity)
+
+
+def notify_org_roles(db: Session, org_id: str, roles: Iterable[Role | str], category: str,
+                     title: str, body: str, entity_type: str | None, entity_id: str | None,
+                     severity: str = "INFO", *, skip_oversight: bool = False) -> int:
+    """Notify the active holders of `roles` in one organisation; every active member when it
+    has none of them. A plain notification, not an alert fan-out: it bypasses the
+    OVERSIGHT_ALERT_CATEGORIES rule of notify_parties, so callers must word it for the tenant
+    (e.g. that its record could not be anchored, never an analyst's finding).
+    `skip_oversight` leaves out security-oversight users, who already have the alert."""
+    names = [r.value if isinstance(r, Role) else str(r) for r in roles]
+    members = list(db.execute(_active_users().where(User.org_id == org_id)).scalars())
+    if skip_oversight:
+        members = [u for u in members if u.role not in _oversight_role_names()]
+    chosen = [u for u in members if u.role in names] or members
+    return _send(db, chosen, category, title, body, entity_type, entity_id, severity)
 
 
 def notify_parties(db: Session, org_ids: Iterable[str | None], category: str, title: str,

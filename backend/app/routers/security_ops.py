@@ -125,7 +125,8 @@ def _source_labels(db, alerts) -> dict[tuple[str, str], str]:
                     GMOApproval.id.in_(ids))).scalars():
                 event = db.get(GMOEvent, approval.gmo_event_id)
                 labels[(entity_type, approval.id)] = (
-                    f"{event.event_code if event else 'event'} in {approval.jurisdiction}")
+                    f"{event.event_code if event else 'event'} in "
+                    f"{notifications.jurisdiction_label(approval.jurisdiction)}")
             continue
         if entity_type not in namers:
             continue
@@ -320,4 +321,5 @@ def sweep(db: DbSession,
 def dashboard(db: DbSession,
               principal: Annotated[object, Depends(require_permission(P.ALERT_READ))]) -> dict:
     org_id = None if principal.is_cross_tenant else principal.org_id
-    return service.security_dashboard(db, org_id, role=principal.role)
+    return service.security_dashboard(db, org_id, role=principal.role,
+                                      viewer_org_id=principal.org_id)
