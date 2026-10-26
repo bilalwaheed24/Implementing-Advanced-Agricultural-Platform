@@ -212,6 +212,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .reasons li { padding: 6px 10px; border-left: 3px solid var(--border);
   background: var(--surface-2); border-radius: 0 6px 6px 0; margin-bottom: 6px; font-size: 13px; }
 .reasons li.bad { border-left-color: var(--critical); }
+.reasons li.warn { border-left-color: var(--warning); }
 .reasons li.good { border-left-color: var(--verified); }
 
 /* ---------- login ---------- */

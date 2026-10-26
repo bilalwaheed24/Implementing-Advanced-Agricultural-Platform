@@ -1,4 +1,5 @@
-import { el, api, badge, can, fmtDate, fmtNum, toast, session, titleCase, orgName }
+import { el, api, badge, can, fmtDate, fmtNum, toast, session, titleCase, humanize,
+         orgName }
   from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, dateInput, todayIso, atNoon } from '/static/views/formkit.js';
@@ -17,7 +18,7 @@ export function shipmentForm({ batch: fixedBatch = null, reload,
     endpoint: '/supply-chain/batches',
     filter: (row) => row.custodian_org_id === me
       && !['RECALLED', 'CONSUMED', 'IN_TRANSIT', 'RETAILED'].includes(row.state),
-    label: (row) => `${row.batch_code} — ${row.state.toLowerCase()}, `
+    label: (row) => `${row.batch_code} — ${humanize(row.state).toLowerCase()}, `
       + `${row.quantity} ${row.unit}`,
     placeholder: 'Select a batch to ship', emptyLabel: 'No batch you hold can be shipped',
   });
@@ -57,7 +58,7 @@ export function shipmentForm({ batch: fixedBatch = null, reload,
     endpoint: '/devices?device_type=COLD_CHAIN_SENSOR', required: false,
     requires: 'device:read',
     filter: (row) => row.org_id === me && row.status !== 'RETIRED',
-    label: (row) => `${row.model} — ${row.id.slice(0, 8)} (${row.status.toLowerCase()})`,
+    label: (row) => `${row.model} — ${row.id.slice(0, 8)} (${humanize(row.status).toLowerCase()})`,
     placeholder: 'No sensor — ship without temperature evidence',
     emptyLabel: 'Your organisation has no cold-chain sensor — register one under Devices '
       + 'to record temperatures in transit',

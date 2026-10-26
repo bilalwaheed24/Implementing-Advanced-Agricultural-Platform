@@ -104,6 +104,8 @@ const TERM_LABELS = {
   KNOCK_IN: 'Knock-in', KNOCK_OUT: 'Knock-out', KNOCKOUT: 'Knock-out', KNOCKIN: 'Knock-in',
   BASE_EDIT: 'Base edit', PRIME_EDIT: 'Prime edit', MULTIPLEX: 'Multiplex',
   NON_GMO: 'Non-GMO', CONTAINS_GMO: 'Contains GMO', NO_GMO_RECORDED: 'No GMO recorded',
+  // Notification category; the rest of the UI writes "hand-over".
+  HANDOVER: 'Hand-over',
 };
 
 /* Role codes shown to people. Sentence case, and the full job title rather than a

@@ -98,9 +98,14 @@ function buildTiles(dash) {
   return tiles;
 }
 
+/* The row's edge follows its severity: red for critical and high, amber for a warning,
+ * the plain border for information. */
+const ALERT_EDGE = { CRITICAL: 'bad', HIGH: 'bad', WARNING: 'warn' };
+
 function alertItem(alert) {
   const target = entityHref(alert.entity_type, alert.entity_id);
-  return el('li', { class: 'bad' }, [
+  const edge = ALERT_EDGE[String(alert.severity || '').toUpperCase()] || '';
+  return el('li', { class: edge }, [
     badge(alert.severity), ' ',
     el('a', { href: target || UNRESOLVED_ALERTS, text: alert.title }),
     el('div', { class: 'hint',

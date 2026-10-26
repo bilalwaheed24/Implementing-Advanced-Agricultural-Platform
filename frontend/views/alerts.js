@@ -69,7 +69,7 @@ export const render = listView({
       'OPEN', 'ACKNOWLEDGED', 'RESOLVED'] },
     { key: 'category', label: 'Category', options: ['DEVICE_ANOMALY', 'DEVICE_HEALTH',
         'DEVICE_AUTH', 'DATA_THEFT', 'BIOSECURITY', 'DURC', 'FRAUD', 'COMPLIANCE',
-        'CERTIFICATION', 'AGRONOMY'] },
+        'CERTIFICATION', 'LEDGER', 'AGRONOMY'] },
     ],
   columns: [
     { label: 'Raised', render: (row) => el('div', {}, [fmtDate(row.created_at),

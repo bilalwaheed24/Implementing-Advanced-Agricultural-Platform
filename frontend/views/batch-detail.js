@@ -1,5 +1,5 @@
 import { session, el, api, badge, fmtDate, fmtDay, fmtNum, table, empty, toast, can, reasonList,
-         rowHeader, titleCase, jurisdictionLabel, refreshView, confirmDialog }
+         rowHeader, titleCase, humanize, jurisdictionLabel, refreshView, confirmDialog }
   from '/static/assets/core.js';
 import { createPanel, choiceSelect, dateInput, todayIso, atNoon, remoteSelect }
   from '/static/views/formkit.js';
@@ -197,7 +197,9 @@ function shipmentsCard(batch, shipments, holdsIt, { readOnly, shipped }) {
 }
 
 /* A printable product label: the QR a consumer scans, with the code typed underneath. */
-function labelCard(batch, context) {
+/* A certificate-only reader sees the label (its QR code is what a consumer scans) but is
+ * not offered to print it: labelling the batch is its parties' job. */
+function labelCard(batch, context, { readOnly = false } = {}) {
   const label = el('div', { class: 'qr-label print-area' }, [
     el('img', { src: `/api/v1/verify/${batch.verification_code}/qr`, alt: 'Verification QR code',
       class: 'qr-image' }),
@@ -212,7 +214,8 @@ function labelCard(batch, context) {
     el('h2', { text: 'Consumer label' }),
     label,
     el('div', { class: 'row u-mt-8' }, [
-      el('button', { class: 'primary', text: 'Print label', onClick: () => window.print() }),
+      readOnly ? null
+        : el('button', { class: 'primary', text: 'Print label', onClick: () => window.print() }),
       el('a', { href: `/verify.html?code=${batch.verification_code}`, target: '_blank',
         rel: 'noopener', text: 'Open what the consumer sees ↗' }),
     ]),
@@ -307,7 +310,7 @@ export async function render({ id }) {
       verifyButton.textContent = 'Verifying…';
       try {
         const result = await api(`/supply-chain/batches/${id}/verify`, { method: 'POST' });
-        toast(`Integrity ${result.integrity_status}`,
+        toast(`Integrity: ${humanize(result.integrity_status).toLowerCase()}`,
           result.integrity_status === 'VERIFIED' ? 'ok' : 'error');
         verifyResult.replaceChildren(el('div', { class: 'card u-mt-12' }, [
           el('div', { class: 'row' }, [
@@ -315,7 +318,8 @@ export async function render({ id }) {
             result.fabric_status ? el('span', { class: 'hint', text: 'Hyperledger Fabric:' }) : null,
             result.fabric_status ? badge(result.fabric_status) : null,
             el('span', { class: 'hint',
-              text: `fraud score ${result.fraud_score} (${result.fraud_level})` }),
+              text: `fraud score ${result.fraud_score} `
+                + `(${humanize(result.fraud_level).toLowerCase()})` }),
           ]),
           reasonList(result.reasons),
         ]));
@@ -373,7 +377,7 @@ export async function render({ id }) {
           ]),
         ]),
         shipmentsCard(batch, shipments, holdsIt, { readOnly, shipped }),
-        labelCard(batch, context),
+        labelCard(batch, context, { readOnly }),
         el('div', { class: 'card' }, [
           el('h2', { text: 'Certifications' }),
           certifications,
