@@ -249,10 +249,12 @@ def create_batch(db: Session, org_id: str, actor_id: str, actor_role: str, batch
         if parent.state in {"RECALLED", "CONSUMED"}:
             # A recalled lot must not re-enter the chain under a new code.
             raise ValidationFailed(
-                f"Batch {parent.batch_code} is {parent.state} and cannot be used as a parent")
+                f"Batch {parent.batch_code} is {notifications.human_status(parent.state)} and "
+                f"cannot be used as a parent")
         if quantity > parent.quantity + 1e-9:
             raise ValidationFailed(
-                f"Quantity {quantity} exceeds the parent batch quantity {parent.quantity}")
+                f"Quantity {notifications.human_quantity(quantity, unit)} exceeds the parent "
+                f"batch quantity {notifications.human_quantity(parent.quantity, parent.unit)}")
     if crop_id:
         # A grower harvesting its own crop: the batch inherits the crop's farm, seed lot and
         # GMO event, so lineage is recorded from the planting rather than retyped — and a
@@ -917,13 +919,14 @@ def issue_certification(db: Session, issuer_org_id: str, actor_id: str, actor_ro
     trusted = [t.upper() for t in (issuer.trusted_issuer_types or [])]
     if cert_type not in trusted:
         raise ValidationFailed(
-            f"{issuer.name} is not a trusted issuer for {cert_type} certifications "
-            f"(trusted for: {trusted or 'none'})")
+            f"{issuer.name} is not a trusted issuer for "
+            f"{notifications.human_status(cert_type)} certifications (trusted for: "
+            f"{', '.join(notifications.human_status(t) for t in trusted) or 'none'})")
     if db.get(Organization, subject_org_id) is None:
         raise NotFound("Subject organisation not found")
     valid_from, valid_to = _aware(valid_from), _aware(valid_to)
     if valid_to <= valid_from:
-        raise ValidationFailed("valid_to must be after valid_from")
+        raise ValidationFailed("The end date must be after the start date.")
 
     certification = Certification(
         cert_code=cert_code, cert_type=cert_type, standard=standard,
@@ -1025,12 +1028,14 @@ def revoke_certification(db: Session, certification: Certification, actor_id: st
             notify=False, kind=f"cert_revoked:{certification.cert_code}"[:80],
             party_org_id=batch.custodian_org_id)
     db.flush()
-    claimed = ", ".join(b.batch_code for b in batches[:20]) or "no batch"
+    claimed = ", ".join(b.batch_code for b in batches[:20])
     notifications.notify_parties(
         db, certification_parties(db, certification, batches), "CERTIFICATION",
         f"Certification {certification.cert_code} revoked",
-        f"Reason: {reason}. Claimed on: {claimed}. Those batches must be re-verified and may "
-        f"no longer carry the {certification.cert_type} claim.",
+        f"Reason: {reason}."
+        + (f" Claimed on: {claimed}. Those batches must be re-verified and may no longer "
+           f"carry the {notifications.human_status(certification.cert_type)} claim."
+           if claimed else " It was not claimed on any batch."),
         "Certification", certification.id, severity="HIGH", include_oversight=True)
     return certification
 
@@ -1052,7 +1057,9 @@ def sweep_certification_expiry(db: Session, warn_days: int = 30) -> dict[str, in
             Certification.valid_to <= horizon)).scalars()):
         valid_to = _aware(certification.valid_to)
         batches = linked_batches(db, certification)
-        claimed = ", ".join(b.batch_code for b in batches[:20]) or "no batch"
+        # Named only when there is one: "Claimed on: no batch." read as a broken sentence.
+        claimed = (f" Claimed on: {', '.join(b.batch_code for b in batches[:20])}."
+                   if batches else "")
         if valid_to < now:
             certification.status = "EXPIRED"
             # Treated as revocation treats it (see revoke_certification): a VERIFIED verdict
@@ -1074,14 +1081,14 @@ def sweep_certification_expiry(db: Session, warn_days: int = 30) -> dict[str, in
             notifications.raise_alert(
                 db, "CERTIFICATION", "WARNING",
                 f"Certification {certification.cert_code} has expired",
-                detail=f"Valid until {notifications.human_date(valid_to)}. Claimed on: {claimed}.",
+                detail=f"Valid until {notifications.human_date(valid_to)}.{claimed}",
                 org_id=certification.subject_org_id, entity_type="Certification",
                 entity_id=certification.id, notify=False, open_incident=False)
             notifications.notify_parties(
                 db, certification_parties(db, certification, batches), "CERTIFICATION",
                 f"Certification {certification.cert_code} has expired",
-                f"It was valid until {notifications.human_date(valid_to)} and no longer authenticates. "
-                f"Claimed on: {claimed}.", "Certification", certification.id,
+                f"It was valid until {notifications.human_date(valid_to)} and no longer "
+                f"authenticates.{claimed}", "Certification", certification.id,
                 severity="WARNING")
             expired += 1
             continue
@@ -1090,13 +1097,13 @@ def sweep_certification_expiry(db: Session, warn_days: int = 30) -> dict[str, in
         notifications.raise_alert(
             db, "CERTIFICATION", "WARNING",
             f"Certification {certification.cert_code} expires soon",
-            detail=f"Valid until {notifications.human_date(valid_to)}. Claimed on: {claimed}.",
+            detail=f"Valid until {notifications.human_date(valid_to)}.{claimed}",
             org_id=certification.issuer_org_id, entity_type="Certification",
             entity_id=certification.id, notify=False, open_incident=False)
         notifications.notify_parties(
             db, certification_parties(db, certification, batches), "CERTIFICATION",
             f"Certification {certification.cert_code} expires soon",
-            f"Valid until {notifications.human_date(valid_to)}. Claimed on: {claimed}.",
+            f"Valid until {notifications.human_date(valid_to)}.{claimed}",
             "Certification", certification.id, severity="WARNING")
         warned += 1
     return {"expired": expired, "expiring": warned}

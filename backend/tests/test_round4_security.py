@@ -324,7 +324,7 @@ class TestNoDuplicateNotifications:
         assert withdrawn.status_code in (200, 201), withdrawn.text
         new = _user_notes(db, developer, gmo_event["id"])[before:]
         assert len(new) == 1, [n.title for n in new]
-        assert "withdrawn" in new[0].title and "decision REJECTED" in new[0].title
+        assert "withdrawn" in new[0].title and "decision: rejected" in new[0].title
         assert lot.json()["lot_code"] in new[0].body, "the developer's own holdings are named"
         assert not _user_notes(db, developer, lot.json()["id"], "withdrawn")
 

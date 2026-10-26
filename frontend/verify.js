@@ -1,4 +1,4 @@
-    import { el, api, badge, fmtDate, fmtDay, rowHeader, titleCase, empty }
+    import { el, api, badge, fmtDate, fmtDay, rowHeader, humanize, empty }
       from '/static/assets/core.js';
 
     const content = document.getElementById('content');
@@ -31,7 +31,7 @@
     };
 
     function stateCell(state) {
-      const [label, meaning] = STATE_WORDS[state] || [titleCase(state), ''];
+      const [label, meaning] = STATE_WORDS[state] || [humanize(state), ''];
       return el('td', {}, [
         el('span', { class: state === 'RECALLED' ? 'badge critical' : 'badge neutral',
           text: label }),
@@ -59,7 +59,7 @@
       return el('ul', { class: 'reasons' }, certifications.map((cert) => el('li', {
         class: cert.authentic ? 'good' : 'bad',
       }, [
-        el('strong', { text: `${titleCase(cert.type)} (${cert.standard})` }),
+        el('strong', { text: `${humanize(cert.type)} (${cert.standard})` }),
         ' — ', cert.authentic ? 'valid' : 'could not be authenticated',
         ` (${String(cert.status).toLowerCase()}, valid until ${fmtDay(cert.valid_to)})`,
       ])));

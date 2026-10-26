@@ -1,5 +1,5 @@
 import { el, api, badge, field, fmtDate, fmtPct, jurisdictionLabel, toast, can,
-         reasonList, titleCase, humanize } from '/static/assets/core.js';
+         reasonList, humanize } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { remoteSelect } from '/static/views/formkit.js';
 
@@ -146,7 +146,7 @@ export function render(context) {
     },
     columns: [
       { label: 'Generated', render: (row) => fmtDate(row.created_at) },
-      { label: 'Type', render: (row) => titleCase(row.report_type) },
+      { label: 'Type', render: (row) => humanize(row.report_type) },
       { label: 'Batch / event', render: (row) => subjectCell(row) },
       { label: 'Jurisdiction', render: (row) => jurisdictionLabel(row.jurisdiction) },
       { label: 'Status', render: (row) => badge(row.status) },

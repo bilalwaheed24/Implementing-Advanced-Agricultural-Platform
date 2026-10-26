@@ -1,4 +1,5 @@
-import { el, api, badge, can, field, fmtNum, fmtDay, toast } from '/static/assets/core.js';
+import { el, api, badge, can, field, fmtNum, fmtDay, toast, isCrossTenant }
+  from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 
 // Readable labels rather than the field names ("area ha").
@@ -53,7 +54,10 @@ function createFarmForm(reload) {
 
 export const render = listView({
   title: 'Farms and fields',
-  subtitle: 'Farms are scoped to your organisation. A competitor cannot see these records.',
+  subtitle: () => (isCrossTenant()
+    ? 'Every organisation\'s farms, shown to your role for oversight. Farm organisations see '
+      + 'only their own records; a competitor cannot see them.'
+    : 'Farms are scoped to your organisation. A competitor cannot see these records.'),
   endpoint: '/farms',
   // Client-side: the farm list endpoint has no text search parameter.
   search: { placeholder: 'Farm name, region, country or GLN',

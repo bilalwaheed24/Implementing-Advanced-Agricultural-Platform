@@ -1,20 +1,15 @@
-import { session, el, api, badge, can, fmtDate, fmtNum, tile, toast, titleCase, humanize }
+import { session, el, api, badge, can, fmtDate, fmtNum, tile, toast, humanize }
   from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, choiceSelect } from '/static/views/formkit.js';
 
-const DEVICE_TYPES = [
-  ['SOIL_SENSOR', 'Soil sensor'],
-  ['DRONE', 'Drone'],
-  ['WEATHER_STATION', 'Weather station'],
-  ['YIELD_MONITOR', 'Yield monitor'],
-  ['IRRIGATION_CONTROLLER', 'Irrigation controller'],
-  ['COLD_CHAIN_SENSOR', 'Cold-chain sensor'],
-  ['LAB_INSTRUMENT', 'Lab instrument (biotech lab)'],
-];
+/* Labelled with humanize, as the device page, telemetry picker and alert columns are, so a
+ * type reads the same everywhere ("Cold-chain sensor", "Lab instrument"). */
+const DEVICE_TYPES = ['SOIL_SENSOR', 'DRONE', 'WEATHER_STATION', 'YIELD_MONITOR',
+  'IRRIGATION_CONTROLLER', 'COLD_CHAIN_SENSOR', 'LAB_INSTRUMENT']
+  .map((code) => [code, humanize(code)]);
 
-const deviceTypeLabel = (code) =>
-  (DEVICE_TYPES.find(([value]) => value === code) || [code, titleCase(code)])[1];
+const deviceTypeLabel = (code) => humanize(code);
 
 /* The provisioning secret is returned by the API exactly once. It is rendered here rather
  * than in a toast so the operator can copy it deliberately before dismissing it. */
@@ -108,14 +103,30 @@ function registerForm(reload, host) {
   });
 }
 
+/* The fleet broken down with the dashboard's definitions: "active" is active and reporting,
+ * a silent device (still status Active so it can come back) counts as offline instead, and
+ * the order matches the dashboard tile ("12 active, 0 quarantined, 2 offline"). */
+function fleetBreakdown(byStatus, offline) {
+  const active = Math.max(0, (byStatus.ACTIVE || 0) - offline);
+  const parts = [`${active} active`, `${byStatus.QUARANTINED || 0} quarantined`,
+    `${offline} offline`];
+  for (const status of ['PROVISIONED', 'SUSPENDED', 'RETIRED']) {
+    if (byStatus[status]) parts.push(`${byStatus[status]} ${humanize(status).toLowerCase()}`);
+  }
+  return parts.join(', ');
+}
+
 async function postureCard() {
   try {
-    const posture = await api('/devices/posture');
+    const [posture, offlinePage] = await Promise.all([
+      api('/devices/posture'),
+      api('/devices?offline=true&status=ACTIVE&page=1&page_size=1').catch(() => null),
+    ]);
     const severities = posture.open_by_severity || {};
+    const offline = Number(offlinePage?.total) || 0;
     return el('div', { class: 'grid cols-4 u-mb-16' }, [
       tile('Fleet size', posture.devices_total,
-        Object.entries(posture.devices_by_status || {})
-          .map(([k, v]) => `${v} ${humanize(k).toLowerCase()}`).join(', ')),
+        fleetBreakdown(posture.devices_by_status || {}, offline)),
       tile('Open vulnerabilities', posture.vulnerabilities_open,
         `${severities.CRITICAL || 0} critical, ${severities.HIGH || 0} high`),
       tile('Devices affected', posture.devices_affected,

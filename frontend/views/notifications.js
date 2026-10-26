@@ -4,6 +4,7 @@
  * notifications actually said or to clear them, so the count could only ever grow.
  */
 import { el, api, badge, fmtDate, toast, humanize, humanizeText, entityHref, entityLabel,
+         isCrossTenant,
          empty, loading, errorBox } from '/static/assets/core.js';
 
 const PAGE_SIZE = 50;
@@ -113,7 +114,10 @@ export async function render() {
   return el('div', {}, [
     el('h1', { text: 'Notifications' }),
     el('p', { class: 'subtitle',
-      text: 'Alerts are routed to the roles that own the category, scoped to your organisation.' }),
+      text: isCrossTenant()
+        ? 'Alerts are routed to the roles that own the category. Your role has oversight '
+          + 'across organisations, so you receive them from every organisation, not only yours.'
+        : 'Alerts are routed to the roles that own the category, scoped to your organisation.' }),
     el('div', { class: 'card' }, [header, body]),
   ]);
 }

@@ -278,7 +278,9 @@ def ingest_scene(db: Session, org_id: str, actor_id: str, actor_role: str, scene
     if cloud_cover_pct < 40:
         if ndvi_mean < threshold:
             notifications.raise_alert(
-                db, "AGRONOMY", "WARNING", f"Low vegetation index on field {field.name}",
+                db, "AGRONOMY", "WARNING",
+                # With the farm: "Block C" alone is ambiguous across a tenant's farms.
+                f"Low vegetation index on field {field_label(field)}",
                 detail=f"{index_name} mean {ndvi_mean:.2f} from {source.lower()} imagery "
                        f"indicates crop stress in this field.",
                 org_id=org_id, entity_type="Field", entity_id=field_id, open_incident=False,
@@ -346,6 +348,12 @@ def fields_geojson(db: Session, org_id: str | None) -> dict[str, Any]:
     return {"type": "FeatureCollection", "name": "absp_fields", "features": features}
 
 
+def field_label(field: Any) -> str:
+    """ "Block C (Green Valley North)": a field named with its farm."""
+    farm = getattr(field, "farm", None)
+    return f"{field.name} ({farm.name})" if farm is not None else field.name
+
+
 def field_stress_ranking(db: Session, org_id: str | None, limit: int = 10) -> list[dict[str, Any]]:
     """Precision-farming insight: rank fields by vegetation index and soil moisture."""
     from ..models import Field
@@ -374,6 +382,9 @@ def field_stress_ranking(db: Session, org_id: str | None, limit: int = 10) -> li
                        + (0.3 * (1 - min(1.0, (moisture or 30) / 40)) if moisture is not None else 0.1), 4)
         ranking.append({
             "field_id": field_id, "field_name": field.name if field else "unknown",
+            # Two farms may both have a "Block C": the farm names the field unambiguously.
+            "farm_name": field.farm.name if field is not None and field.farm is not None
+            else None,
             "ndvi_mean": scene.ndvi_mean, "soil_moisture_pct": moisture,
             "captured_at": scene.captured_at, "stress_index": stress,
             "level": "HIGH" if stress > 0.55 else "MODERATE" if stress > 0.4 else "LOW",

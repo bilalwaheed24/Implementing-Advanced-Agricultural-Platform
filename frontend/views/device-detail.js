@@ -1,6 +1,6 @@
 import { el, api, badge, fmtDate, fmtNum, table, toast, can, empty, lineChart,
          confirmDialog, rowHeader, channelLabel,
-         titleCase, refreshView } from '/static/assets/core.js';
+         humanize, refreshView } from '/static/assets/core.js';
 import { createPanel, choiceSelect } from '/static/views/formkit.js';
 import { incidentLink, incidentTitle } from '/static/views/entity-links.js';
 
@@ -14,7 +14,7 @@ function cleanTitle(text) {
 }
 
 export function deviceName(device) {
-  return `${device.model || titleCase(device.device_type)} · ${device.id.slice(0, 8)}`;
+  return `${device.model || humanize(device.device_type)} · ${device.id.slice(0, 8)}`;
 }
 
 async function containmentAction(id, action, promptText) {
@@ -105,7 +105,7 @@ function detailsTable(device, farm, fieldRow) {
       : el('span', { class: 'mono', text: device.field_id.slice(0, 8) });
   }
   return el('table', {}, [
-    el('tr', {}, [rowHeader('Type'), el('td', { text: titleCase(device.device_type) })]),
+    el('tr', {}, [rowHeader('Type'), el('td', { text: humanize(device.device_type) })]),
     el('tr', {}, [rowHeader('Model'), el('td', { text: device.model })]),
     el('tr', {}, [rowHeader('Serial number'),
       el('td', { class: 'mono', text: device.serial_number || '—' })]),
@@ -239,7 +239,7 @@ function provisionedNotice(device) {
     el('strong', { text: 'Not yet active. ' }),
     'A provisioned device holds a secret but its telemetry is refused until it is activated. '
     + 'Load the secret issued at registration onto the device, then press Activate. '
-    + (can('device:write') ? '' : 'Activation needs the device:write permission.'),
+    + (can('device:write') ? '' : 'Only the farm\'s operators can activate a device.'),
   ]);
 }
 
@@ -273,7 +273,7 @@ export async function render({ id }) {
   return el('div', {}, [
     el('h1', { text: deviceName(device) }),
     el('p', { class: 'subtitle' }, [
-      titleCase(device.device_type),
+      humanize(device.device_type),
       farm ? ` on ${farm.name}` : '',
       fieldRow ? `, ${fieldRow.name}` : '',
       ' · ', badge(device.status),

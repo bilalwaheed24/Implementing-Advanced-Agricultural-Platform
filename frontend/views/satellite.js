@@ -1,5 +1,5 @@
-import { el, api, fmtNum, fmtDate, badge, table, empty, errorBox, toast, shortId }
-  from '/static/assets/core.js';
+import { el, api, fmtNum, fmtDate, badge, table, empty, errorBox, toast, shortId,
+  loadFieldPlaces, fieldPlaceName } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 
 async function stressCard() {
@@ -15,7 +15,9 @@ async function stressCard() {
       el('h2', { text: 'Precision-farming field stress ranking' }),
       el('p', { class: 'hint', text: result.method }),
       table([
-        { label: 'Field', key: 'field_name' },
+        // With its farm: two farms can both have a "Block C".
+        { label: 'Field', render: (r) => fieldPlaceName(places, r.field_id,
+          r.farm_name ? `${r.farm_name} — ${r.field_name}` : r.field_name) || '—' },
         { label: 'NDVI mean', numeric: true, render: (r) => fmtNum(r.ndvi_mean, 3) },
         { label: 'Soil moisture', numeric: true, render: (r) =>
           r.soil_moisture_pct === null ? '—' : `${fmtNum(r.soil_moisture_pct, 1)}%` },
@@ -55,7 +57,10 @@ function qgisExport() {
     } });
 }
 
-export const render = listView({
+/* Farm and field names, loaded once per render. */
+let places = { farms: new Map(), fields: new Map() };
+
+const listing = listView({
   title: 'Satellite and drone imagery',
   subtitle: 'Satellite scenes and OpenDroneMap orthophotos. Every scene is checksum-verified; '
     + 'for a drone orthophoto the SHA-256 of the image file itself is anchored on the ledger. '
@@ -65,6 +70,8 @@ export const render = listView({
   actions: () => qgisExport(),
   columns: [
     { label: 'Scene', render: (row) => el('span', { class: 'mono', text: row.scene_id }) },
+    { label: 'Field', render: (row) => fieldPlaceName(places, row.field_id)
+      || el('span', { class: 'mono hint', text: shortId(row.field_id) }) },
     { label: 'Provider', key: 'provider' },
     { label: 'Type', render: (row) => badge(row.source || 'SATELLITE', 'neutral') },
     { label: 'Index', render: (row) => row.index_name || 'NDVI' },
@@ -83,3 +90,8 @@ export const render = listView({
   emptyMessage: 'Satellite scenes and drone orthophotos appear here once they are uploaded '
     + 'for your fields.',
 });
+
+export async function render(context = {}) {
+  places = await loadFieldPlaces();
+  return listing(context);
+}

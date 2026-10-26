@@ -86,7 +86,7 @@ class TestApprovalLoss:
     def test_developer_is_told_every_decision(self, client, auth, db, users, gmo_event):
         _approve(client, auth, gmo_event["id"], jurisdiction="EU", status="PENDING")
         titles = [n.title for n in _notes(db, users["BIOTECH_RESEARCHER"], gmo_event["id"])]
-        assert any("EU decision PENDING" in t for t in titles)
+        assert any("pending in EU" in t for t in titles)
 
     def test_expiry_sweep_propagates_once(self, client, auth, db, orgs, gmo_holdings):
         from app.services import gmo as gmo_service

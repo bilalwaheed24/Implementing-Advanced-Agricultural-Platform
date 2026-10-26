@@ -44,6 +44,18 @@ APPROVAL_TRANSITIONS: dict[str, frozenset[str]] = {
 # Approval states that permit a GMO event to be taken forward into seed lots and batches.
 APPROVED_STATUSES = frozenset({"APPROVED"})
 
+# A regulator's decision as a sentence ("The regulator approved the event for EU"), rather
+# than the stored code ("recorded APPROVED for EU").
+DECISION_SENTENCES = {
+    "APPROVED": "approved the event", "REJECTED": "rejected the event",
+    "PENDING": "marked the event pending (still under assessment)",
+    "NOT_SUBMITTED": "recorded that the event has not been submitted",
+}
+
+
+def decision_sentence(status: str) -> str:
+    return DECISION_SENTENCES.get(status, f"recorded {notifications.human_status(status)}")
+
 
 def is_live(approval: GMOApproval | None, now: datetime | None = None) -> bool:
     """True when an approval currently permits the event: APPROVED, already in force (no
@@ -260,11 +272,14 @@ def record_approval(db: Session, event: GMOEvent, actor_id: str, actor_role: str
         db, event.org_id, "GMO",
         # A withdrawal or restoration keeps the title the holders' notices carry, so the
         # developer's inbox reads the same as everyone else's, and adds the decision.
-        f"{follow_up['title']} (decision {status})" if follow_up is not None
-        else f"GMO event {event.event_code}: {notifications.jurisdiction_label(jurisdiction)} "
-             f"decision {status}",
-        f"The regulator recorded {status} for {notifications.jurisdiction_label(jurisdiction)}"
-        + (f" (previously {previous_status})" if previous_status else "")
+        f"{follow_up['title']} (decision: {notifications.human_status(status)})"
+        if follow_up is not None
+        else f"GMO event {event.event_code}: {notifications.human_status(status)} in "
+             f"{notifications.jurisdiction_label(jurisdiction)}",
+        f"The regulator {decision_sentence(status)} for "
+        f"{notifications.jurisdiction_label(jurisdiction)}"
+        + (f" (previously {notifications.human_status(previous_status)})"
+           if previous_status else "")
         + f"{expiry}. Reference: {reference or 'none'}.{affected}"
         + (f" {follow_up['summary']}" if follow_up is not None else ""),
         "GMOEvent", event.id,
@@ -576,7 +591,8 @@ def transfer_seed_lot(db: Session, lot: SeedLot, from_org_id: str, to_org_id: st
                  detail={"lot_code": lot.lot_code, "to_org": receiving.msp_id})
     notifications.notify_org(
         db, to_org_id, "HANDOVER", f"Seed lot {lot.lot_code} supplied to you",
-        f"{lot.crop_type} {lot.variety}, {lot.quantity_kg:g} kg. You can now plant from it.",
+        f"{lot.crop_type} {lot.variety}, {notifications.human_quantity(lot.quantity_kg, 'kg')}. "
+        "You can now plant from it.",
         "SeedLot", lot.id)
     return lot
 

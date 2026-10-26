@@ -105,7 +105,7 @@ def transition(db: Session, device: Device, new_status: str, actor_id: str, acto
         # whose anomaly prompted the quarantine) rather than opening a second one.
         alert = notifications.raise_alert(
             db, "DEVICE_AUTH", "HIGH", f"{device_label(device)} quarantined",
-            detail=f"{device.device_type} quarantined: {reason}. Its credential has been revoked.",
+            detail=f"Quarantined: {reason}. Its credential has been revoked.",
             org_id=device.org_id, entity_type="Device", entity_id=device.id, kind="quarantined")
         incident = db.get(Incident, alert.incident_id) if alert.incident_id else None
         if incident is not None and incident.status in {"OPEN", "TRIAGED"}:

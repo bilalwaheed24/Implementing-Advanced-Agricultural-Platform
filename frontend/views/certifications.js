@@ -1,13 +1,29 @@
-import { el, api, badge, fmtDay, toast, can, titleCase } from '/static/assets/core.js';
+import { el, api, badge, fmtDay, toast, can, humanize, orgTypeLabel } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, choiceSelect, dateInput, todayIso, atNoon }
   from '/static/views/formkit.js';
 
-const CERT_TYPES = [
-  ['ORGANIC', 'Organic'],
-  ['NON_GMO', 'Non-GMO'],
-  ['SPECIALTY', 'Specialty'],
-];
+// Labelled with humanize, as the Type column and filter are.
+const CERT_TYPES = ['ORGANIC', 'NON_GMO', 'SPECIALTY'].map((code) => [code, humanize(code)]);
+
+/* A suggested scope for the certificate type and the kind of organisation certified: a
+ * non-GMO certificate for a processor is not "whole-farm crop production". The certifier
+ * can overwrite it; a scope they typed is never replaced. */
+const SUGGESTED_SCOPES = {
+  FARM: { ORGANIC: 'Whole-farm organic crop production',
+    NON_GMO: 'Non-GMO crop production and on-farm segregation',
+    SPECIALTY: 'Specialty crop production' },
+  SUPPLY: { ORGANIC: 'Organic handling, processing and distribution',
+    NON_GMO: 'Non-GMO handling, segregation and identity preservation',
+    SPECIALTY: 'Specialty product handling and distribution' },
+  BIOTECH: { ORGANIC: 'Organic seed production',
+    NON_GMO: 'Non-GMO seed and breeding lines',
+    SPECIALTY: 'Specialty seed and breeding lines' },
+};
+function suggestedScope(certType, orgType) {
+  const byType = SUGGESTED_SCOPES[orgType] || {};
+  return byType[certType] || `${humanize(certType)} production and handling`;
+}
 
 function issueForm(reload) {
   const certCode = el('input', { required: 'required', minlength: '3', maxlength: '60',
@@ -27,12 +43,25 @@ function issueForm(reload) {
   // so self-certification is not offerable in the UI and is refused by the API (audit P0-3).
   const subject = remoteSelect({
     endpoint: '/supply-chain/certifications/eligible-subjects',
-    label: (row) => `${row.name} — ${titleCase(row.org_type)}, ${row.country}`,
+    label: (row) => `${row.name} — ${orgTypeLabel(row.org_type)}, ${row.country}`,
     placeholder: 'Select the organisation being certified',
     emptyLabel: 'No other organisation is available to certify',
   });
   const scope = el('input', { required: 'required', minlength: '3', maxlength: '255',
-    value: 'Whole-farm crop production' });
+    value: suggestedScope(certType.value, 'FARM') });
+  // Re-suggested whenever the type or subject changes, unless the certifier has edited it.
+  let subjects = [];
+  subject.whenReady.then((rows) => { subjects = rows || []; });
+  const allSuggestions = () => new Set(Object.values(SUGGESTED_SCOPES)
+    .flatMap((byType) => Object.values(byType))
+    .concat(CERT_TYPES.map(([code]) => suggestedScope(code, null))));
+  const resuggest = () => {
+    if (scope.value && !allSuggestions().has(scope.value)) return;
+    const chosen = subjects.find((row) => row.id === subject.value);
+    scope.value = suggestedScope(certType.value, chosen ? chosen.org_type : 'FARM');
+  };
+  certType.addEventListener('change', resuggest);
+  subject.addEventListener('change', resuggest);
   const today = todayIso();
   const nextYear = new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const validFrom = dateInput(today, { required: 'required' });
@@ -129,7 +158,7 @@ export function render(context) {
     },
     columns: [
       { label: 'Code', render: (row) => el('span', { class: 'mono', text: row.cert_code }) },
-      { label: 'Type', render: (row) => titleCase(row.cert_type) },
+      { label: 'Type', render: (row) => humanize(row.cert_type) },
       { label: 'Standard', key: 'standard' },
       { label: 'Subject', render: (row) => row.subject_org_name || '—' },
       { label: 'Scope', key: 'scope' },

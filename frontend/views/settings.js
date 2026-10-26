@@ -1,4 +1,4 @@
-import { el, session, api, rowHeader, toast, roleLabel } from '/static/assets/core.js';
+import { el, session, api, rowHeader, toast, roleLabel, menuHidden } from '/static/assets/core.js';
 
 /* What each permission lets a person do, in their words. The codes are the system's; a
  * reader wants to know "can I approve a GMO event?", not "gmo:approve". */
@@ -38,9 +38,29 @@ const AREAS = {
   compliance: 'Trust', blockchain: 'Trust', audit: 'Trust', admin: 'Administration',
 };
 
-function capabilityList(permissions) {
+/* The menu pages a capability is used on. A capability is listed only when at least one of
+ * its pages is in the role's menu (core.js NOT_USEFUL_FOR via menuHidden): a researcher holds
+ * ai:read but has no AI Insights page, so "See AI analyses" would promise something the menu
+ * does not offer. A permission with no entry
+ * here is not tied to a hidden page and is always listed. */
+const CAPABILITY_PAGES = {
+  'device:read': ['#/devices'], 'device:write': ['#/devices'], 'device:contain': ['#/devices'],
+  'telemetry:read': ['#/telemetry', '#/satellite'], 'telemetry:write': ['#/satellite'],
+  'ai:read': ['#/ai'], 'ai:run': ['#/ai'],
+  'gmo:read': ['#/gmo', '#/seed-lots'], 'gmo:write': ['#/gmo', '#/seed-lots'],
+  'supply:read': ['#/batches', '#/products', '#/shipments'],
+  'supply:write': ['#/batches', '#/products', '#/shipments'],
+  'supply:verify': ['#/batches', '#/fraud'],
+};
+
+function capabilityUseful(permission, currentRole) {
+  const pages = CAPABILITY_PAGES[permission];
+  return !pages || pages.some((path) => !menuHidden(path, currentRole));
+}
+
+function capabilityList(permissions, currentRole) {
   const byArea = new Map();
-  for (const permission of permissions) {
+  for (const permission of permissions.filter((p) => capabilityUseful(p, currentRole))) {
     const area = AREAS[permission.split(':')[0]] || 'Other';
     if (!byArea.has(area)) byArea.set(area, []);
     byArea.get(area).push(CAPABILITIES[permission] || permission);
@@ -70,7 +90,7 @@ export async function render() {
     ]),
     el('div', { class: 'card' }, [
       el('h2', { text: 'What your role can do' }),
-      capabilityList(me.permissions),
+      capabilityList(me.permissions, me.role),
     ]),
     el('div', { class: 'card' }, [
       el('h2', { text: 'Session' }),

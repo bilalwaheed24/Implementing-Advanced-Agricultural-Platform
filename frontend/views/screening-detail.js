@@ -1,5 +1,5 @@
 import { session, el, api, badge, field, fmtDate, fmtPct, fmtNum, table, toast, can, reasonList,
-         titleCase, empty, refreshView } from '/static/assets/core.js';
+         humanize, empty, refreshView } from '/static/assets/core.js';
 
 export async function render({ id }) {
   if (!id) return empty('No screening selected', 'Choose a screening from the list.');
@@ -32,7 +32,7 @@ export async function render({ id }) {
   const evidence = hits.length
     ? table([
       { label: 'Agent', key: 'agent_name' },
-      { label: 'Hazard class', render: (row) => titleCase(row.hazard_class) },
+      { label: 'Hazard class', render: (row) => humanize(row.hazard_class) },
       { label: 'Severity', numeric: true, render: (row) => badge(
         row.severity >= 5 ? 'CRITICAL' : row.severity >= 4 ? 'HIGH' : 'WARNING') },
       { label: 'Identity', numeric: true, render: (row) => fmtPct(row.identity, 1) },

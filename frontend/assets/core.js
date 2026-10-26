@@ -106,6 +106,9 @@ const TERM_LABELS = {
   NON_GMO: 'Non-GMO', CONTAINS_GMO: 'Contains GMO', NO_GMO_RECORDED: 'No GMO recorded',
   // Notification category; the rest of the UI writes "hand-over".
   HANDOVER: 'Hand-over',
+  // Device types, written as the registration form writes them.
+  COLD_CHAIN_SENSOR: 'Cold-chain sensor', LAB_INSTRUMENT: 'Lab instrument',
+  NOT_FLAGGED: 'Not flagged',
 };
 
 /* Role codes shown to people. Sentence case, and the full job title rather than a
@@ -129,6 +132,16 @@ const JURISDICTION_LABELS = {
 export function jurisdictionLabel(value) {
   const key = String(value || '').toUpperCase();
   return JURISDICTION_LABELS[key] || titleCase(value);
+}
+
+/* Organisation types, one label for the registration dropdown, tables and pickers. */
+const ORG_TYPE_LABELS = {
+  FARM: 'Farm', SUPPLY: 'Processor / supply chain', BIOTECH: 'Biotech developer',
+  REGULATOR: 'Regulator / certifier',
+};
+export function orgTypeLabel(value) {
+  const key = String(value || '').toUpperCase();
+  return ORG_TYPE_LABELS[key] || humanize(key);
 }
 
 export function roleLabel(value) {
@@ -321,8 +334,19 @@ export function badge(value, fallback = 'neutral') {
   const kind = SEVERITY_CLASS[key] || fallback;
   return el('span', { class: `badge ${kind}` }, [
     el('span', { class: 'icon', 'aria-hidden': 'true', text: SEVERITY_ICON[kind] || '·' }),
-    STATUS_LABELS[key] || titleCase(value || 'unknown'),
+    badgeLabel(value),
   ]);
+}
+
+/* A badge reads exactly as the same value does in a table column, filter or dropdown
+ * (humanize: "Non-GMO", "In transit", "Device health"). Free text passed in ("Low risk")
+ * is kept in its own sentence case; only its first letter is raised. */
+function badgeLabel(value) {
+  const text = String(value || 'unknown');
+  if (/^[A-Z0-9_]+$/.test(text.toUpperCase()) && !/\s/.test(text)) {
+    return humanize(text.toUpperCase());
+  }
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 /* ---------------- toasts ---------------- */
@@ -472,6 +496,57 @@ export function can(permission) {
   return Boolean(current?.permissions?.includes(permission));
 }
 export function role() { return session.read()?.role || ''; }
+
+/* Roles that read across organisations (backend core/permissions.py CROSS_TENANT_ROLES), so
+ * copy saying "your organisation" is not true for them. */
+const CROSS_TENANT_ROLES = new Set(['ADMIN', 'REGULATOR', 'SECURITY_ANALYST',
+  'BIOSAFETY_OFFICER']);
+export function isCrossTenant(value = role()) {
+  return CROSS_TENANT_ROLES.has(String(value || '').toUpperCase());
+}
+
+/* Menu items withheld from roles that hold the read permission but can never see data there:
+ * the records belong to other organisations (each organisation sees its own rows only).
+ * The page itself stays reachable; this only keeps the menu to what the role works with.
+ * Shared by the menu (app.js) and the Settings capability list, so the two agree. */
+export const NOT_USEFUL_FOR = {
+  '#/devices': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/telemetry': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/satellite': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/ai': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER', 'BIOTECH_RESEARCHER'],
+  '#/gmo': ['FARM_OPERATOR', 'AGRONOMIST', 'SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/seed-lots': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/batches': ['BIOTECH_RESEARCHER', 'CERTIFIER'],
+  '#/products': ['BIOTECH_RESEARCHER', 'CERTIFIER', 'AGRONOMIST'],
+  '#/shipments': ['BIOTECH_RESEARCHER', 'CERTIFIER', 'AGRONOMIST'],
+  '#/fraud': ['BIOTECH_RESEARCHER', 'CERTIFIER', 'AGRONOMIST'],
+};
+export function menuHidden(path, value = role()) {
+  return (NOT_USEFUL_FOR[path] || []).includes(String(value || '').toUpperCase());
+}
+
+/* Farm and field names, so a field is always named with its farm: two farms may both have
+ * a "Block C". Loaded once per render; a role without farm:read gets empty maps and callers
+ * fall back to the name they already have. */
+export async function loadFieldPlaces() {
+  const places = { farms: new Map(), fields: new Map() };
+  if (!can('farm:read')) return places;
+  const [farms, fields] = await Promise.all([
+    api('/farms?page=1&page_size=200').catch(() => ({ items: [] })),
+    api('/fields?page=1&page_size=200').catch(() => ({ items: [] })),
+  ]);
+  for (const row of farms.items || []) places.farms.set(row.id, row.name);
+  for (const row of fields.items || []) places.fields.set(row.id, row);
+  return places;
+}
+/* "Green Valley North — Block C". `fallbackName` is used when the field is not loaded. */
+export function fieldPlaceName(places, fieldId, fallbackName = null) {
+  const fieldRow = places?.fields?.get(fieldId);
+  const name = fieldRow?.name || fallbackName;
+  if (!name) return null;
+  const farm = fieldRow ? places.farms.get(fieldRow.farm_id) : null;
+  return farm ? `${farm} — ${name}` : name;
+}
 
 /* ---------------- rendering helpers ---------------- */
 export function loading(label = 'Loading…') {

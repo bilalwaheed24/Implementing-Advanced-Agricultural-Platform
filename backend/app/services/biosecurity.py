@@ -106,6 +106,24 @@ SCREENING_OUTCOMES = {
 }
 
 
+# What a gene-edit risk level means for the submitter, in words rather than the stored code
+# and raw score ("Risk PROHIBITED (0.9)").
+RISK_MEANINGS = {
+    "LOW": "no concern that needs review was found",
+    "MEDIUM": "some concerns were found; they are listed on the assessment",
+    "HIGH": "serious concerns were found; a biosafety officer must review it",
+    "PROHIBITED": "this is the highest risk level; it cannot proceed without biosafety review",
+}
+
+
+def risk_sentence(level: str | None, score: float | None) -> str:
+    """ "Risk: prohibited (score 90%); this is the highest risk level; ..." """
+    word = notifications.human_status(level) or "unknown"
+    meaning = RISK_MEANINGS.get((level or "").upper())
+    scored = f" (score {round(float(score) * 100)}%)" if score is not None else ""
+    return f"Risk: {word}{scored}" + (f"; {meaning}." if meaning else ".")
+
+
 def _review_closed(db: Session, entity_type: str, entity_id: str, submitted_by: str | None,
                    what: str, status: str, rationale: str, actor_id: str) -> None:
     """Tell the submitter the decision and close the alert(s) the submission raised."""
@@ -224,8 +242,8 @@ def assess_crispr(db: Session, org_id: str, actor_id: str, actor_role: str, targ
     notifications.notify_user(
         db, actor_id, "BIOSECURITY",
         f"Gene-edit {target_gene} in {organism}: {SCREENING_OUTCOMES[status]}",
-        f"Risk {result.risk_level} ({result.risk_score})"
-        + ("; flagged as dual-use research of concern" if result.durc_flag else "") + ".",
+        risk_sentence(result.risk_level, result.risk_score)
+        + (" It is also flagged as dual-use research of concern." if result.durc_flag else ""),
         "CrisprAssessment", record.id,
         severity="WARNING" if status == STATUS_PENDING_REVIEW else "INFO")
     return record

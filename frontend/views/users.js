@@ -1,10 +1,10 @@
-import { el, api, badge, fmtDate, fmtDay, table, titleCase, toast, can, empty, roleLabel,
-         refreshView, session, orgName, humanize } from '/static/assets/core.js';
+import { el, api, badge, fmtDate, fmtDay, table, toast, can, empty, roleLabel,
+         refreshView, session, orgName, humanize, orgTypeLabel } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, choiceSelect } from '/static/views/formkit.js';
 
-const ORG_TYPES = [['FARM', 'Farm'], ['SUPPLY', 'Processor / supply chain'],
-  ['BIOTECH', 'Biotech developer'], ['REGULATOR', 'Regulator / certifier']];
+const ORG_TYPES = ['FARM', 'SUPPLY', 'BIOTECH', 'REGULATOR']
+  .map((code) => [code, orgTypeLabel(code)]);
 
 /* Onboarding a new organisation, e.g. a farm joining the platform. */
 function addOrgPanel() {
@@ -35,7 +35,7 @@ function addOrgPanel() {
 function addUserPanel(orgs) {
   const email = el('input', { type: 'email', required: 'required', maxlength: '255' });
   const fullName = el('input', { required: 'required', minlength: '2', maxlength: '200' });
-  const org = choiceSelect(orgs.map((o) => [o.id, `${o.name} (${titleCase(o.org_type)})`]));
+  const org = choiceSelect(orgs.map((o) => [o.id, `${o.name} (${orgTypeLabel(o.org_type)})`]));
   const roleSelect = choiceSelect(ROLES.map((r) => [r, roleName(r)]), { value: 'FARM_OPERATOR' });
   const password = el('input', { type: 'text', required: 'required', minlength: '12',
     maxlength: '128', placeholder: 'temporary, at least 12 characters' });
@@ -65,10 +65,10 @@ async function orgsCard() {
       el('h2', { text: 'Organisations' }),
       table([
         { label: 'Name', key: 'name' },
-        { label: 'Type', render: (row) => titleCase(row.org_type) },
+        { label: 'Type', render: (row) => orgTypeLabel(row.org_type) },
         { label: 'MSP identity', render: (row) => el('span', { class: 'mono', text: row.msp_id }) },
         { label: 'Trusted issuer for',
-          render: (row) => (row.trusted_issuer_types || []).map(titleCase).join(', ') || '—' },
+          render: (row) => (row.trusted_issuer_types || []).map((t) => humanize(t)).join(', ') || '—' },
       ], orgs.items),
       el('div', { class: 'row u-toolbar u-mt-12' }, [
         can('org:write') ? addOrgPanel() : null,

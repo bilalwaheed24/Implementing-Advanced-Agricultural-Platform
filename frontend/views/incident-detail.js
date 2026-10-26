@@ -1,4 +1,4 @@
-import { el, api, badge, field, fmtDate, toast, can, empty, titleCase, humanizeText,
+import { el, api, badge, field, fmtDate, toast, can, empty, humanize, humanizeText,
          refreshView, session, table, confirmDialog, rowHeader } from '/static/assets/core.js';
 import { entityLink, incidentTitle } from '/static/views/entity-links.js';
 
@@ -17,7 +17,7 @@ const BIOSAFETY_CATEGORIES = ['BIOSECURITY', 'DURC'];
 function timelineList(events) {
   return el('ul', { class: 'timeline' }, events.map((event) =>
     el('li', {}, [
-      el('strong', { text: titleCase(event.action) }),
+      el('strong', { text: humanize(event.action) }),
       el('div', { class: 'when', text: [fmtDate(event.created_at),
         `by ${event.actor_name || event.actor_label || 'system'}`].join(' · ') }),
       event.detail ? el('div', { class: 'hint', text: humanizeText(event.detail) }) : null,
@@ -169,7 +169,7 @@ export async function render({ id }) {
       el('td', {}, [entityLink(incident.entity_type, incident.entity_id,
         incident.entity_label) || '—'])]),
     el('tr', {}, [rowHeader('Category'),
-      el('td', { text: incident.category ? titleCase(incident.category) : '—' })]),
+      el('td', { text: incident.category ? humanize(incident.category) : '—' })]),
     el('tr', {}, [rowHeader('Assignee'),
       el('td', { text: assignee ? (assignee.name || assignee.id.slice(0, 8)) : 'Unassigned' })]),
   ]);

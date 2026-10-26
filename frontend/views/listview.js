@@ -150,7 +150,9 @@ export function listView({ title, subtitle, endpoint, columns, filters = [], act
     await load();
 
     const head = [el('h1', { text: title })];
-    if (subtitle) head.push(el('p', { class: 'subtitle', text: subtitle }));
+    // A function is evaluated per render, so the copy can follow the signed-in role.
+    const subtitleText = typeof subtitle === 'function' ? subtitle() : subtitle;
+    if (subtitleText) head.push(el('p', { class: 'subtitle', text: subtitleText }));
     const toolbar = [];
     if (searchControl) toolbar.push(searchControl);
     toolbar.push(...filterControls.filter(Boolean));

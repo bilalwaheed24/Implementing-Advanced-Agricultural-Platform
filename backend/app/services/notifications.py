@@ -86,6 +86,16 @@ def human_status(code: str | None) -> str:
                     for word in words.split(" "))
 
 
+def human_quantity(value: float | int | None, unit: str | None = None) -> str:
+    """A quantity as people write it: 2400.0 kg -> "2,400 kg", 12.5 -> "12.5"."""
+    if value is None:
+        return "an unknown quantity"
+    number = float(value)
+    text = (f"{number:,.0f}" if number == int(number)
+            else f"{number:,.3f}".rstrip("0").rstrip("."))
+    return f"{text} {unit}" if unit else text
+
+
 def with_article(phrase: str) -> str:
     """ "organic" -> "an organic", "specialty" -> "a specialty"."""
     return f"{'an' if phrase[:1].lower() in 'aeiou' else 'a'} {phrase}" if phrase else phrase
