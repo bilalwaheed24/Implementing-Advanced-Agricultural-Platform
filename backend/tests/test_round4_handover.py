@@ -106,7 +106,7 @@ class TestShipmentsOfAReadableBatch:
         first = _ship(client, auth, farm_batch["id"], to_org_id=orgs["SUPPLY"].id).json()
         _arrive(client, auth, first["id"])
         onward = _ship(client, auth, farm_batch["id"], role="SUPPLY_CHAIN_OPERATOR",
-                       to_org_id=second_farm_org.id).json()
+                       to_org_id=second_farm_org.id, departed_at=iso(now())).json()
         listed = {row["id"] for row in _shipments(client, auth, "FARM_OPERATOR",
                                                    f"batch_id={farm_batch['id']}")}
         assert {first["id"], onward["id"]} <= listed

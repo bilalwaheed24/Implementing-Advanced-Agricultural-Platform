@@ -283,7 +283,7 @@ class TestCertificateReadAccess:
         first = _ship(client, auth, farm_batch["id"], to_org_id=orgs["SUPPLY"].id).json()
         _arrive(client, auth, first["id"])
         onward = _ship(client, auth, farm_batch["id"], role="SUPPLY_CHAIN_OPERATOR",
-                       to_org_id=second_farm_org.id).json()
+                       to_org_id=second_farm_org.id, departed_at=iso(now())).json()
         listed = _ids(client.get(f"{API}/supply-chain/shipments?batch_id={farm_batch['id']}",
                                  headers=auth("CERTIFIER")))
         assert first["id"] in listed
@@ -368,7 +368,7 @@ def test_an_event_dated_before_the_latest_handover_is_refused(client, auth, db, 
     backdated = _event(client, auth, "SUPPLY_CHAIN_OPERATOR", farm_batch["id"], "storing",
                        "in_storage", handed - timedelta(days=1))
     assert backdated.status_code == 422, backdated.text
-    assert "hand-over" in backdated.text
+    assert "last recorded step" in backdated.text   # round 6: in words, any prior step
     booked = _event(client, auth, "SUPPLY_CHAIN_OPERATOR", farm_batch["id"], "storing",
                     "in_storage", handed + timedelta(minutes=5))
     assert booked.status_code == 201, booked.text

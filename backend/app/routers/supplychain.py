@@ -68,7 +68,11 @@ def list_batches(db: DbSession, paging: PagingDep,
                      "batches without one"),
                  awaiting_receipt: bool = Query(
                      default=False, description="Only batches handed over to the caller's "
-                     "organisation that have reached it but that it has not booked in yet")
+                     "organisation that have reached it but that it has not booked in yet"),
+                 held: bool = Query(
+                     default=False, description="Only batches in the caller's organisation's "
+                     "custody now: held by it and not still in transit to it (the dashboard's "
+                     "\"Batches held\"; every holder for a cross-tenant role)")
                  ) -> Page[BatchOut]:
     # Includes, read-only, the batches carrying a certificate the caller's organisation issued.
     query = service.readable_batches(principal.role, principal.org_id).order_by(
@@ -81,6 +85,11 @@ def list_batches(db: DbSession, paging: PagingDep,
         # Same rule as the dashboard's "Hand-overs to book in" tile (service.awaiting_booking).
         query = query.where(*service.awaiting_booking(
             None if principal.is_cross_tenant else principal.org_id))
+    if held:
+        # Same rule as the dashboard's "Batches held" tile (dashboard._supply_tiles).
+        query = query.where(Batch.state != "IN_TRANSIT")
+        if not principal.is_cross_tenant:
+            query = query.where(Batch.custodian_org_id == principal.org_id)
     if state:
         query = query.where(Batch.state == state.upper())
     if integrity:
@@ -238,7 +247,10 @@ def list_shipments(db: DbSession, paging: PagingDep,
                 Shipment.org_id.in_(subjects), Shipment.to_org_id.in_(subjects))
             ).order_by(Shipment.departed_at.desc())
         query = query.where(Shipment.batch_id == batch_id)
-    if incoming is not None and principal.org_id:
+    if incoming is not None and principal.org_id and not principal.is_cross_tenant:
+        # A cross-tenant role marks any shipment arrived and its dashboard counts every
+        # in-transit shipment as awaiting arrival, so "incoming" does not narrow its list to
+        # its own organisation: the tile and the list it links to agree (round 6).
         # The receiver of an internal move (no to_org_id) is its sender. Spelled out with
         # IS NULL: `NOT (to_org_id = x OR ...)` is NULL, not true, for a row whose to_org_id
         # is NULL, so incoming=false used to drop every internal move of another sender.

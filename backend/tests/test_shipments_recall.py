@@ -177,7 +177,12 @@ class TestShipmentIsTheHandOver:
             "occurred_at": iso(now() - timedelta(hours=3))})
         shipped = _ship(client, auth, farm_batch["id"], to_org_id=orgs["SUPPLY"].id)
         assert shipped.status_code == 201, shipped.text
-        assert _steps(client, auth, "FARM_OPERATOR", farm_batch["id"]) == ["shipping"]
+        # Round 6: the hand-over gets its own shipping event naming the receiver, so the chain
+        # of custody records it (it used to move custody with no event naming to_org_id).
+        events = client.get(f"/api/v1/supply-chain/batches/{farm_batch['id']}/custody",
+                            headers=auth("FARM_OPERATOR")).json()["events"]
+        assert [e["biz_step"] for e in events] == ["shipping", "shipping"]
+        assert [e["to_org_id"] for e in events] == [None, orgs["SUPPLY"].id]
         assert _batch(client, auth, "SUPPLY_CHAIN_OPERATOR",
                       farm_batch["id"])["custodian_org_id"] == orgs["SUPPLY"].id
 

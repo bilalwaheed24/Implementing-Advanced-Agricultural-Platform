@@ -37,10 +37,10 @@ const DISPOSITIONS = [
   ['recalled', 'Recalled'],
 ];
 
-function recordEventPanel(batch, reload) {
+function recordEventPanel(batch, reload, { only = null } = {}) {
   const reachable = BATCH_TRANSITIONS[batch.state] || [];
   const steps = Object.entries(STEP_TO_STATE)
-    .filter(([, state]) => reachable.includes(state))
+    .filter(([step, state]) => reachable.includes(state) && (!only || only.includes(step)))
     .map(([step, state]) => [step, `${titleCase(step)} → ${titleCase(state)}`]);
 
   if (!steps.length) {
@@ -62,7 +62,9 @@ function recordEventPanel(batch, reload) {
   const quantity = el('input', { type: 'number', step: 'any', min: '0',
     value: String(batch.quantity) });
   const unit = el('input', { maxlength: '12', value: batch.unit });
-  const occurred = dateInput(todayIso(), { required: 'required' });
+  // Not in the future, and not before the batch's last step: the server refuses both and says
+  // which date to choose.
+  const occurred = dateInput(todayIso(), { required: 'required', max: todayIso() });
   // Handing the batch to another organisation is done with a shipment (Shipments card): the
   // shipment records the shipping event and moves custody in one step, so the two cannot
   // fall out of order.
@@ -197,9 +199,10 @@ function shipmentsCard(batch, shipments, holdsIt, { readOnly, shipped }) {
 }
 
 /* A printable product label: the QR a consumer scans, with the code typed underneath. */
-/* A certificate-only reader sees the label (its QR code is what a consumer scans) but is
- * not offered to print it: labelling the batch is its parties' job. */
-function labelCard(batch, context, { readOnly = false } = {}) {
+/* Every reader sees the label (its QR code is what a consumer scans), but only the
+ * organisation holding the goods is offered to print it: labelling is the holder's job, not
+ * an oversight role's, a certifier's or the producer's after a hand-over (round 6). */
+function labelCard(batch, context, { canPrint = false } = {}) {
   const label = el('div', { class: 'qr-label print-area' }, [
     el('img', { src: `/api/v1/verify/${batch.verification_code}/qr`, alt: 'Verification QR code',
       class: 'qr-image' }),
@@ -214,8 +217,9 @@ function labelCard(batch, context, { readOnly = false } = {}) {
     el('h2', { text: 'Consumer label' }),
     label,
     el('div', { class: 'row u-mt-8' }, [
-      readOnly ? null
-        : el('button', { class: 'primary', text: 'Print label', onClick: () => window.print() }),
+      canPrint
+        ? el('button', { class: 'primary', text: 'Print label', onClick: () => window.print() })
+        : null,
       el('a', { href: `/verify.html?code=${batch.verification_code}`, target: '_blank',
         rel: 'noopener', text: 'Open what the consumer sees ↗' }),
     ]),
@@ -268,7 +272,25 @@ export async function render({ id }) {
   // oversight role's) to do, and the API refuses them to anyone else.
   const access = batch.viewer_access || (isParty ? 'party' : 'certificate');
   const readOnly = access === 'certificate';
-  const recall = isParty ? recallControl(batch) : null;
+  const isOwner = context.owner?.id === me;
+  // Handed to this organisation but still on the road: it is the custodian on record, yet the
+  // goods have not reached it. Until it marks them arrived it is offered only that (and the
+  // owner keeps its recall), not custody steps, certificate claims or the label (round 6).
+  const inTransitToMe = holdsIt && batch.state === 'IN_TRANSIT';
+  const openShipmentToMe = shipments.some((row) => row.status === 'IN_TRANSIT'
+    && (row.to_org_id || row.org_id) === me);
+  const recall = isParty && (!inTransitToMe || isOwner) ? recallControl(batch) : null;
+  let nextStep = null;
+  if (holdsIt && inTransitToMe) {
+    nextStep = openShipmentToMe
+      ? el('p', { class: 'hint', text: 'This batch is in transit to you. Mark its shipment '
+        + 'arrived in the Shipments card when the goods reach you; its next steps can be '
+        + 'recorded after that.' })
+      // Shipped by a bare shipping event, with no shipment to mark arrived: book it in here.
+      : recordEventPanel(batch, () => refreshView(), { only: ['receiving', 'storing'] });
+  } else if (holdsIt) {
+    nextStep = recordEventPanel(batch, () => refreshView());
+  }
   const shipped = custody.events.some((event) => event.biz_step === 'shipping');
 
   const timeline = el('ul', { class: 'timeline' }, custody.events.map((event) =>
@@ -361,8 +383,9 @@ export async function render({ id }) {
             el('tr', {}, [rowHeader('Produced by'),
               el('td', { text: context.owner?.name || '—' })]),
             el('tr', {}, [rowHeader('Held by'),
-              el('td', {}, [context.custodian?.name || '—',
-                holdsIt ? el('span', { class: 'hint', text: ' (your organisation)' }) : null])]),
+              inTransitToMe ? el('td', { text: 'In transit to you' })
+                : el('td', {}, [context.custodian?.name || '—',
+                  holdsIt ? el('span', { class: 'hint', text: ' (your organisation)' }) : null])]),
             el('tr', {}, [rowHeader('Grown at'),
               el('td', { text: context.farm
                 ? `${context.farm.name}, ${context.farm.region} ${context.farm.country}` : '—' })]),
@@ -377,11 +400,11 @@ export async function render({ id }) {
           ]),
         ]),
         shipmentsCard(batch, shipments, holdsIt, { readOnly, shipped }),
-        labelCard(batch, context, { readOnly }),
+        labelCard(batch, context, { canPrint: holdsIt && !inTransitToMe && !readOnly }),
         el('div', { class: 'card' }, [
           el('h2', { text: 'Certifications' }),
           certifications,
-          can('supply:write') && isParty && !readOnly
+          can('supply:write') && isParty && !readOnly && !inTransitToMe
             ? claimPanel(batch, new Set(custody.certifications.map((c) => c.cert_code)),
               Boolean(context.gmo), () => refreshView())
             : null,
@@ -389,7 +412,7 @@ export async function render({ id }) {
         can('supply:write') && !readOnly ? el('div', { class: 'card' }, [
           el('h2', { text: 'Record the next step' }),
           holdsIt
-            ? recordEventPanel(batch, () => refreshView())
+            ? nextStep
             : el('p', { class: 'hint', text: `${context.custodian?.name || 'Another organisation'} `
               + 'holds this batch now, so only they can record its next step. You keep read '
               // The recall sentence only where the Recall button is actually offered.

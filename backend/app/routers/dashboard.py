@@ -68,6 +68,7 @@ def _role(value: str) -> Role | None:
 def _supply_tiles(db, org_id: str | None) -> dict:
     # "In your custody now": a batch still on the road to the caller is counted once, under
     # awaiting_arrival, not here as well (round 5).
+    # The batch list's ?held=true applies the same rule, so the tile and its link agree.
     held = [Batch.state != "IN_TRANSIT"]
     if org_id is not None:
         held.append(Batch.custodian_org_id == org_id)

@@ -5,7 +5,7 @@ FR-D3 (fraud detection), FR-D4 (consumer verification).
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, or_, select, update
@@ -59,6 +59,82 @@ def require_batch_transition(current: str, target: str) -> None:
         raise ValidationFailed(
             f"Illegal transition {current} -> {target}; allowed: "
             f"{', '.join(sorted(allowed)) or 'none, this state is final'}")
+
+
+# --------------------------------------------------------------------------- #
+# Event timing and receivers (round 6)
+# --------------------------------------------------------------------------- #
+# How far ahead of the server clock a date may be: enough for a client clock running a little
+# fast, not enough to schedule a step. A shipping event dated years ahead used to freeze the
+# batch, because every later step (arrival, even the recall) was then "before" it.
+FUTURE_TOLERANCE = timedelta(minutes=5)
+# Steps that come before or at the harvest itself, so the harvest date does not bound them.
+PRE_HARVEST_STEPS = frozenset({"commissioning", "harvesting"})
+# The organisation types that can record a batch's steps and take custody of it on the
+# ledger: provenance.RecordEvent and provenance.TransferCustody in ledger/contracts.py
+# SUBMIT_RIGHTS (tests/test_round6_timing.py keeps the two equal). A batch handed to any
+# other type could never be marked arrived, so it stayed IN_TRANSIT for good.
+RECEIVER_ORG_TYPES = frozenset({"FARM", "SUPPLY"})
+
+
+def human_when(value: datetime) -> str:
+    """A moment as people write it, to the minute: "19 Oct 2026, 03:48 UTC". Rounded up, so
+    a date "on or after" the time shown is always accepted."""
+    moment = _aware(value).astimezone(timezone.utc)
+    if moment.second or moment.microsecond:
+        moment = moment.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    return f"{moment.day} {moment.strftime('%b %Y, %H:%M')} UTC"
+
+
+def require_not_future(value: datetime | None, what: str) -> None:
+    """Refuse a date more than a few minutes ahead of now (422, in words)."""
+    if value is None:
+        return
+    now = utcnow()
+    if _aware(value) > now + FUTURE_TOLERANCE:
+        raise ValidationFailed(
+            f"The {what} cannot be in the future. Choose a date no later than "
+            f"{human_when(now)}.")
+
+
+def require_chronology(db: Session, batch: Batch, occurred_at: datetime, biz_step: str) -> None:
+    """Refuse a step dated before the batch's latest recorded step, or (after the harvest)
+    before its harvest date.
+
+    The chain of custody is ordered by occurred_at, so a backdated step would land between
+    earlier ones and rewrite the history: before a hand-over it fell in the previous holder's
+    time with the batch, and a booking dated so never counted as booking the hand-over in.
+    Recording yesterday's step today is still fine as long as it comes after the last one.
+    A recall is exempt: it is how a batch is taken out of the chain, and it must never be
+    blocked by how the chain was dated.
+    """
+    if biz_step == "recalling":
+        return
+    when = _aware(occurred_at)
+    latest = db.execute(select(func.max(SupplyChainEvent.occurred_at)).where(
+        SupplyChainEvent.batch_id == batch.id)).scalar_one_or_none()
+    if latest is not None and when < _aware(latest):
+        raise ValidationFailed(
+            f"Choose a date on or after {human_when(latest)} — the batch's last recorded "
+            f"step.")
+    if (biz_step not in PRE_HARVEST_STEPS and batch.harvested_at is not None
+            and when < _aware(batch.harvested_at)):
+        raise ValidationFailed(
+            f"Choose a date on or after {human_when(batch.harvested_at)} — when the batch was "
+            f"harvested.")
+
+
+def require_receiver(db: Session, to_org_id: str) -> Organization:
+    """The organisation a batch is handed to must exist, be active, and be of a type that can
+    act on the batch on the ledger (RECEIVER_ORG_TYPES)."""
+    receiver = db.get(Organization, to_org_id)
+    if receiver is None or not receiver.is_active:
+        raise NotFound("Receiving organisation not found")
+    if receiver.org_type not in RECEIVER_ORG_TYPES:
+        raise ValidationFailed(
+            f"{receiver.name} cannot receive batches: only farms and supply-chain "
+            f"organisations can take custody of a batch and record its next steps.")
+    return receiver
 
 
 def _is_cross_tenant(role: str) -> bool:
@@ -226,6 +302,8 @@ def create_batch(db: Session, org_id: str, actor_id: str, actor_role: str, batch
                  origin_country: str | None, harvested_at: datetime | None) -> Batch:
     if db.execute(select(Batch).where(Batch.batch_code == batch_code)).scalar_one_or_none():
         raise Conflict(f"Batch {batch_code} already exists")
+    # A harvest date ahead of now would refuse every later step until that date came.
+    require_not_future(harvested_at, "harvest date")
     # Every id below arrives from the request body, so each is resolved rather than trusted.
     # Two different rules apply, because a supply chain legitimately spans organisations:
     #
@@ -345,6 +423,8 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
         raise ValidationFailed(
             f"to_org_id hands the batch to another organisation, which only a "
             f"'{HANDOVER_STEP}' event may do; '{biz_step}' cannot carry a receiver")
+    if to_org_id and to_org_id != batch.custodian_org_id:
+        require_receiver(db, to_org_id)
     if biz_step in RELEASE_STEPS:
         require_releasable(db, batch, RELEASE_STEPS[biz_step])
     if quantity is not None and quantity > batch.quantity + 1e-9:
@@ -356,7 +436,8 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
     target_state = BIZ_STEP_TO_STATE.get(biz_step)
     if target_state:
         require_batch_transition(batch.state, target_state)
-    _require_after_latest_handover(db, batch, occurred_at)
+    require_not_future(occurred_at, "date of the step")
+    require_chronology(db, batch, occurred_at, biz_step)
 
     event = SupplyChainEvent(
         batch_id=batch.id, org_id=org_id, event_type=event_type, biz_step=biz_step,
@@ -415,22 +496,6 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
     if new_state == "RECALLED":
         propagate_recall(db, batch, actor_id, actor_role, org_id)
     return event
-
-
-def _require_after_latest_handover(db: Session, batch: Batch, occurred_at: datetime) -> None:
-    """Refuse an event dated before the batch's latest custody hand-over.
-
-    The chain of custody is ordered by occurred_at. An event backdated before the hand-over
-    lands in the previous holder's time with the batch; a booking dated so never counts as
-    booking the hand-over in, and the batch stayed "awaiting booking" for good (round 5)."""
-    latest = db.execute(select(func.max(SupplyChainEvent.occurred_at)).where(
-        SupplyChainEvent.batch_id == batch.id,
-        SupplyChainEvent.to_org_id.is_not(None))).scalar_one_or_none()
-    if latest is not None and _aware(occurred_at) < _aware(latest):
-        raise ValidationFailed(
-            f"occurred_at {_aware(occurred_at).isoformat()} is before the batch's latest "
-            f"custody hand-over ({_aware(latest).isoformat()}); an event cannot be dated "
-            f"before the batch reached its current holder")
 
 
 def _related_batches(db: Session, batch: Batch, max_depth: int = 12
@@ -781,14 +846,14 @@ def create_shipment(db: Session, org_id: str, actor_id: str, actor_role: str, *,
     require_releasable(db, batch, "shipped")
     arrived = _aware(kwargs.get("arrived_at"))
     departed = _aware(kwargs["departed_at"])
+    require_not_future(departed, "departure date")
+    require_not_future(arrived, "arrival date")
     if arrived and arrived < departed:
-        raise ValidationFailed("arrived_at must not precede departed_at")
+        raise ValidationFailed("The arrival date cannot be before the departure date.")
     if to_org_id == batch.custodian_org_id:
         to_org_id = None                     # shipping to yourself is an internal move
     if to_org_id:
-        receiver = db.get(Organization, to_org_id)
-        if receiver is None or not receiver.is_active:
-            raise NotFound("Receiving organisation not found")
+        require_receiver(db, to_org_id)
         if arrived:
             raise ValidationFailed(
                 "A shipment to another organisation is marked arrived by the receiver; "
@@ -807,14 +872,17 @@ def create_shipment(db: Session, org_id: str, actor_id: str, actor_role: str, *,
     require_batch_transition(batch.state, "IN_TRANSIT")
 
     # The batch's shipping event, carrying the hand-over. If the holder already recorded a
-    # shipping event without a hand-over, the shipment aligns with it instead of repeating it.
+    # shipping event without a hand-over, an internal shipment aligns with it instead of
+    # repeating it. A hand-over always gets its own shipping event naming the receiver
+    # (round 6): moving custody with no event recording to_org_id left the hand-over out of
+    # the chain of custody, so the receiver's next step could be dated before it.
     already_shipping = batch.state == "IN_TRANSIT"
-    if not already_shipping:
+    if not already_shipping or to_org_id:
         record_event(db, org_id, actor_id, actor_role, batch, "shipping", "in_transit", "OBJECT",
                      None, kwargs["origin_name"], kwargs["origin_lat"], kwargs["origin_lon"],
                      None, None, to_org_id, departed, {"sscc": kwargs["sscc"]})
-    elif to_org_id:
-        transfer_custody(db, batch, org_id, to_org_id, departed)
+    else:
+        require_chronology(db, batch, departed, "shipping")
 
     kwargs["departed_at"] = departed
     kwargs["arrived_at"] = None
@@ -841,8 +909,11 @@ def arrive_shipment(db: Session, shipment: Shipment, org_id: str, actor_id: str,
     if not _is_cross_tenant(actor_role) and org_id != receiver:
         raise PermissionDenied("Only the receiving organisation may mark this shipment arrived")
     arrived = _aware(arrived_at)
+    require_not_future(arrived, "arrival date")
     if arrived < _aware(shipment.departed_at):
-        raise ValidationFailed("arrived_at must not precede departed_at")
+        raise ValidationFailed(
+            f"Choose an arrival date on or after {human_when(shipment.departed_at)} — when "
+            f"shipment {shipment.sscc} departed.")
     batch = db.get(Batch, shipment.batch_id)
     # Closed first, so the receiving event's own shipment sync finds nothing left to close.
     shipment.status = "DELIVERED"

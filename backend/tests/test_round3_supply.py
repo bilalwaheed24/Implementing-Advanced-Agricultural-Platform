@@ -123,7 +123,7 @@ def test_recall_notifies_an_intermediate_holder(client, auth, db, orgs, users, f
     first = _ship(client, auth, batch_id, to_org_id=orgs["SUPPLY"].id).json()
     _arrive(client, auth, first["id"])
     onward = _ship(client, auth, batch_id, role="SUPPLY_CHAIN_OPERATOR",
-                   to_org_id=second_farm_org.id)
+                   to_org_id=second_farm_org.id, departed_at=iso(now()))
     assert onward.status_code == 201, onward.text
     # The processor no longer owns or holds the batch.
     assert client.get(f"{API}/supply-chain/batches/{batch_id}",

@@ -686,6 +686,15 @@ def seed(reset_first: bool) -> dict:
                 db.flush()
             except Exception as error:                              # noqa: BLE001
                 print(f"  certification seed skipped for {cert_code}: {error}")
+        # NGM-2026-0002 ended 30 days ago, so it is seeded EXPIRED exactly as the expiry sweep
+        # would leave it (status, audit entry, the expiry alert and the parties' notices).
+        # Left ACTIVE, the first scheduled sweep after seeding raised a surprise expiry for a
+        # certificate a month out of date (round 6). It still demonstrates an expiry.
+        try:
+            supplychain.sweep_certification_expiry(db)
+            db.flush()
+        except Exception as error:                                  # noqa: BLE001
+            print(f"  certification expiry seed skipped: {error}")
 
         # --- crops ----------------------------------------------------------
         for field in fields[:4]:

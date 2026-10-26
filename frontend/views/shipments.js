@@ -4,14 +4,40 @@ import { el, api, badge, can, fmtDate, fmtNum, toast, session, titleCase, humani
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, dateInput, todayIso, atNoon } from '/static/views/formkit.js';
 
+/* The organisation types that can take custody of a batch and record its next steps
+ * (`supplychain.RECEIVER_ORG_TYPES`, from the ledger's rights). A batch handed to a biotech
+ * developer or a regulator could never be marked arrived, so they are not offered. */
+export const RECEIVER_ORG_TYPES = ['FARM', 'SUPPLY'];
+
+/* GS1 mod-10 check digit for the digits before it (as backend/app/gs1.py). */
+export function gs1CheckDigit(digits) {
+  let total = 0;
+  [...digits].reverse().forEach((char, position) => {
+    total += Number(char) * (position % 2 === 0 ? 3 : 1);
+  });
+  return (10 - (total % 10)) % 10;
+}
+
 /* Ship a batch. Creating the shipment records the batch's shipping event and, when a
  * receiving organisation is chosen, hands custody to it there and then; the receiver marks it
  * arrived. Used here and, with the batch fixed, on the batch page. */
 export function shipmentForm({ batch: fixedBatch = null, reload,
                                toggleLabel = 'Create a shipment' }) {
   const me = session.read()?.org_id;
-  const sscc = el('input', { required: 'required', minlength: '8', maxlength: '18',
-    placeholder: 'SSCC, 8–18 digits' });
+  const sscc = el('input', { required: 'required', minlength: '18', maxlength: '18',
+    inputmode: 'numeric', pattern: '\\d{18}', placeholder: 'SSCC, 18 digits',
+    title: '18 digits, the last one a GS1 check digit' });
+  // Checked as the operator types, as the server checks it: 18 digits and a valid GS1 check
+  // digit. A typo in one digit is caught here rather than after submitting.
+  sscc.addEventListener('input', () => {
+    const value = sscc.value.trim();
+    let problem = '';
+    if (value && !/^\d{18}$/.test(value)) problem = 'An SSCC is 18 digits.';
+    else if (value && gs1CheckDigit(value.slice(0, 17)) !== Number(value[17])) {
+      problem = `Check digit is wrong (expected ${gs1CheckDigit(value.slice(0, 17))}).`;
+    }
+    sscc.setCustomValidity(problem);
+  });
   // Only batches this organisation holds, in a state that can still move, are offered; the
   // API refuses anything else regardless (a foreign batch is a plain 404, audit P1).
   const batch = fixedBatch ? null : remoteSelect({
@@ -24,7 +50,7 @@ export function shipmentForm({ batch: fixedBatch = null, reload,
   });
   const receiver = remoteSelect({
     endpoint: '/admin/organizations/directory', required: false,
-    filter: (org) => org.id !== me && org.org_type !== 'REGULATOR',
+    filter: (org) => org.id !== me && RECEIVER_ORG_TYPES.includes(org.org_type),
     label: (org) => `${org.name} (${titleCase(org.org_type)})`,
     placeholder: 'Nobody — an internal move (keep custody)',
     emptyLabel: 'No trading partner registered',
@@ -43,8 +69,9 @@ export function shipmentForm({ batch: fixedBatch = null, reload,
     required: 'required', value: '41.6' });
   const destLon = el('input', { type: 'number', step: 'any', min: '-180', max: '180',
     required: 'required', value: '-93.7' });
-  const departed = dateInput(todayIso(), { required: 'required' });
-  const arrived = dateInput();
+  // No future dates: the server refuses them (a shipment dated ahead froze the batch).
+  const departed = dateInput(todayIso(), { required: 'required', max: todayIso() });
+  const arrived = dateInput(null, { max: todayIso() });
   // Only a move inside the organisation can be entered as already arrived: a hand-over is
   // signed for by the receiver.
   const syncArrived = () => {
@@ -114,7 +141,8 @@ export function arriveControl(row, reload) {
   const me = session.read()?.org_id;
   const receiver = row.to_org_id || row.org_id;
   if (row.status !== 'IN_TRANSIT' || receiver !== me || !can('supply:write')) return null;
-  const day = dateInput(todayIso(), { 'aria-label': `Arrival date of ${row.sscc}` });
+  const day = dateInput(todayIso(), { 'aria-label': `Arrival date of ${row.sscc}`,
+    max: todayIso() });
   const button = el('button', { text: 'Arrived', onClick: async () => {
     button.disabled = true;
     try {
