@@ -268,7 +268,9 @@ class TestIncidentPermissions:
                                                               device_incident):
         response = client.patch(f"/api/v1/security/incidents/{device_incident.id}",
                                 headers=auth("BIOSAFETY_OFFICER"), json={"status": "TRIAGED"})
-        assert response.status_code == 403, response.text
+        # Round 6: another organisation's device incident is no longer even visible to a
+        # biosafety officer (404), where it used to be visible but not updatable (403).
+        assert response.status_code == 404, response.text
 
     def test_farm_operator_reads_own_org_incidents_only(self, client, auth, rival_auth,
                                                         device_incident):

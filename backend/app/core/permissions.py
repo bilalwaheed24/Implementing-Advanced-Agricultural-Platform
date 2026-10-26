@@ -192,6 +192,30 @@ SECURITY_OVERSIGHT_ROLES = frozenset({Role.ADMIN, Role.SECURITY_ANALYST})
 OVERSIGHT_ALERT_CATEGORIES = frozenset({"DATA_THEFT", "LEDGER"})
 
 
+# Cross-tenant roles whose reach across organisations is limited to certain alert and incident
+# categories (round 6). A biosafety officer oversees biosecurity on every tenant, so she reads
+# and works BIOSECURITY and DURC alerts (and their incidents) wherever they were raised, but a
+# farm's device-health alert or another company's expired certificate is none of her business:
+# outside these categories she sees only her own organisation's alerts and incidents. Her audit
+# trail is limited the same way: biosecurity entries (AUDIT_CROSS_TENANT_ACTION_PREFIXES) from
+# every organisation, everything else from her own organisation only.
+CATEGORY_LIMITED_CROSS_TENANT: dict[Role, frozenset[str]] = {
+    Role.BIOSAFETY_OFFICER: frozenset({"BIOSECURITY", "DURC"}),
+}
+AUDIT_CROSS_TENANT_ACTION_PREFIXES: dict[Role, tuple[str, ...]] = {
+    Role.BIOSAFETY_OFFICER: ("biosecurity.",),
+}
+
+
+def cross_tenant_categories(role: str) -> frozenset[str] | None:
+    """The alert categories a category-limited cross-tenant role reads across tenants, or
+    None when the role is not limited that way."""
+    try:
+        return CATEGORY_LIMITED_CROSS_TENANT.get(Role(role))
+    except ValueError:
+        return None
+
+
 def is_security_oversight(role: str) -> bool:
     return role in {r.value for r in SECURITY_OVERSIGHT_ROLES}
 

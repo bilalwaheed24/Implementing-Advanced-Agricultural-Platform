@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from .core import request_flags
 from .core.errors import NotFound, PermissionDenied
 from .core.permissions import (CROSS_TENANT_ROLES, OVERSIGHT_ALERT_CATEGORIES, Role,
-                               is_security_oversight)
+                               cross_tenant_categories, is_security_oversight)
 
 T = TypeVar("T")
 
@@ -68,7 +68,25 @@ def unscoped(model: type[T], role: str, *, include_deleted: bool = False) -> Sel
     return query
 
 
-def oversight_conditions(model: type, role: str) -> list[Any]:
+def category_limit_conditions(model: type, role: str, org_id: str | None = None) -> list[Any]:
+    """WHERE conditions narrowing a category-limited cross-tenant role (a biosafety officer)
+    to alerts and incidents of its oversight categories in any organisation, plus everything
+    its own organisation is a party to (round 6). Without `org_id` only the oversight
+    categories match. Empty for every other role and model."""
+    limited = cross_tenant_categories(role)
+    if not limited:
+        return []
+    from .models import Alert, Incident                          # noqa: PLC0415 (cycle)
+
+    if model not in (Alert, Incident):
+        return []
+    clauses = [model.category.in_(sorted(limited))]
+    if org_id:
+        clauses += [model.org_id == org_id, model.custodian_org_id == org_id]
+    return [or_(*clauses)]
+
+
+def oversight_conditions(model: type, role: str, org_id: str | None = None) -> list[Any]:
     """Extra WHERE conditions hiding security-oversight material from every other role.
 
     A DATA_THEFT alert is filed under the suspect user's own organisation, and tenant roles
@@ -76,17 +94,21 @@ def oversight_conditions(model: type, role: str) -> list[Any]:
     data exfiltration by ..." and the analysts' notes on its incident (round 5). Alerts in
     OVERSIGHT_ALERT_CATEGORIES, and incidents of those categories, opened from such an alert
     or carrying one, are visible to SECURITY_OVERSIGHT_ROLES only. Empty for those roles and
-    for every other model."""
+    for every other model.
+
+    A category-limited cross-tenant role is further narrowed by `category_limit_conditions`
+    (pass the caller's `org_id` so its own organisation's alerts stay visible)."""
     if is_security_oversight(role):
         return []
     from .models import Alert, Incident                          # noqa: PLC0415 (cycle)
 
+    limits = category_limit_conditions(model, role, org_id)
     categories = sorted(OVERSIGHT_ALERT_CATEGORIES)
     if model is Alert:
-        return [Alert.category.not_in(categories)]
+        return [Alert.category.not_in(categories), *limits]
     if model is Incident:
         oversight_alerts = select(Alert.id).where(Alert.category.in_(categories))
-        return [
+        return [*limits,
             or_(Incident.category.is_(None), Incident.category.not_in(categories)),
             or_(Incident.source_alert_id.is_(None),
                 Incident.source_alert_id.not_in(oversight_alerts)),
@@ -109,8 +131,29 @@ def visible(model: type[T], role: str, org_id: str | None, *,
         query = unscoped(model, role, include_deleted=include_deleted)
     else:
         query = scoped(model, org_id, include_deleted=include_deleted, also=also)
-    hidden = oversight_conditions(model, role)
+    hidden = oversight_conditions(model, role, org_id)
     return query.where(*hidden) if hidden else query
+
+
+def audit_conditions(role: str, org_id: str | None, *, cross_tenant: bool) -> list[Any]:
+    """WHERE conditions for reading the audit trail. A tenant role reads its own organisation's
+    entries. A category-limited cross-tenant role (a biosafety officer) reads its own
+    organisation's entries plus biosecurity entries from every organisation (round 6: her trail
+    listed every tenant's logins, shipments and device changes). Other cross-tenant roles read
+    everything."""
+    from .core.permissions import AUDIT_CROSS_TENANT_ACTION_PREFIXES  # noqa: PLC0415
+    from .models import AuditLog                                  # noqa: PLC0415 (cycle)
+
+    if not cross_tenant:
+        return [AuditLog.org_id == org_id]
+    try:
+        prefixes = AUDIT_CROSS_TENANT_ACTION_PREFIXES.get(Role(role))
+    except ValueError:
+        prefixes = None
+    if prefixes is None:
+        return []
+    return [or_(AuditLog.org_id == org_id,
+                *[AuditLog.action.startswith(prefix, autoescape=True) for prefix in prefixes])]
 
 
 def get_or_404(db: Session, model: type[T], entity_id: str, role: str, org_id: str | None,

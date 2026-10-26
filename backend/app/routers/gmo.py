@@ -8,12 +8,12 @@ from sqlalchemy import select
 
 from ..core.deps import DbSession, PagingDep, rate_limit, require_permission
 from ..core.errors import PermissionDenied
-from ..core.permissions import P
+from ..core.permissions import P, Role
 from ..models import Batch, GMOApproval, GMOEvent, SeedLot
 from ..repositories import get_or_404, paginate, visible
 from ..schemas import (GMOApprovalCreate, GMOApprovalOut, GMOEventCreate, GMOEventOut, Page,
                        SeedLotCreate, SeedLotOut, TransferRequest)
-from ..services import gmo as service
+from ..services import gmo as service, notifications
 
 router = APIRouter(prefix="/gmo", tags=["GMO Registry"], dependencies=[Depends(rate_limit)])
 
@@ -109,9 +109,15 @@ def record_approval(event_id: str, payload: GMOApprovalCreate, db: DbSession,
                     principal: Annotated[object, Depends(require_permission(P.GMO_APPROVE))]
                     ) -> GMOApprovalOut:
     event = get_or_404(db, GMOEvent, event_id, principal.role, principal.org_id, name="GMO event")
+    # The regulators' "awaits a jurisdictional decision" notices about this event, taken before
+    # the decision so a notice the decision itself sends is not among them. Once a decision is
+    # recorded they are settled and marked read (round 6: they stayed unread).
+    awaiting = notifications.unread_role_notices(db, [Role.REGULATOR], "GMO", "GMOEvent",
+                                                 event.id)
     approval = service.record_approval(
         db, event, principal.id, principal.role, payload.jurisdiction.upper(), payload.status,
         payload.reference, payload.approved_at, payload.expires_at, principal.org_id)
+    notifications.mark_read(db, awaiting)
     db.commit()
     return _approval_out(approval)
 

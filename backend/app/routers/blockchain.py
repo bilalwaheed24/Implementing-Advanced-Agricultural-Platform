@@ -140,6 +140,14 @@ def verify_record(payload: VerifyRecordRequest, db: DbSession,
                 or _can_read_batch(db, principal, event.batch_id)):
             raise NotFound("Event not found")
         batch = db.get(Batch, event.batch_id)
+        if not (principal.is_cross_tenant or event.org_id == principal.org_id
+                or principal.org_id in {batch.org_id, batch.custodian_org_id}):
+            # Read through a certificate only (round 6): the events its certified
+            # organisation(s) took part in, as the batch's chain of custody shows them.
+            from .supplychain import certificate_subjects, event_involves  # noqa: PLC0415
+
+            if not event_involves(event, certificate_subjects(db, principal, batch.id)):
+                raise NotFound("Event not found")
         digest, tx_id, stored = content_hash(supply_service.event_content(event, batch)), \
             event.tx_id, event.content_hash
         fabric_key = f"event:{event.id}"

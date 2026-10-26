@@ -87,6 +87,15 @@ function lineageCell(row) {
   return row.gmo_event_id ? 'GMO' : 'Conventional (non-GMO)';
 }
 
+/* Held by: the name the API returns (holder_name), with the directory as a fallback for an
+ * older API. The caller's own organisation keeps its " (you)" suffix. */
+function heldByCell(row) {
+  const holder = row.custodian_org_id || row.org_id;
+  if (!row.holder_name) return orgName(holder);
+  const own = holder && holder === session.read()?.org_id;
+  return el('span', { text: own ? `${row.holder_name} (you)` : row.holder_name });
+}
+
 export const render = listView({
   title: 'Seed lots',
   subtitle: 'Seed produced from an approved GMO event and anchored to the ledger. The '
@@ -108,7 +117,9 @@ export const render = listView({
       row.germination_pct === null ? '—' : `${fmtNum(row.germination_pct, 1)}%` },
     { label: 'Produced', render: (row) => fmtDay(row.produced_at) },
     { label: 'Anchor', render: (row) => badge(row.anchor_status) },
-    { label: 'Held by', render: (row) => orgName(row.custodian_org_id || row.org_id) },
+    // holder_name comes from the API (round 6): the directory behind orgName is closed to
+    // some roles, which then saw "Held by —".
+    { label: 'Held by', render: heldByCell },
     can('gmo:write')
       ? { label: 'Action', render: (row, { reload }) => supplyControl(row, reload) } : null,
   ].filter(Boolean),

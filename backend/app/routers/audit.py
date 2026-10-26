@@ -11,7 +11,7 @@ from ..core.deps import DbSession, PagingDep, rate_limit, require_permission
 from ..core.errors import NotFound
 from ..core.permissions import P
 from ..models import AuditLog, Organization
-from ..repositories import paginate
+from ..repositories import audit_conditions, paginate
 from ..schemas import AuditLogOut, Page
 from ..services import audit as service
 
@@ -25,9 +25,10 @@ def list_logs(db: DbSession, paging: PagingDep,
               entity_id: str | None = Query(default=None),
               outcome: str | None = Query(default=None)) -> Page[AuditLogOut]:
     query = select(AuditLog).order_by(AuditLog.seq.desc())
-    # The audit log is platform-wide; non-cross-tenant roles see only their own organisation.
-    if not principal.is_cross_tenant:
-        query = query.where(AuditLog.org_id == principal.org_id)
+    # The audit log is platform-wide; non-cross-tenant roles see only their own organisation,
+    # and a biosafety officer her own organisation plus biosecurity entries (round 6).
+    query = query.where(*audit_conditions(principal.role, principal.org_id,
+                                          cross_tenant=principal.is_cross_tenant))
     if action:
         query = query.where(AuditLog.action == action)
     if entity_id:
@@ -69,9 +70,9 @@ def anchor(db: DbSession,
 def export(db: DbSession,
            principal: Annotated[object, Depends(require_permission(P.AUDIT_READ))],
            limit: int = Query(default=1000, ge=1, le=10000)) -> JSONResponse:
-    query = select(AuditLog).order_by(AuditLog.seq.asc()).limit(limit)
-    if not principal.is_cross_tenant:
-        query = query.where(AuditLog.org_id == principal.org_id)
+    query = select(AuditLog).order_by(AuditLog.seq.asc()).limit(limit).where(
+        *audit_conditions(principal.role, principal.org_id,
+                          cross_tenant=principal.is_cross_tenant))
     rows = list(db.execute(query).scalars())
     verification = service.verify_chain(db)
     payload = {

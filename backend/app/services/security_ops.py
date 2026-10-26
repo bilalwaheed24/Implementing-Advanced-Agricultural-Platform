@@ -1,6 +1,7 @@
 """Agricultural data-theft detection and incident response (FR-A3, Security.md §18, §20)."""
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from typing import Any
 
@@ -8,7 +9,9 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.errors import Conflict, ValidationFailed
-from ..core.permissions import CROSS_TENANT_ROLES, P, has_permission
+from ..core.permissions import (CROSS_TENANT_ROLES, OVERSIGHT_ALERT_CATEGORIES, P,
+                               cross_tenant_categories,
+                               has_permission, is_security_oversight)
 from ..core.security import ensure_aware as _aware, utcnow
 from ..models import AccessRecord, Alert, Device, Incident, IncidentEvent, User
 from . import audit, notifications
@@ -43,7 +46,18 @@ DETECTION_THRESHOLD = 0.5
 # A single probe of a foreign record is usually a stale or shared link; deliberate probing
 # repeats. Fewer attempts than this are not a signal.
 CROSS_TENANT_MIN_ATTEMPTS = 3
+# ... unless it is sustained: this many foreign-record probes across the baseline window are a
+# signal even when none falls inside the recent burst window (round 6).
+CROSS_TENANT_SUSTAINED_ATTEMPTS = 10
 PERMISSION_DENIAL_MIN = 20
+UNFAMILIAR_SCOPE_MIN_ROUTES = 25
+_ID_SEGMENT = re.compile(r"^(?:[0-9a-fA-F-]{8,}|\d+)$")
+
+
+def route_shape(route: str) -> str:
+    """A route with record identifiers replaced: /batches/1f2e.../events -> /batches/{id}/events."""
+    return "/".join("{id}" if _ID_SEGMENT.match(part) else part
+                    for part in (route or "").split("/"))
 # Signals that indicate intent on their own. The rest describe ordinary heavy use as well: a
 # farm operator clicking through the app produces a burst of maximum-size lookups (the web app
 # loads its dropdowns with page_size=200) and the odd refused page. Without an intent signal,
@@ -126,10 +140,18 @@ def evaluate_principal(db: Session, principal_id: str, org_id: str | None,
     # refusal inside the caller's own organisation (a page their role cannot use), not an
     # attempt on another tenant's data, so it is counted separately and weighs far less.
     cross_tenant = [r for r in records if r.cross_tenant_attempt and r.status_code != 403]
-    if len(cross_tenant) >= CROSS_TENANT_MIN_ATTEMPTS:
+    # Probing is a signal when it is happening now (CROSS_TENANT_MIN_ATTEMPTS inside the same
+    # short window as the volume check) or was sustained over the baseline window. A few stale
+    # links opened hours ago (an end-to-end check's 404s) no longer turn a later burst of
+    # ordinary page loads into an exfiltration finding (round 6).
+    recent_cross = [r for r in cross_tenant if _aware(r.created_at) >= burst_cutoff]
+    if len(recent_cross) >= CROSS_TENANT_MIN_ATTEMPTS \
+            or len(cross_tenant) >= CROSS_TENANT_SUSTAINED_ATTEMPTS:
         signals.append({"signal": "cross_tenant_attempts",
                         "detail": f"{len(cross_tenant)} attempts to open another "
-                                  f"organisation's records",
+                                  f"organisation's records"
+                                  + (f" ({len(recent_cross)} in the last "
+                                     f"{BURST_WINDOW_MINUTES} minutes)" if recent_cross else ""),
                         "value": len(cross_tenant)})
     denied = [r for r in records if r.status_code == 403]
     if len(denied) >= PERMISSION_DENIAL_MIN:
@@ -137,10 +159,13 @@ def evaluate_principal(db: Session, principal_id: str, org_id: str | None,
                         "detail": f"{len(denied)} requests refused for lack of permission",
                         "value": len(denied)})
 
-    if len(routes) > 25 and len(records) > 200:
+    # Breadth counts kinds of data, not pages: /batches/<id> for thirty batches is one route
+    # shape, so clicking through detail pages in the web app does not read as harvesting.
+    shapes = {route_shape(r.route) for r in records}
+    if len(shapes) > UNFAMILIAR_SCOPE_MIN_ROUTES and len(records) > 200:
         signals.append({"signal": "unfamiliar_scope",
-                        "detail": f"Access spread across {len(routes)} distinct routes",
-                        "value": len(routes)})
+                        "detail": f"Access spread across {len(shapes)} distinct kinds of data",
+                        "value": len(shapes)})
 
     score = 0.0
     for signal in signals:
@@ -263,11 +288,17 @@ def update_incident(db: Session, incident: Incident, actor_id: str, actor_role: 
         if assignee_id:
             assignee = db.get(User, assignee_id)
             if assignee is None or assignee.status != "ACTIVE" or assignee.deleted_at is not None \
-                    or not (assignee.org_id == incident.org_id or incident.org_id is None
-                            or assignee.role in {r.value for r in CROSS_TENANT_ROLES}):
+                    or not _assignee_can_see(assignee, incident):
                 raise ValidationFailed("Assignee must be an active user who can see this incident")
             if not has_permission(assignee.role, P.INCIDENT_READ):
                 raise ValidationFailed("Assignee's role cannot read incidents")
+            # A data-theft or ledger incident is security operations' to work, and a
+            # data-theft one is filed under the suspect's own organisation, so anyone there
+            # who reads incidents (the suspect included) used to be assignable (round 6).
+            if _is_oversight_incident(db, incident) and not is_security_oversight(assignee.role):
+                raise ValidationFailed(
+                    "A data-theft or ledger incident can be assigned only to a security analyst "
+                    "or an administrator")
         changes["assignee_id"] = {"from": incident.assignee_id, "to": assignee_id or None}
         incident.assignee_id = assignee_id or None
     if status:
@@ -311,6 +342,26 @@ def update_incident(db: Session, incident: Incident, actor_id: str, actor_role: 
     return incident
 
 
+def _assignee_can_see(assignee: User, incident: Incident) -> bool:
+    """Whether `assignee` can open `incident` (the rules of repositories.visible)."""
+    if incident.org_id is None or assignee.org_id in {incident.org_id, incident.custodian_org_id}:
+        return True
+    if assignee.role not in {r.value for r in CROSS_TENANT_ROLES}:
+        return False
+    limited = cross_tenant_categories(assignee.role)
+    return not limited or incident.category in limited
+
+
+def _is_oversight_incident(db: Session, incident: Incident) -> bool:
+    """An incident of a security-oversight category, or carrying an alert of one."""
+    categories = sorted(OVERSIGHT_ALERT_CATEGORIES)
+    if incident.category in OVERSIGHT_ALERT_CATEGORIES:
+        return True
+    return db.execute(select(Alert.id).where(
+        or_(Alert.incident_id == incident.id, Alert.id == incident.source_alert_id),
+        Alert.category.in_(categories)).limit(1)).first() is not None
+
+
 def timeline(db: Session, incident_id: str) -> list[IncidentEvent]:
     return list(db.execute(
         select(IncidentEvent).where(IncidentEvent.incident_id == incident_id)
@@ -318,17 +369,25 @@ def timeline(db: Session, incident_id: str) -> list[IncidentEvent]:
 
 
 def security_dashboard(db: Session, org_id: str | None,
-                       role: str | None = None) -> dict[str, Any]:
+                       role: str | None = None,
+                       viewer_org_id: str | None = None) -> dict[str, Any]:
     """Counts for the security board. With a `role` outside SECURITY_OVERSIGHT_ROLES, alerts
-    and incidents that role may not read (DATA_THEFT, LEDGER) are left out of every count."""
+    and incidents that role may not read (DATA_THEFT, LEDGER) are left out of every count.
+
+    A category-limited cross-tenant role (a biosafety officer, round 6) counts its categories
+    across tenants plus `viewer_org_id`'s own alerts, and only its own organisation's devices
+    and request volume."""
     from ..repositories import oversight_conditions                  # noqa: PLC0415
 
     alert_query = select(Alert)
     incident_query = select(Incident)
     if role is not None:
-        alert_query = alert_query.where(*oversight_conditions(Alert, role))
-        incident_query = incident_query.where(*oversight_conditions(Incident, role))
+        alert_query = alert_query.where(*oversight_conditions(Alert, role, viewer_org_id))
+        incident_query = incident_query.where(
+            *oversight_conditions(Incident, role, viewer_org_id))
     device_query = select(Device).where(Device.deleted_at.is_(None))
+    if role is not None and cross_tenant_categories(role) and viewer_org_id:
+        device_query = device_query.where(Device.org_id == viewer_org_id)
     if org_id:
         alert_query = alert_query.where(or_(Alert.org_id == org_id,
                                             Alert.custodian_org_id == org_id))
@@ -341,6 +400,8 @@ def security_dashboard(db: Session, org_id: str | None,
                     .where(AccessRecord.created_at >= utcnow() - timedelta(hours=24)))
     if org_id:
         access_query = access_query.where(AccessRecord.org_id == org_id)
+    elif role is not None and cross_tenant_categories(role) and viewer_org_id:
+        access_query = access_query.where(AccessRecord.org_id == viewer_org_id)
 
     alerts = list(db.execute(alert_query).scalars())
     incidents = list(db.execute(incident_query).scalars())
