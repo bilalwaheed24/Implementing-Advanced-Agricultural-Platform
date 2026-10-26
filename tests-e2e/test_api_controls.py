@@ -15,6 +15,14 @@ import pytest
 
 from conftest import ACCOUNTS, BASE, PASSWORD
 
+
+def _valid_sscc() -> str:
+    """A random SSCC the API accepts: 18 digits ending in its GS1 mod-10 check digit (an
+    invalid one is refused 422 before the foreign-batch check this file probes)."""
+    data = f"{uuid.uuid4().int % 10**17:017d}"
+    total = sum(int(c) * (3 if i % 2 == 0 else 1) for i, c in enumerate(reversed(data)))
+    return data + str((10 - total % 10) % 10)
+
 API = BASE + "/api/v1"
 
 
@@ -260,7 +268,7 @@ class TestTenantIsolation:
     def test_a_foreign_shipment_batch_is_refused(self, tokens, foreign_batch):
         status, body = call("POST", "/supply-chain/shipments",
                             tokens["SUPPLY_CHAIN_OPERATOR"], {
-                                "sscc": f"{uuid.uuid4().int % 10**18:018d}",
+                                "sscc": _valid_sscc(),
                                 "batch_id": foreign_batch["id"], "carrier": "Probe",
                                 "origin_name": "Origin depot", "origin_lat": 42.0,
                                 "origin_lon": -93.0,

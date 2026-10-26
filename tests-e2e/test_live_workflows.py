@@ -9,6 +9,14 @@ import pytest
 from conftest import BASE, go, login, open_form, unique
 
 
+def valid_sscc() -> str:
+    """A random SSCC the API accepts: 18 digits ending in its GS1 mod-10 check digit."""
+    import secrets
+    data = "0" + "".join(secrets.choice("0123456789") for _ in range(16))
+    total = sum(int(c) * (3 if i % 2 == 0 else 1) for i, c in enumerate(reversed(data)))
+    return data + str((10 - total % 10) % 10)
+
+
 # --------------------------------------------------------------------------- #
 # Farm operator: farm, field, devices, lifecycle
 # --------------------------------------------------------------------------- #
@@ -103,7 +111,7 @@ class TestSupplyChain:
     def test_creates_a_shipment_against_its_own_batch(self, page):
         login(page, "SUPPLY_CHAIN_OPERATOR")
         go(page, "#/shipments")
-        sscc = "009" + unique("")[-8:].replace("-", "0")
+        sscc = valid_sscc()
         open_form(page, "Create a shipment")
         page.fill("form input[placeholder*='SSCC']", sscc)
         page.locator("form select").first.select_option(index=1)

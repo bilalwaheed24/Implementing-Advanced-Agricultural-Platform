@@ -1,4 +1,5 @@
-import { el, api, badge, can, fmtDay, fmtNum, orgName, humanize } from '/static/assets/core.js';
+import { el, api, badge, can, fmtDay, fmtNum, orgName, humanize, session }
+  from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, dateInput, todayIso, atNoon } from '/static/views/formkit.js';
 
@@ -39,11 +40,17 @@ function createForm(reload) {
     label: (row) => `${row.name} (${row.gtin})`,
     placeholder: 'Select a product', emptyLabel: 'Create a product first',
   });
+  // Only batches this organisation holds now (and that are with it, not on the road): the
+  // API refuses a parent the caller does not hold, so a batch already handed on, or still
+  // in transit to it, would only fail on submit (round 6).
+  const me = session.read()?.org_id;
   const parent = remoteSelect({
     endpoint: '/supply-chain/batches', required: false,
+    filter: (row) => row.custodian_org_id === me
+      && !['RECALLED', 'CONSUMED', 'IN_TRANSIT'].includes(row.state),
     label: (row) => `${row.batch_code} — ${humanize(row.state).toLowerCase()}`,
     placeholder: 'None (this is an origin batch)',
-    emptyLabel: 'No existing batch to derive from',
+    emptyLabel: 'No batch you hold to derive from',
   });
   // A grower harvesting its own crop: farm, seed lot and GMO event are taken from the
   // planting on the server, so they need not be chosen again below.
@@ -177,8 +184,17 @@ export const render = listView({
     // book in" tile). Shipments still on the road are under Shipments, "Coming to us".
     { key: 'awaiting_receipt', label: 'Hand-over', allLabel: 'Any',
       options: [['true', 'With us, not booked in']] },
+    // In this organisation's custody now, not still on the road to it (the dashboard's
+    // "Batches held" tile links here; the server applies the same rule).
+    { key: 'held', label: 'Custody', allLabel: 'Any',
+      options: [['true', 'Held by us now']] },
   ],
   emptyFor: (active) => {
+    if (active.held) {
+      return { title: 'No batch in your custody',
+        message: 'Batches your organisation holds now appear here. A batch on its way to you '
+          + 'is listed once it has arrived.' };
+    }
     if (active.awaiting_receipt) {
       return { title: 'Nothing to book in',
         message: 'Every batch handed to your organisation has been received or stored.' };
@@ -201,7 +217,10 @@ export const render = listView({
     // can carry it (`gmo_lineage` from the API; gmo_event_id for an older server).
     { label: 'GMO lineage', render: (row) => ((row.gmo_lineage ?? Boolean(row.gmo_event_id))
       ? el('span', { class: 'badge neutral', text: 'GMO' }) : 'None recorded') },
-    { label: 'Held by', render: (row) => orgName(row.custodian_org_id) },
+    // A batch handed to this organisation but still on the road is not in its custody yet.
+    { label: 'Held by', render: (row) => (row.state === 'IN_TRANSIT'
+      && row.custodian_org_id === session.read()?.org_id
+      ? el('span', { text: 'In transit to you' }) : orgName(row.custodian_org_id)) },
     { label: 'Anchor', render: (row) => badge(row.anchor_status) },
     { label: 'Integrity', render: (row) => badge(row.integrity_status) },
     { label: 'Verify code', render: (row) => el('a', { href: `/verify.html?code=${row.verification_code}`,

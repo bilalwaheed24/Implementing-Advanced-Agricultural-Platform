@@ -135,7 +135,7 @@ def test_an_admin_created_supply_org_receives_and_acts_on_a_batch(client, auth, 
     assert batch.status_code == 201, batch.text
     batch = batch.json()
     shipment = client.post("/api/v1/supply-chain/shipments", headers=farm, json={
-        "sscc": str(secrets.randbelow(10**17)).zfill(18), "batch_id": batch["id"],
+        "sscc": with_check_digit(str(secrets.randbelow(10**17)).zfill(17)), "batch_id": batch["id"],
         "carrier": "Haulage", "origin_name": "Farm gate", "origin_lat": 42.0,
         "origin_lon": -93.6, "destination_name": "Store", "destination_lat": 41.9,
         "destination_lon": -87.6, "departed_at": iso(now() - timedelta(hours=5)),
@@ -303,7 +303,7 @@ def test_0008_backfills_the_receiver_from_the_shipping_event(client, auth, orgs)
         "unit": "kg", "origin_region": "Iowa", "origin_country": "US",
         "harvested_at": iso(now() - timedelta(days=1))}).json()
     shipment = client.post("/api/v1/supply-chain/shipments", headers=farm, json={
-        "sscc": str(secrets.randbelow(10**17)).zfill(18), "batch_id": batch["id"],
+        "sscc": with_check_digit(str(secrets.randbelow(10**17)).zfill(17)), "batch_id": batch["id"],
         "carrier": "Haulage", "origin_name": "Farm gate", "origin_lat": 42.0,
         "origin_lon": -93.6, "destination_name": "Plant", "destination_lat": 41.9,
         "destination_lon": -93.4, "departed_at": iso(now() - timedelta(hours=3)),

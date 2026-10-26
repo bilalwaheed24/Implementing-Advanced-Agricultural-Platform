@@ -15,7 +15,8 @@ function buildTiles(dash) {
 
   // A processor's day: what it holds, what is on the road, what has arrived unconfirmed.
   if (sc && role === 'SUPPLY_CHAIN_OPERATOR') {
-    tiles.push(tile('Batches held', sc.held, 'In your custody now', '#/batches'));
+    // Linked to the held-only list (same rule server-side), not to every batch it can read.
+    tiles.push(tile('Batches held', sc.held, 'In your custody now', '#/batches?held=true'));
     tiles.push(tile('Shipments in transit', sc.shipments_in_transit,
       'Sent or coming to you, not yet arrived', '#/shipments?status=IN_TRANSIT'));
     if (sc.awaiting_arrival) {

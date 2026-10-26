@@ -42,15 +42,35 @@ def _applied(connection) -> set[str]:
     return {row[0] for row in rows}
 
 
-def _statements(sql: str) -> list[str]:
-    """Split on ';' and drop blank/comment-only fragments."""
+# A comment line `-- dialect: postgresql` (any SQLAlchemy dialect name) inside a statement's
+# fragment limits that statement to that database. It lets one file carry DDL only one engine
+# understands, such as ALTER TABLE ... ADD CONSTRAINT, which SQLite does not support.
+DIALECT_DIRECTIVE = "-- dialect:"
+
+
+def _parsed(sql: str) -> list[tuple[str, str | None]]:
+    """Split on ';' into (statement, dialect or None), dropping blank/comment-only fragments."""
     out = []
     for chunk in sql.split(";"):
-        lines = [ln for ln in chunk.splitlines() if not ln.strip().startswith("--")]
+        dialect = None
+        lines = []
+        for line in chunk.splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith(DIALECT_DIRECTIVE):
+                dialect = stripped[len(DIALECT_DIRECTIVE):].strip().lower() or None
+            elif not stripped.startswith("--"):
+                lines.append(line)
         statement = "\n".join(lines).strip()
         if statement:
-            out.append(statement)
+            out.append((statement, dialect))
     return out
+
+
+def _statements(sql: str, dialect: str | None = None) -> list[str]:
+    """Split on ';' and drop blank/comment-only fragments. With `dialect`, statements marked
+    for another database are left out too."""
+    return [statement for statement, only in _parsed(sql)
+            if dialect is None or only is None or only == dialect]
 
 
 def run(status_only: bool = False) -> int:
@@ -74,7 +94,7 @@ def run(status_only: bool = False) -> int:
 
         for version, path in pending:
             print(f"Applying {version} ...")
-            for statement in _statements(path.read_text()):
+            for statement in _statements(path.read_text(), connection.dialect.name):
                 # PostgreSQL aborts the whole transaction on a failed statement, so each
                 # one runs in a savepoint there. (pysqlite's SAVEPOINT handling is not
                 # reliable, and SQLite does not need it.)

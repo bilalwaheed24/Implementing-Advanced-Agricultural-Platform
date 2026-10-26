@@ -39,6 +39,12 @@ def now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _sscc(data: str) -> str:
+    """Append the GS1 mod-10 check digit to 17 digits: the API refuses any other SSCC."""
+    total = sum(int(c) * (3 if i % 2 == 0 else 1) for i, c in enumerate(reversed(data)))
+    return data + str((10 - total % 10) % 10)
+
+
 def iso(value: datetime) -> str:
     return value.isoformat()
 
@@ -373,13 +379,15 @@ def main() -> int:
     cold_device = devices["items"][0]["id"] if devices.get("items") else None
     status, shipment = api.as_user(
         "supply@absp.demo", "POST", "/api/v1/supply-chain/shipments",
-        {"sscc": f"00312345{suffix:010d}", "batch_id": batch["id"],
+        {"sscc": _sscc(f"00312345{suffix % 10**9:09d}"), "batch_id": batch["id"],
          "carrier": "Continental Cold Logistics", "origin_name": "Continental Foods Plant A",
          "origin_lat": 41.88, "origin_lon": -93.41,
          "destination_name": "Rotterdam Distribution Hub",
          "destination_lat": 51.92, "destination_lon": 4.48,
-         "departed_at": iso(now() - timedelta(days=2)),
-         "arrived_at": iso(now() - timedelta(days=1)),
+         # After the receiving event above (1 day ago): a step dated before the batch's last
+         # recorded step is refused.
+         "departed_at": iso(now() - timedelta(hours=12)),
+         "arrived_at": iso(now() - timedelta(hours=1)),
          "cold_chain_device_id": cold_device})
     if status == 201:
         ok(f"shipment {shipment['sscc']} recorded, cold-chain sensor attached")

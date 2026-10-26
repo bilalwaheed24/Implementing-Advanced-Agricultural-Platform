@@ -726,10 +726,11 @@ class ProductCreate(BaseModel):
     def _gtin(cls, value: str) -> str:
         value = value.strip()
         if not GTIN_PATTERN.match(value) or len(value) not in gs1.GTIN_LENGTHS:
-            raise ValueError("gtin must be a GTIN-8, -12, -13 or -14 (8, 12, 13 or 14 digits)")
+            raise ValueError("must be 8, 12, 13 or 14 digits (GTIN-8, -12, -13 or -14)")
         if not gs1.is_valid_gtin(value):
-            raise ValueError(f"gtin check digit is wrong: expected "
-                             f"{gs1.check_digit(value[:-1])}, got {value[-1]}")
+            # Worded to follow the field label the form puts in front of it ("GTIN: ...").
+            raise ValueError(f"check digit is wrong (expected {gs1.check_digit(value[:-1])}, "
+                             f"got {value[-1]})")
         return value
 
 
@@ -863,7 +864,9 @@ class SupplyChainEventOut(ORMModel):
 
 
 class ShipmentCreate(BaseModel):
-    sscc: str = Field(min_length=8, max_length=18)
+    # A GS1 Serial Shipping Container Code: 18 digits, the last a mod-10 check digit (see the
+    # validator below; letters used to be accepted despite the form asking for digits).
+    sscc: str
     batch_id: str
     carrier: str = Field(min_length=2, max_length=160)
     origin_name: str = Field(min_length=2, max_length=200)
@@ -878,6 +881,21 @@ class ShipmentCreate(BaseModel):
     # The organisation receiving the batch. Custody moves to it when the shipment is created,
     # and it marks the shipment arrived. Omitted for a move inside the organisation.
     to_org_id: str | None = None
+
+    @field_validator("sscc")
+    @classmethod
+    def _sscc(cls, value: str) -> str:
+        # Spaces as printed under a label's barcode, and the "(00)" application identifier,
+        # are tolerated and stripped.
+        digits = value.replace(" ", "").strip()
+        if digits.startswith("(00)"):
+            digits = digits[4:]
+        if not digits.isdigit() or len(digits) != 18:
+            raise ValueError("must be 18 digits")
+        if gs1.check_digit(digits[:-1]) != int(digits[-1]):
+            raise ValueError(f"check digit is wrong (expected {gs1.check_digit(digits[:-1])}, "
+                             f"got {digits[-1]})")
+        return digits
 
 
 class ShipmentArrive(BaseModel):

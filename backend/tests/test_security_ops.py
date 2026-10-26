@@ -280,8 +280,13 @@ class TestShipmentCannotReferenceAForeignBatch:
         return batch
 
     def _payload(self, batch_id):
+        import secrets
         from datetime import datetime, timezone
-        return {"sscc": unique("SSCC")[:18], "batch_id": batch_id, "carrier": "Test Carrier",
+
+        from app.gs1 import with_check_digit
+        # A valid SSCC (18 digits, GS1 check digit): an invalid one is refused 422 first.
+        sscc = with_check_digit(str(secrets.randbelow(10**17)).zfill(17))
+        return {"sscc": sscc, "batch_id": batch_id, "carrier": "Test Carrier",
                 "origin_name": "Origin Depot", "origin_lat": 42.0, "origin_lon": -93.6,
                 "destination_name": "Destination Depot", "destination_lat": 41.0,
                 "destination_lon": -92.0,
