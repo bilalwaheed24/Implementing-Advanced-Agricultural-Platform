@@ -261,8 +261,9 @@ def record_approval(db: Session, event: GMOEvent, actor_id: str, actor_role: str
         # A withdrawal or restoration keeps the title the holders' notices carry, so the
         # developer's inbox reads the same as everyone else's, and adds the decision.
         f"{follow_up['title']} (decision {status})" if follow_up is not None
-        else f"GMO event {event.event_code}: {jurisdiction} decision {status}",
-        f"The regulator recorded {status} for {jurisdiction}"
+        else f"GMO event {event.event_code}: {notifications.jurisdiction_label(jurisdiction)} "
+             f"decision {status}",
+        f"The regulator recorded {status} for {notifications.jurisdiction_label(jurisdiction)}"
         + (f" (previously {previous_status})" if previous_status else "")
         + f"{expiry}. Reference: {reference or 'none'}.{affected}"
         + (f" {follow_up['summary']}" if follow_up is not None else ""),
@@ -309,7 +310,8 @@ def resolve_lapse_alerts(db: Session, event: GMOEvent, approval: GMOApproval,
                       actor_id: str | None) -> int:
     """Resolve the alerts a lapse of this approval raised, now that it is live again.
     Returns how many were resolved."""
-    note = f"The {approval.jurisdiction} approval for {event.event_code} is in force again"
+    note = (f"The {notifications.jurisdiction_label(approval.jurisdiction)} approval for "
+            f"{event.event_code} is in force again")
     resolved = notifications.resolve_entity_alerts(db, "GMOApproval", approval.id, actor_id,
                                                    note)
     _, batches = affected_holdings(db, event)
@@ -413,8 +415,9 @@ def approval_restored(db: Session, event: GMOEvent, approval: GMOApproval, *,
     parties = _holdings_by_party(db, event, lots, batches, crops)
     expiry = (f" until {_aware(approval.expires_at).date().isoformat()}"
               if approval.expires_at else "")
-    title = f"GMO approval restored: {event.event_code} in {approval.jurisdiction}"
-    summary = (f"{event.event_code} is approved again in {approval.jurisdiction}{expiry}. "
+    place = notifications.jurisdiction_label(approval.jurisdiction)
+    title = f"GMO approval restored: {event.event_code} in {place}"
+    summary = (f"{event.event_code} is approved again in {place}{expiry}. "
                f"Re-run the compliance check before releasing affected stock there.")
     _notify_holders(
         db, event, parties, title, summary,
@@ -440,11 +443,13 @@ def approval_lost(db: Session, event: GMOEvent, approval: GMOApproval, how: str,
     """
     lots, batches = affected_holdings(db, event)
     crops = affected_crops(db, event, lots)
-    still_live = sorted(a.jurisdiction for a in db.execute(select(GMOApproval).where(
-        GMOApproval.gmo_event_id == event.id)).scalars() if is_live(a))
+    still_live = sorted(notifications.jurisdiction_label(a.jurisdiction)
+                        for a in db.execute(select(GMOApproval).where(
+                            GMOApproval.gmo_event_id == event.id)).scalars() if is_live(a))
     remaining = (f"Still approved in: {', '.join(still_live)}." if still_live
                  else "It is no longer approved in any jurisdiction.")
-    title = f"GMO approval {how}: {event.event_code} in {approval.jurisdiction}"
+    place = notifications.jurisdiction_label(approval.jurisdiction)
+    title = f"GMO approval {how}: {event.event_code} in {place}"
 
     # One record of the lapse itself, owned by the developer, so a regulator scanning alerts
     # sees it and the expiry sweep can tell it has already been handled.
@@ -462,9 +467,9 @@ def approval_lost(db: Session, event: GMOEvent, approval: GMOApproval, how: str,
         notifications.raise_alert(
             db, "COMPLIANCE", "HIGH",
             f"Batch {batch.batch_code}: GMO approval {how} for {event.event_code} "
-            f"in {approval.jurisdiction}",
+            f"in {place}",
             detail=f"The batch's lineage carries {event.event_code}. Re-evaluate its compliance "
-                   f"before releasing it into {approval.jurisdiction}. {remaining}",
+                   f"before releasing it into {place}. {remaining}",
             org_id=batch.org_id, entity_type="Batch", entity_id=batch.id,
             notify=False, open_incident=False, kind=approval_lost_kind(approval),
             party_org_id=batch.custodian_org_id)
@@ -620,11 +625,12 @@ def validate_labelling(db: Session, batch: Batch, jurisdiction: str,
             findings.append({
                 "rule": "approval_required", "passed": False, "citation": rule["citation"],
                 "detail": f"GMO event {lineage_event.event_code} is not approved in "
-                          f"{jurisdiction} (status: {state})"})
+                          f"{notifications.jurisdiction_label(jurisdiction)} (status: {state})"})
         else:
             findings.append({"rule": "approval_required", "passed": True,
                              "citation": rule["citation"],
-                             "detail": f"GMO event {lineage_event.event_code} is approved in {jurisdiction}"})
+                             "detail": f"GMO event {lineage_event.event_code} is approved in "
+                                       f"{notifications.jurisdiction_label(jurisdiction)}"})
 
     findings.append({
         "rule": "disclosure_threshold", "passed": True, "citation": rule["citation"],
@@ -681,8 +687,9 @@ def check_release(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
         # The holder trying to release it and the owner both need to know.
         notifications.alert_parties(
             db, "COMPLIANCE", "HIGH",
-            f"Labelling non-compliance on batch {batch.batch_code} in {jurisdiction.upper()}",
-            detail=f"Release into {jurisdiction} blocked: "
+            f"Labelling non-compliance on batch {batch.batch_code} in "
+            f"{notifications.jurisdiction_label(jurisdiction)}",
+            detail=f"Release into {notifications.jurisdiction_label(jurisdiction)} blocked: "
                    + "; ".join(f["detail"] for f in result["findings"] if not f["passed"]),
             org_id=batch.org_id, party_org_ids=[batch.custodian_org_id],
             entity_type="Batch", entity_id=batch.id, kind=kind,
@@ -690,7 +697,8 @@ def check_release(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
     else:
         notifications.resolve_alerts(
             db, "COMPLIANCE", batch.id, kind=kind, actor_id=actor_id,
-            note=f"A later release check permits release into {jurisdiction.upper()}")
+            note=f"A later release check permits release into "
+                 f"{notifications.jurisdiction_label(jurisdiction)}")
     return result
 
 

@@ -206,16 +206,18 @@ class TestOversightAlerts:
         db.commit()
         return alert
 
-    def test_the_suspect_can_see_but_not_clear_it(self, client, auth, db, theft_alert):
+    def test_the_suspect_can_neither_see_nor_clear_it(self, client, auth, db, theft_alert):
+        # Round 5: the suspect no longer even sees the alert (it was readable in round 4), so
+        # acknowledging or resolving it is a 404 rather than a 403.
         supply = auth("SUPPLY_CHAIN_OPERATOR")
         listed = client.get(f"{API}/security/alerts", params={"entity_id": theft_alert.entity_id,
                                                               "category": "DATA_THEFT"},
                             headers=supply)
-        assert theft_alert.id in {a["id"] for a in listed.json()["items"]}
+        assert theft_alert.id not in {a["id"] for a in listed.json()["items"]}
         for action in ("acknowledge", "resolve"):
             response = client.post(f"{API}/security/alerts/{theft_alert.id}/{action}",
                                    headers=supply)
-            assert response.status_code == 403, response.text
+            assert response.status_code == 404, response.text
         db.expire_all()
         assert db.get(Alert, theft_alert.id).status == "OPEN"
         assert db.get(Incident, theft_alert.incident_id).status == "OPEN"
@@ -227,7 +229,8 @@ class TestOversightAlerts:
         db.commit()
         response = client.post(f"{API}/security/alerts/{alert.id}/resolve",
                                headers=auth("FARM_OPERATOR"))
-        assert response.status_code == 403, response.text
+        # Hidden from the tenant since round 5 (404); refused outright in round 4 (403).
+        assert response.status_code == 404, response.text
 
     @pytest.mark.parametrize("role", ["SECURITY_ANALYST", "ADMIN"])
     def test_security_operations_resolve_it_and_the_incident_follows(self, client, auth, db,
