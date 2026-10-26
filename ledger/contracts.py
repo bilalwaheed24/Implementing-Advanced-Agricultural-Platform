@@ -16,7 +16,8 @@ class ContractError(Exception):
 
 
 # Endorsement policies: which MSPs must endorse a function.
-# "AND" = every listed MSP must sign; "OR" = at least one must sign.
+# "AND" = every listed MSP must sign; "OR" = at least one must sign. Under "OR", a submitter
+# of the same organisation type as a listed MSP endorses its own transaction (chain.py).
 ENDORSEMENT_POLICIES: dict[str, dict[str, Any]] = {
     "gmo_registry.RegisterEvent":     {"rule": "AND", "orgs": ["BiotechMSP", "RegulatorMSP"]},
     "gmo_registry.RecordApproval":    {"rule": "AND", "orgs": ["RegulatorMSP"]},
@@ -29,20 +30,27 @@ ENDORSEMENT_POLICIES: dict[str, dict[str, Any]] = {
     "compliance_anchor.AnchorReport": {"rule": "OR",  "orgs": ["RegulatorMSP", "SupplyMSP"]},
     "compliance_anchor.AnchorAuditHead": {"rule": "OR",
                                           "orgs": ["RegulatorMSP", "SupplyMSP", "FarmMSP", "BiotechMSP"]},
+    "imagery.AnchorScene":            {"rule": "OR",  "orgs": ["FarmMSP"]},
 }
 
-# Which MSPs may *submit* each function (authorisation, distinct from endorsement).
+# Which organisation TYPES may *submit* each function (authorisation, distinct from
+# endorsement). Keyed by type rather than by MSP name because every organisation has its own
+# MSP identity: the four seeded ones (BiotechMSP, FarmMSP, SupplyMSP, RegulatorMSP) and any
+# created later through the admin API (a retailer "RetailMSP" of type SUPPLY, say). The type
+# is registered with the identity (identity.MSPRegistry.ensure); chain.DEFAULT_ORGS types the
+# four seeded identities.
 SUBMIT_RIGHTS: dict[str, set[str]] = {
-    "gmo_registry.RegisterEvent": {"BiotechMSP"},
-    "gmo_registry.RecordApproval": {"RegulatorMSP"},
-    "gmo_registry.RegisterSeedLot": {"BiotechMSP"},
-    "provenance.CreateBatch": {"FarmMSP", "SupplyMSP", "BiotechMSP"},
-    "provenance.RecordEvent": {"FarmMSP", "SupplyMSP"},
-    "provenance.TransferCustody": {"FarmMSP", "SupplyMSP"},
-    "certification.Issue": {"RegulatorMSP"},
-    "certification.Revoke": {"RegulatorMSP"},
-    "compliance_anchor.AnchorReport": {"RegulatorMSP", "SupplyMSP"},
-    "compliance_anchor.AnchorAuditHead": {"RegulatorMSP", "SupplyMSP", "FarmMSP", "BiotechMSP"},
+    "gmo_registry.RegisterEvent": {"BIOTECH"},
+    "gmo_registry.RecordApproval": {"REGULATOR"},
+    "gmo_registry.RegisterSeedLot": {"BIOTECH"},
+    "provenance.CreateBatch": {"FARM", "SUPPLY", "BIOTECH"},
+    "provenance.RecordEvent": {"FARM", "SUPPLY"},
+    "provenance.TransferCustody": {"FARM", "SUPPLY"},
+    "certification.Issue": {"REGULATOR"},
+    "certification.Revoke": {"REGULATOR"},
+    "compliance_anchor.AnchorReport": {"REGULATOR", "SUPPLY"},
+    "compliance_anchor.AnchorAuditHead": {"REGULATOR", "SUPPLY", "FARM", "BIOTECH"},
+    "imagery.AnchorScene": {"FARM"},
 }
 
 # Legal batch state transitions enforced on-chain.
@@ -247,6 +255,22 @@ def anchor_audit_head(state: dict[str, Any], args: dict[str, Any], msp: str):
     return [key], {key: record}
 
 
+# --------------------------------------------------------------------------- #
+# imagery
+# --------------------------------------------------------------------------- #
+def anchor_scene(state: dict[str, Any], args: dict[str, Any], msp: str):
+    """Anchor the SHA-256 of a drone or satellite image file, so the imagery behind a field
+    decision can later be re-hashed and proven unaltered."""
+    key = f"scene:{args['scene_id']}"
+    _require(key not in state, f"Scene {args['scene_id']} already anchored")
+    _require(len(args.get("file_sha256", "")) == 64, "file_sha256 must be a SHA-256 hex digest")
+    record = {"type": "imagery_scene", "scene_id": args["scene_id"],
+              "field": args.get("field", ""), "source": args.get("source", ""),
+              "index_name": args.get("index_name", ""), "file_sha256": args["file_sha256"],
+              "content_hash": args.get("content_hash", ""), "anchored_by": msp}
+    return [key], {key: record}
+
+
 CONTRACTS: dict[str, dict[str, Callable]] = {
     "gmo_registry": {
         "RegisterEvent": register_event,
@@ -265,6 +289,9 @@ CONTRACTS: dict[str, dict[str, Callable]] = {
     "compliance_anchor": {
         "AnchorReport": anchor_report,
         "AnchorAuditHead": anchor_audit_head,
+    },
+    "imagery": {
+        "AnchorScene": anchor_scene,
     },
 }
 

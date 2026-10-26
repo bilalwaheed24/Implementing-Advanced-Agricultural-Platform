@@ -11,6 +11,7 @@ from ..models import Batch, ComplianceReport, GMOEvent
 from ..repositories import get_or_404, paginate, visible
 from ..schemas import ComplianceReportOut, ComplianceRequest, EIARequest, Page
 from ..services import compliance as service
+from ..services import supplychain as supply_service
 
 router = APIRouter(prefix="/compliance", tags=["Compliance"], dependencies=[Depends(rate_limit)])
 
@@ -54,17 +55,33 @@ def list_reports(db: DbSession, paging: PagingDep,
     if report_type:
         query = query.where(ComplianceReport.report_type == report_type.upper())
     rows, total = paginate(db, query, paging.page, paging.page_size)
-    return Page[ComplianceReportOut](items=[ComplianceReportOut.model_validate(r) for r in rows],
+    return Page[ComplianceReportOut](items=_reports_out(db, rows, principal),
                                      total=total, page=paging.page, page_size=paging.page_size)
+
+
+def _reports_out(db, rows: list[ComplianceReport], principal) -> list[ComplianceReportOut]:
+    """Reports with `subject_readable`: whether the caller may open the batch it is about."""
+    batch_ids = {r.subject_id for r in rows if r.subject_type == "BATCH"}
+    readable = set()
+    if batch_ids:
+        readable = set(db.execute(
+            supply_service.readable_batches(principal.role, principal.org_id)
+            .where(Batch.id.in_(batch_ids)).with_only_columns(Batch.id)).scalars())
+    out = []
+    for row in rows:
+        item = ComplianceReportOut.model_validate(row)
+        if row.subject_type == "BATCH":
+            item.subject_readable = row.subject_id in readable
+        out.append(item)
+    return out
 
 
 @router.get("/reports/{report_id}", response_model=ComplianceReportOut, summary="Get a report")
 def get_report(report_id: str, db: DbSession,
                principal: Annotated[object, Depends(require_permission(P.COMPLIANCE_READ))]
                ) -> ComplianceReportOut:
-    return ComplianceReportOut.model_validate(
-        get_or_404(db, ComplianceReport, report_id, principal.role, principal.org_id,
-                   name="Report"))
+    return _reports_out(db, [get_or_404(db, ComplianceReport, report_id, principal.role,
+                                        principal.org_id, name="Report")], principal)[0]
 
 
 @router.get("/dashboard", summary="Compliance dashboard")

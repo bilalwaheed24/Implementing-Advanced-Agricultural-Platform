@@ -242,3 +242,31 @@ class TestTenancyIsolation:
         with pytest.raises(PermissionDenied):
             unscoped(Farm, "FARM_OPERATOR")
         unscoped(Farm, "REGULATOR")       # permitted
+
+
+class TestCrossTenantProbeDetection:
+    """A probe of another tenant's record returns 404 (no existence leak) but must still be
+    counted by the data-theft detector as a cross-tenant attempt."""
+
+    def test_a_foreign_record_probe_is_recorded_as_cross_tenant(self, client, rival_auth, farm,
+                                                                db):
+        from app.models import AccessRecord
+
+        response = client.get(f"/api/v1/farms/{farm.id}", headers=rival_auth)
+        assert response.status_code == 404
+        db.expire_all()
+        record = (db.query(AccessRecord)
+                  .filter(AccessRecord.route == f"/api/v1/farms/{farm.id}")
+                  .order_by(AccessRecord.created_at.desc()).first())
+        assert record is not None and record.cross_tenant_attempt
+
+    def test_an_id_that_exists_nowhere_is_not_a_cross_tenant_probe(self, client, rival_auth, db):
+        from app.models import AccessRecord
+
+        missing = "00000000-0000-4000-8000-000000000000"
+        assert client.get(f"/api/v1/farms/{missing}", headers=rival_auth).status_code == 404
+        db.expire_all()
+        record = (db.query(AccessRecord)
+                  .filter(AccessRecord.route == f"/api/v1/farms/{missing}")
+                  .order_by(AccessRecord.created_at.desc()).first())
+        assert record is not None and not record.cross_tenant_attempt

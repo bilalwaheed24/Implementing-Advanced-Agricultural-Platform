@@ -9,6 +9,14 @@ import pytest
 from conftest import BASE, go, login, open_form, unique
 
 
+def valid_sscc() -> str:
+    """A random SSCC the API accepts: 18 digits ending in its GS1 mod-10 check digit."""
+    import secrets
+    data = "0" + "".join(secrets.choice("0123456789") for _ in range(16))
+    total = sum(int(c) * (3 if i % 2 == 0 else 1) for i, c in enumerate(reversed(data)))
+    return data + str((10 - total % 10) % 10)
+
+
 # --------------------------------------------------------------------------- #
 # Farm operator: farm, field, devices, lifecycle
 # --------------------------------------------------------------------------- #
@@ -74,6 +82,11 @@ class TestSupplyChain:
         open_form(page, "Create a batch")
         page.fill("form input[placeholder*='MAIZE-2026-014']", code)
         page.locator("form select").first.select_option(index=1)
+        # Provenance is declared by the operator, never prefilled.
+        page.fill("form input[placeholder='e.g. 12000']", "1000")
+        page.fill("form input[placeholder='e.g. Iowa']", "Iowa")
+        page.fill("form input[placeholder='ISO code, e.g. US']", "US")
+        page.fill("form input[type=date]", "2026-10-01")
         page.get_by_role("button", name="Create batch").click()
         page.wait_for_timeout(3000)
         go(page, "#/batches")
@@ -98,7 +111,7 @@ class TestSupplyChain:
     def test_creates_a_shipment_against_its_own_batch(self, page):
         login(page, "SUPPLY_CHAIN_OPERATOR")
         go(page, "#/shipments")
-        sscc = "009" + unique("")[-8:].replace("-", "0")
+        sscc = valid_sscc()
         open_form(page, "Create a shipment")
         page.fill("form input[placeholder*='SSCC']", sscc)
         page.locator("form select").first.select_option(index=1)
@@ -111,7 +124,9 @@ class TestSupplyChain:
 
     def test_records_a_custody_event_and_the_batch_state_moves(self, page):
         login(page, "SUPPLY_CHAIN_OPERATOR")
-        go(page, "#/batches")
+        # A batch the processor holds now: one still in transit to it offers only "Arrived",
+        # so the first row of the unfiltered list may have no custody-event form.
+        go(page, "#/batches?held=true")
         page.locator("table tbody tr td a").first.click()
         page.wait_for_timeout(2000)
         before = page.evaluate("() => document.body.innerText")

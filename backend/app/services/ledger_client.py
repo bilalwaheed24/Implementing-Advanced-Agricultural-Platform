@@ -1,7 +1,14 @@
 """Backend-facing ledger client with retry, circuit breaking and graceful degradation.
 
 An anchoring failure must never lose a business write (NFR-5, Blockchain-integration.md §13):
-the record is stored with anchor_status = PENDING/FAILED and swept later.
+the record is stored with anchor_status = PENDING/FAILED, and when the caller passes its
+session the call is journalled (services/anchoring.py) so the sweep in
+scripts/scheduled_tasks.py, or POST /blockchain/anchors/retry, replays it later in order.
+
+Ledger writes happen inside the request, before its database commit. A request that fails
+after a successful submit rolls back its rows but not the ledger transaction, which can leave
+an orphan anchor with no database record. That is accepted rather than adding a two-phase
+protocol; replay is idempotent, so an anchor that did land is never written twice.
 
 With LEDGER_SERVICE_URL set, every call goes over HTTP to the `ledger` container (ADR-016);
 without it the ledger package runs in-process (tests, run_local.sh). Callers use the
@@ -105,7 +112,29 @@ _breaker = CircuitBreaker()
 
 
 def submit(contract: str, function: str, args: dict[str, Any], submitter_msp: str,
-           retries: int = 2) -> dict[str, Any]:
+           retries: int = 2, *, db: Any = None, entity: Any = None) -> dict[str, Any]:
+    """Submit a transaction, then mirror a successful anchor to Hyperledger Fabric when the
+    bridge is configured (background thread: Fabric can never block or fail the write).
+
+    With `db` (the request's session) the write is journalled for replay and mirrored once
+    that session commits; `entity` is the stored record whose anchor fields the write fills
+    in, so a later replay can complete them. Without `db` nothing is persisted."""
+    if db is not None:
+        from . import anchoring                                       # noqa: PLC0415
+
+        return anchoring.submit(db, contract, function, args, submitter_msp, entity=entity,
+                                retries=retries)
+    receipt = _submit(contract, function, args, submitter_msp, retries)
+    if receipt.get("ok"):
+        from . import fabric_bridge                                   # noqa: PLC0415
+
+        fabric_bridge.mirror(contract, function, args, str(receipt.get("tx_id", "")),
+                             submitter_msp)
+    return receipt
+
+
+def _submit(contract: str, function: str, args: dict[str, Any], submitter_msp: str,
+            retries: int = 2) -> dict[str, Any]:
     """Submit a transaction. Returns {ok, ...} and never raises to the caller.
 
     A contract rejection is a business error and is reported as ok=False with the
@@ -126,7 +155,8 @@ def submit(contract: str, function: str, args: dict[str, Any], submitter_msp: st
         try:
             receipt = get_ledger().submit(contract, function, args, submitter_msp)
             _breaker.record_success()
-            return {"ok": True, "status": "ANCHORED", **receipt}
+            return {"ok": True, "status": "ANCHORED", "contract": contract,
+                    "function": function, **receipt}
         except ContractError as exc:
             # Deterministic rejection: do not retry.
             log_event(app_log, logging.WARNING, "ledger contract rejection",
@@ -162,7 +192,8 @@ def _submit_remote(contract: str, function: str, args: dict[str, Any], submitter
             status, response = 503, {"detail": str(exc)}
         if status == 200:
             _breaker.record_success()
-            return {"ok": True, "status": "ANCHORED", **response}
+            return {"ok": True, "status": "ANCHORED", "contract": contract,
+                    "function": function, **response}
         detail = response.get("detail", "") if isinstance(response, dict) else str(response)
         if status == 409:
             log_event(app_log, logging.WARNING, "ledger contract rejection",
@@ -248,12 +279,33 @@ def contracts() -> dict[str, Any]:
     }
 
 
-def ensure_identity(msp_id: str, name: str) -> None:
-    """Give an organisation a ledger signing identity (idempotent)."""
+def ensure_identity(msp_id: str, name: str, org_type: str | None = None) -> None:
+    """Give an organisation a ledger signing identity (idempotent). The organisation type
+    (BIOTECH | FARM | SUPPLY | REGULATOR) is registered with it: the ledger grants submit
+    rights per type, so without it the identity can sign but submit nothing."""
     if _remote():
-        _post("/v1/identities", {"msp_id": msp_id, "name": name})
+        _post("/v1/identities", {"msp_id": msp_id, "name": name, "org_type": org_type})
     else:
-        get_ledger().msp.ensure(msp_id, name)
+        get_ledger().msp.ensure(msp_id, name, org_type)
+
+
+def sync_identities(db: Any) -> int:
+    """Register every organisation's identity and type with the ledger. Run at api start
+    (scripts/start_api.py) so organisations created before types were registered, or while
+    the ledger was down, can submit. Returns how many were synced; never raises."""
+    from sqlalchemy import select                                    # noqa: PLC0415
+
+    from ..models import Organization                                # noqa: PLC0415
+
+    synced = 0
+    for org in db.execute(select(Organization)).scalars():
+        try:
+            ensure_identity(org.msp_id, org.name, org.org_type)
+            synced += 1
+        except Exception as exc:                                     # noqa: BLE001
+            log_event(app_log, logging.WARNING, "ledger identity sync failed",
+                      msp_id=org.msp_id, error=str(exc))
+    return synced
 
 
 def reset_store() -> None:

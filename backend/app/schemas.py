@@ -9,7 +9,9 @@ import re
 from datetime import datetime
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from . import gs1
 
 EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 GTIN_PATTERN = re.compile(r"^\d{8,14}$")
@@ -20,6 +22,22 @@ T = TypeVar("T")
 
 class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+
+
+def _org_display_name(data: Any, org_id: str | None) -> str | None:
+    """The display name of organisation `org_id`, looked up in the session `data` (an ORM row)
+    was loaded from; None when there is no session or no such organisation. Used to name a
+    record's holder: whoever may read the record may know who holds it, while the
+    organisation directory is closed to most roles (round 6: "Held by —")."""
+    if not org_id or not hasattr(data, "_sa_instance_state"):
+        return None
+    from sqlalchemy.orm import object_session
+
+    from .models import Organization
+
+    session = object_session(data)
+    organization = session.get(Organization, org_id) if session is not None else None
+    return organization.name if organization is not None else None
 
 
 class Page(BaseModel, Generic[T]):
@@ -81,6 +99,29 @@ class UserOut(ORMModel):
     org_id: str
     last_login_at: datetime | None = None
     created_at: datetime
+
+
+class AdminUserCreate(BaseModel):
+    """An administrator onboarding a member of an organisation, e.g. a new farm's operator."""
+    email: str = Field(min_length=5, max_length=255)
+    full_name: str = Field(min_length=2, max_length=200)
+    password: str = Field(min_length=12, max_length=128)    # temporary; the user changes it
+    org_id: str = Field(min_length=1, max_length=36)
+    role: str = Field(min_length=3, max_length=40)
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not EMAIL_PATTERN.match(value):
+            raise ValueError("Invalid email address")
+        return value
+
+
+class OrganizationDirectoryEntry(BaseModel):
+    id: str
+    name: str
+    org_type: str
 
 
 class UserUpdate(BaseModel):
@@ -172,6 +213,10 @@ class CropCreate(BaseModel):
     expected_harvest: datetime | None = None
 
 
+class CropStatusUpdate(BaseModel):
+    status: str = Field(pattern=r"^(PLANTED|GROWING|HARVESTED|FAILED)$")
+
+
 class CropOut(ORMModel):
     id: str
     field_id: str
@@ -189,7 +234,7 @@ class CropOut(ORMModel):
 # Devices and telemetry
 # --------------------------------------------------------------------------- #
 DEVICE_TYPES = {"DRONE", "SOIL_SENSOR", "WEATHER_STATION", "YIELD_MONITOR",
-                "IRRIGATION_CONTROLLER", "COLD_CHAIN_SENSOR"}
+                "IRRIGATION_CONTROLLER", "COLD_CHAIN_SENSOR", "LAB_INSTRUMENT"}
 
 
 class DeviceCreate(BaseModel):
@@ -217,9 +262,11 @@ class DeviceOut(ORMModel):
     device_type: str
     model: str
     firmware_version: str
+    serial_number: str | None = None
     status: str
     interval_seconds: int
     last_seen_at: datetime | None = None
+    offline_since: datetime | None = None
     battery_pct: float | None = None
     signal_dbm: float | None = None
     auth_failures: int
@@ -316,6 +363,25 @@ class SatelliteSceneCreate(BaseModel):
     ndvi_max: float = Field(ge=-1, le=1)
     cloud_cover_pct: float = Field(ge=0, le=100)
     checksum: str = Field(min_length=64, max_length=64)
+    source: str = Field(default="SATELLITE", pattern=r"^(SATELLITE|DRONE)$")
+    index_name: str = Field(default="NDVI", pattern=r"^(NDVI|VARI)$")
+    file_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    footprint_geojson: dict[str, Any] | None = None
+
+    @field_validator("footprint_geojson")
+    @classmethod
+    def _footprint(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return value
+        if value.get("type") != "Polygon" or not isinstance(value.get("coordinates"), list):
+            raise ValueError("footprint_geojson must be a GeoJSON Polygon")
+        ring = value["coordinates"][0] if value["coordinates"] else []
+        if len(ring) < 4 or len(ring) > 2000:
+            raise ValueError("footprint ring must have between 4 and 2000 positions")
+        for lon, lat, *_ in ring:
+            if not (-180 <= float(lon) <= 180 and -90 <= float(lat) <= 90):
+                raise ValueError("footprint coordinates must be WGS84 longitude/latitude")
+        return value
 
 
 class SatelliteSceneOut(ORMModel):
@@ -329,6 +395,10 @@ class SatelliteSceneOut(ORMModel):
     ndvi_max: float
     cloud_cover_pct: float
     is_simulated: bool
+    source: str | None = "SATELLITE"
+    index_name: str | None = "NDVI"
+    file_sha256: str | None = None
+    anchor_tx_id: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -367,7 +437,13 @@ class AlertOut(ORMModel):
     reasons: list[Any]
     status: str
     incident_id: str | None = None
+    kind: str | None = None
+    occurrences: int = 1
+    last_seen_at: datetime | None = None
     created_at: datetime
+    # The record the alert is about, named for people ("Field North 40"); set by the list
+    # route, None where the record has no readable name.
+    source_label: str | None = None
 
 
 class IncidentOut(ORMModel):
@@ -377,6 +453,11 @@ class IncidentOut(ORMModel):
     status: str
     summary: str
     root_cause: str | None = None
+    category: str | None = None
+    entity_type: str | None = None
+    entity_id: str | None = None
+    source_alert_id: str | None = None
+    assignee_id: str | None = None
     created_at: datetime
 
 
@@ -384,6 +465,8 @@ class IncidentUpdate(BaseModel):
     status: str | None = None
     root_cause: str | None = Field(default=None, max_length=2000)
     note: str | None = Field(default=None, max_length=2000)
+    # A user id to assign, or "" to unassign. Omitted leaves the assignee unchanged.
+    assignee_id: str | None = Field(default=None, max_length=36)
 
 
 class NotificationOut(ORMModel):
@@ -551,6 +634,9 @@ class GMOEventOut(ORMModel):
     block_number: int | None = None
     anchor_status: str
     created_at: datetime
+    # Current jurisdictional decisions (jurisdiction, status, expires_at, live), filled in by
+    # the list endpoint so the registry shows where each event may actually be used.
+    approvals: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class GMOApprovalCreate(BaseModel):
@@ -578,6 +664,7 @@ class GMOApprovalOut(ORMModel):
     approved_at: datetime | None = None
     expires_at: datetime | None = None
     tx_id: str | None = None
+    live: bool | None = None       # APPROVED, in force and unexpired (gmo.is_live)
 
 
 class SeedLotCreate(BaseModel):
@@ -601,7 +688,25 @@ class SeedLotOut(ORMModel):
     germination_pct: float | None = None
     tx_id: str | None = None
     anchor_status: str
+    org_id: str
+    custodian_org_id: str | None = None
+    gmo_event_code: str | None = None      # filled by the router: the farm cannot read the event
     created_at: datetime
+    # Who holds the lot now (custodian, else the producer), by name, computed server-side.
+    holder_name: str | None = None
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _with_holder_name(cls, data: Any, handler: Any) -> "SeedLotOut":
+        model = handler(data)
+        if model.holder_name is None:
+            model.holder_name = _org_display_name(
+                data, getattr(data, "custodian_org_id", None) or getattr(data, "org_id", None))
+        return model
+
+
+class TransferRequest(BaseModel):
+    to_org_id: str = Field(min_length=1, max_length=36)
 
 
 # --------------------------------------------------------------------------- #
@@ -620,8 +725,12 @@ class ProductCreate(BaseModel):
     @classmethod
     def _gtin(cls, value: str) -> str:
         value = value.strip()
-        if not GTIN_PATTERN.match(value):
-            raise ValueError("gtin must be 8 to 14 digits")
+        if not GTIN_PATTERN.match(value) or len(value) not in gs1.GTIN_LENGTHS:
+            raise ValueError("must be 8, 12, 13 or 14 digits (GTIN-8, -12, -13 or -14)")
+        if not gs1.is_valid_gtin(value):
+            # Worded to follow the field label the form puts in front of it ("GTIN: ...").
+            raise ValueError(f"check digit is wrong (expected {gs1.check_digit(value[:-1])}, "
+                             f"got {value[-1]})")
         return value
 
 
@@ -659,6 +768,7 @@ class BatchOut(ORMModel):
     product_id: str
     parent_batch_id: str | None = None
     seed_lot_id: str | None = None
+    crop_id: str | None = None
     farm_id: str | None = None
     gmo_event_id: str | None = None
     state: str
@@ -672,6 +782,37 @@ class BatchOut(ORMModel):
     anchor_status: str
     integrity_status: str
     created_at: datetime
+    # The product's name, for lists. A batch received from another organisation names a
+    # product the receiver cannot list (products are scoped to their owner), so the name
+    # travels with the batch the caller is already allowed to see.
+    product_name: str | None = None
+    # GMO lineage through the batch, its seed lot or any ancestor (set by the list endpoint;
+    # None where it was not computed, and readers then fall back to gmo_event_id).
+    gmo_lineage: bool | None = None
+    # Why the caller can see the batch, so a page offers only the actions it can perform:
+    # "party" (owner or holder), "oversight" (a cross-tenant role) or "certificate" (read-only:
+    # it carries a certificate the caller's organisation issued). Set on the single-batch reads.
+    viewer_access: str | None = None
+    # The current holder's name, computed server-side (round 6): the organisation directory is
+    # closed to agronomists and biosafety officers, whose lists showed "Held by —".
+    custodian_name: str | None = None
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _with_product_name(cls, data: Any, handler: Any) -> "BatchOut":
+        model = handler(data)
+        if model.custodian_name is None:
+            model.custodian_name = _org_display_name(data, getattr(data, "custodian_org_id", None))
+        if model.product_name is None and hasattr(data, "_sa_instance_state"):
+            from sqlalchemy.orm import object_session
+
+            from .models import Product
+
+            session = object_session(data)
+            product = session.get(Product, model.product_id) if session is not None else None
+            if product is not None:
+                model.product_name = product.name
+        return model
 
 
 BIZ_STEPS = {"commissioning", "harvesting", "transforming", "packing", "shipping",
@@ -723,7 +864,9 @@ class SupplyChainEventOut(ORMModel):
 
 
 class ShipmentCreate(BaseModel):
-    sscc: str = Field(min_length=8, max_length=18)
+    # A GS1 Serial Shipping Container Code: 18 digits, the last a mod-10 check digit (see the
+    # validator below; letters used to be accepted despite the form asking for digits).
+    sscc: str
     batch_id: str
     carrier: str = Field(min_length=2, max_length=160)
     origin_name: str = Field(min_length=2, max_length=200)
@@ -735,12 +878,37 @@ class ShipmentCreate(BaseModel):
     departed_at: datetime
     arrived_at: datetime | None = None
     cold_chain_device_id: str | None = None
+    # The organisation receiving the batch. Custody moves to it when the shipment is created,
+    # and it marks the shipment arrived. Omitted for a move inside the organisation.
+    to_org_id: str | None = None
+
+    @field_validator("sscc")
+    @classmethod
+    def _sscc(cls, value: str) -> str:
+        # Spaces as printed under a label's barcode, and the "(00)" application identifier,
+        # are tolerated and stripped.
+        digits = value.replace(" ", "").strip()
+        if digits.startswith("(00)"):
+            digits = digits[4:]
+        if not digits.isdigit() or len(digits) != 18:
+            raise ValueError("must be 18 digits")
+        if gs1.check_digit(digits[:-1]) != int(digits[-1]):
+            raise ValueError(f"check digit is wrong (expected {gs1.check_digit(digits[:-1])}, "
+                             f"got {digits[-1]})")
+        return digits
+
+
+class ShipmentArrive(BaseModel):
+    arrived_at: datetime
+    location_name: str | None = Field(default=None, max_length=200)
 
 
 class ShipmentOut(ORMModel):
     id: str
     sscc: str
     batch_id: str
+    org_id: str
+    to_org_id: str | None = None
     carrier: str
     origin_name: str
     destination_name: str
@@ -750,6 +918,14 @@ class ShipmentOut(ORMModel):
     temp_min_c: float | None = None
     temp_max_c: float | None = None
     cold_chain_device_id: str | None = None
+    # Resolved for display by the shipment endpoints (not columns on the row).
+    batch_code: str | None = None
+    product_name: str | None = None
+    storage_temp_min_c: float | None = None
+    storage_temp_max_c: float | None = None
+    # True when the recorded temperature range left the product's storage range; None when
+    # there is no telemetry or the product declares no range.
+    excursion: bool | None = None
 
 
 class CertificationCreate(BaseModel):
@@ -785,6 +961,10 @@ class CertificationOut(ORMModel):
     revoke_reason: str | None = None
     tx_id: str | None = None
     anchor_status: str
+    # Filled in by the list endpoint: who holds the certificate and where it is claimed.
+    issuer_org_name: str | None = None
+    subject_org_name: str | None = None
+    claimed_batches: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CertificationLinkCreate(BaseModel):
@@ -800,6 +980,7 @@ class VerificationResult(BaseModel):
     fraud_score: float
     fraud_level: str
     ledger_status: str
+    fabric_status: str | None = None      # MATCH / MISMATCH / ... when the Fabric mirror is on
     reasons: list[dict[str, Any]]
     events_checked: int
     certifications_checked: int
@@ -838,6 +1019,9 @@ class ComplianceReportOut(ORMModel):
     tx_id: str | None = None
     anchor_status: str
     created_at: datetime
+    # False when the subject is a batch the caller cannot open (e.g. it has since been handed
+    # on), so the screen shows its code instead of a link that would 404.
+    subject_readable: bool | None = None
 
 
 class EIARequest(BaseModel):

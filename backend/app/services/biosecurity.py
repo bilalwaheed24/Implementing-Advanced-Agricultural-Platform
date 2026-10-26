@@ -73,15 +73,87 @@ def submit_screening(db: Session, org_id: str, actor_id: str, actor_role: str, n
                  detail={"verdict": result.verdict, "status": status, "durc": durc,
                          "sequence_hash": record.sequence_hash, "hits": len(result.hits)})
 
+    severity = "INFO"
     if status in (STATUS_BLOCKED, STATUS_PENDING_REVIEW):
         severity = "CRITICAL" if status == STATUS_BLOCKED else "HIGH"
-        notifications.raise_alert(
-            db, "DURC" if durc else "BIOSECURITY", severity,
-            f"Sequence screening {result.verdict}: {name}",
+        _alert_reviewers(
+            db, actor_id, "DURC" if durc else "BIOSECURITY", severity,
+            f"Sequence {name} {SCREENING_ALERT_TITLES.get(status, 'needs review')}",
             detail="; ".join(result.reasons[:3]), org_id=org_id,
             entity_type="SequenceScreening", entity_id=record.id, reasons=result.reasons)
 
+    # The submitter's own notice carries the alert's severity (round 6: "High" beside a
+    # Critical alert), and the submitter is not also sent the alert's fan-out notification.
+    notifications.notify_user(
+        db, actor_id, "BIOSECURITY", f"Screening {name}: {SCREENING_OUTCOMES[status]}",
+        "; ".join(result.reasons[:3]) or f"Verdict {result.verdict}.",
+        "SequenceScreening", record.id, severity=severity)
     return record
+
+
+def _alert_reviewers(db: Session, submitter_id: str, category: str, severity: str, title: str,
+                     **kwargs: Any) -> None:
+    """Raise the review alert and notify the category's roles, except the submitter.
+
+    A biosafety officer may submit as well as review, and was sent two notifications for one
+    blocked screening at different severities: the alert's ("Sequence X blocked by
+    screening...", Critical) and the submitter's own ("Screening X: blocked...", High). One
+    event now gives each person one notification (round 6)."""
+    alert = notifications.raise_alert(db, category, severity, title, notify=False, **kwargs)
+    notifications.fan_out(db, category, alert.severity, alert.title, alert.detail or "",
+                          alert.org_id, alert.entity_type, alert.entity_id,
+                          party_org_id=alert.custodian_org_id,
+                          exclude_user_ids={submitter_id})
+
+
+# How the alert raised for a screening reads ("Sequence X blocked by screening"); the
+# verdict codes BLOCK and FLAG used to be shown as they are.
+SCREENING_ALERT_TITLES = {
+    STATUS_BLOCKED: "blocked by screening, awaiting biosafety review",
+    STATUS_PENDING_REVIEW: "flagged by screening for biosafety review",
+}
+
+# What the submitter is told, per screening or gene-edit state.
+SCREENING_OUTCOMES = {
+    STATUS_APPROVED_AUTO: "cleared automatically",
+    STATUS_PENDING_REVIEW: "held for biosafety review",
+    STATUS_BLOCKED: "blocked pending biosafety review",
+    STATUS_APPROVED_REVIEW: "approved by biosafety review",
+    STATUS_REJECTED: "rejected by biosafety review",
+}
+
+
+# What a gene-edit risk level means for the submitter, in words rather than the stored code
+# and raw score ("Risk PROHIBITED (0.9)").
+RISK_MEANINGS = {
+    "LOW": "no concern that needs review was found",
+    "MEDIUM": "some concerns were found; they are listed on the assessment",
+    "HIGH": "serious concerns were found; a biosafety officer must review it",
+    "PROHIBITED": "this is the highest risk level; it cannot proceed without biosafety review",
+}
+
+
+def risk_sentence(level: str | None, score: float | None) -> str:
+    """ "Risk: prohibited (score 90%); this is the highest risk level; ..." """
+    word = notifications.human_status(level) or "unknown"
+    meaning = RISK_MEANINGS.get((level or "").upper())
+    scored = f" (score {round(float(score) * 100)}%)" if score is not None else ""
+    return f"Risk: {word}{scored}" + (f"; {meaning}." if meaning else ".")
+
+
+def _review_closed(db: Session, entity_type: str, entity_id: str, submitted_by: str | None,
+                   what: str, status: str, rationale: str, actor_id: str) -> None:
+    """Tell the submitter the decision and close the alert(s) the submission raised."""
+    approved = status == STATUS_APPROVED_REVIEW
+    notifications.notify_user(
+        db, submitted_by, "BIOSECURITY",
+        f"{what}: {SCREENING_OUTCOMES.get(status, status.lower())}",
+        f"Reviewer's rationale: {rationale[:500]}", entity_type, entity_id,
+        severity="INFO" if approved else "WARNING")
+    notifications.resolve_entity_alerts(
+        db, entity_type, entity_id, actor_id,
+        f"{what} {'approved' if approved else 'rejected'} by biosafety review: "
+        f"{rationale[:300]}")
 
 
 def _durc_flag(intent: str, hazard_classes: list[str]) -> bool:
@@ -126,6 +198,8 @@ def review_screening(db: Session, screening: SequenceScreening, actor_id: str, a
                  entity_id=screening.id,
                  detail={"decision": decision, "previous_verdict": screening.verdict,
                          "rationale": rationale[:500]})
+    _review_closed(db, "SequenceScreening", screening.id, screening.submitted_by,
+                   f"Screening {screening.name}", screening.status, rationale, actor_id)
     return screening
 
 
@@ -175,13 +249,20 @@ def assess_crispr(db: Session, org_id: str, actor_id: str, actor_role: str, targ
                  detail={"risk_level": result.risk_level, "durc": result.durc_flag,
                          "off_targets": result.off_target_count})
 
+    severity = "INFO"
     if status == "PENDING_REVIEW":
-        notifications.raise_alert(
-            db, "DURC" if result.durc_flag else "BIOSECURITY",
-            "CRITICAL" if result.risk_level == "PROHIBITED" else "HIGH",
+        severity = "CRITICAL" if result.risk_level == "PROHIBITED" else "HIGH"
+        _alert_reviewers(
+            db, actor_id, "DURC" if result.durc_flag else "BIOSECURITY", severity,
             f"Gene-edit proposal requires review: {target_gene} in {organism}",
             detail="; ".join(result.reasons[:3]), org_id=org_id,
             entity_type="CrisprAssessment", entity_id=record.id, reasons=result.reasons)
+    notifications.notify_user(
+        db, actor_id, "BIOSECURITY",
+        f"Gene-edit {target_gene} in {organism}: {SCREENING_OUTCOMES[status]}",
+        risk_sentence(result.risk_level, result.risk_score)
+        + (" It is also flagged as dual-use research of concern." if result.durc_flag else ""),
+        "CrisprAssessment", record.id, severity=severity)
     return record
 
 
@@ -200,6 +281,9 @@ def review_crispr(db: Session, assessment: CrisprAssessment, actor_id: str, acto
                  entity_id=assessment.id,
                  detail={"decision": decision, "risk_level": assessment.risk_level,
                          "rationale": rationale[:500]})
+    _review_closed(db, "CrisprAssessment", assessment.id, assessment.submitted_by,
+                   f"Gene-edit {assessment.target_gene} in {assessment.organism}",
+                   assessment.status, rationale, actor_id)
     return assessment
 
 

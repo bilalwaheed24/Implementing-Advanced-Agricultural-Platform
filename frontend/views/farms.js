@@ -1,4 +1,5 @@
-import { el, api, badge, can, field, fmtNum, fmtDay, toast } from '/static/assets/core.js';
+import { el, api, badge, can, field, fmtNum, fmtDay, toast, isCrossTenant }
+  from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 
 // Readable labels rather than the field names ("area ha").
@@ -53,18 +54,24 @@ function createFarmForm(reload) {
 
 export const render = listView({
   title: 'Farms and fields',
-  subtitle: 'Farms are scoped to your organisation. A competitor cannot see these records.',
+  subtitle: () => (isCrossTenant()
+    ? 'Every organisation\'s farms, shown to your role for oversight. Farm organisations see '
+      + 'only their own records; a competitor cannot see them.'
+    : 'Farms are scoped to your organisation. A competitor cannot see these records.'),
   endpoint: '/farms',
+  // Client-side: the farm list endpoint has no text search parameter.
+  search: { placeholder: 'Farm name, region, country or GLN',
+    fields: (row) => `${row.name} ${row.region} ${row.country} ${row.gln || ''}` },
   columns: [
-    { label: 'Name', key: 'name' },
+    { label: 'Name', render: (row) => el('a', { href: `#/farm/${row.id}`, text: row.name }) },
     { label: 'Region', render: (row) => `${row.region}, ${row.country}` },
     { label: 'Area (ha)', numeric: true, render: (row) => fmtNum(row.area_ha, 1) },
     { label: 'Coordinates', render: (row) =>
       el('span', { class: 'mono', text: `${fmtNum(row.latitude, 3)}, ${fmtNum(row.longitude, 3)}` }) },
     { label: 'GLN', render: (row) => row.gln || '—' },
     { label: 'Registered', render: (row) => fmtDay(row.created_at) },
-    { label: 'Fields', render: (row) => el('a', {
-      href: `#/farms?farm_id=${row.id}`, text: 'View fields' }) },
+    { label: 'Fields & crops', render: (row) => el('a', {
+      href: `#/farm/${row.id}`, text: 'Open farm' }) },
   ],
   // Evaluated per render, and gated on the permission the endpoint actually requires, so
   // read-only roles are not offered a button that can only ever return 403.

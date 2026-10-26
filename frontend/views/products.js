@@ -10,10 +10,20 @@ const FIELD_LABELS = {
   storage_temp_max_c: 'Maximum storage temperature (°C)',
 };
 
+/* The API's 422 says only "One or more fields failed validation." and lists each field under
+ * `errors` (ApiError.fields). Show those instead, by their labels: "GTIN: check digit is
+ * wrong (expected 5, got 4)". Pydantic prefixes its messages with "Value error, ". */
+function fieldErrorText(error) {
+  const fields = error.fields || [];
+  if (!fields.length) return error.message;
+  return fields.map((f) => `${FIELD_LABELS[f.field] || f.field.replace(/_/g, ' ')}: `
+    + String(f.message || '').replace(/^Value error, /, '')).join(' ');
+}
+
 function createForm(reload) {
   const fields = {
     gtin: el('input', { required: 'required', minlength: '8', maxlength: '14',
-      placeholder: '8-14 digit GTIN' }),
+      placeholder: 'GTIN, 8, 12, 13 or 14 digits' }),
     name: el('input', { required: 'required' }),
     category: el('input', { required: 'required' }),
     storage_temp_min_c: el('input', { type: 'number', step: 'any' }),
@@ -47,7 +57,7 @@ function createForm(reload) {
       toast('Product created', 'ok');
       form.classList.add('u-hidden');
       reload();
-    } catch (error) { message.textContent = error.message; }
+    } catch (error) { message.textContent = fieldErrorText(error); }
   });
   const toggle = el('button', { class: 'primary', text: 'New product', onClick: () => {
     form.classList.toggle('u-hidden');
@@ -60,12 +70,14 @@ export const render = listView({
   subtitle: 'Trade items identified by GS1 GTIN.',
   endpoint: '/supply-chain/products',
   actions: ({ reload }) => (can('supply:write') ? createForm(reload) : null),
+  // Client-side: routers/supplychain.py is owned by another change, so no ?q= was added.
+  search: { placeholder: 'Name, GTIN or category', fields: ['name', 'gtin', 'category'] },
   columns: [
     { label: 'GTIN', render: (row) => el('span', { class: 'mono', text: row.gtin }) },
     { label: 'Name', key: 'name' },
     { label: 'Category', key: 'category' },
-    { label: 'Organic', render: (row) => row.organic_claim ? '✓' : '—' },
-    { label: 'Non-GMO', render: (row) => row.non_gmo_claim ? '✓' : '—' },
+    { label: 'Organic claim', render: (row) => (row.organic_claim ? 'Yes' : 'No') },
+    { label: 'Non-GMO claim', render: (row) => (row.non_gmo_claim ? 'Yes' : 'No') },
     { label: 'Storage range', render: (row) => row.storage_temp_min_c === null ? '—'
       : `${fmtNum(row.storage_temp_min_c, 0)}–${fmtNum(row.storage_temp_max_c, 0)} °C` },
   ],

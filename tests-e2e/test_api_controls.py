@@ -15,6 +15,14 @@ import pytest
 
 from conftest import ACCOUNTS, BASE, PASSWORD
 
+
+def _valid_sscc() -> str:
+    """A random SSCC the API accepts: 18 digits ending in its GS1 mod-10 check digit (an
+    invalid one is refused 422 before the foreign-batch check this file probes)."""
+    data = f"{uuid.uuid4().int % 10**17:017d}"
+    total = sum(int(c) * (3 if i % 2 == 0 else 1) for i, c in enumerate(reversed(data)))
+    return data + str((10 - total % 10) % 10)
+
 API = BASE + "/api/v1"
 
 
@@ -86,9 +94,13 @@ def foreign_batch(tokens):
     if not items:
         # The farm tenant owns no product in the seed; create one so the batch has a parent
         # product inside that organisation.
-        digits = uuid.uuid4().int % 10**13
+        # GTINs need a valid GS1 mod-10 check digit (weights 3,1 from the right).
+        body = f"{uuid.uuid4().int % 10**12:012d}"
+        check = (10 - sum(int(c) * (3 if i % 2 == 0 else 1)
+                          for i, c in enumerate(reversed(body))) % 10) % 10
+        digits = int(body)
         status, product = call("POST", "/supply-chain/products", tokens["FARM_OPERATOR"], {
-            "gtin": f"{digits:013d}", "name": f"PW Farm Product {digits % 1000}",
+            "gtin": f"{body}{check}", "name": f"PW Farm Product {digits % 1000}",
             "category": "Grain"})
         assert status == 201, product
         items = [product]
@@ -256,7 +268,7 @@ class TestTenantIsolation:
     def test_a_foreign_shipment_batch_is_refused(self, tokens, foreign_batch):
         status, body = call("POST", "/supply-chain/shipments",
                             tokens["SUPPLY_CHAIN_OPERATOR"], {
-                                "sscc": f"{uuid.uuid4().int % 10**18:018d}",
+                                "sscc": _valid_sscc(),
                                 "batch_id": foreign_batch["id"], "carrier": "Probe",
                                 "origin_name": "Origin depot", "origin_lat": 42.0,
                                 "origin_lon": -93.0,
@@ -326,11 +338,10 @@ class TestNineRoleMatrix:
             status, _ = call("GET", path)
             assert status == 401, f"{path} answered {status} unauthenticated"
 
-    def test_a_sweep_is_scoped_for_a_tenant_role_and_broad_for_oversight(self, tokens):
+    def test_the_data_theft_sweep_is_for_security_operations_only(self, tokens):
+        # Round 4: tenant roles were able to run the sweep and read colleagues' scores.
         status, tenant = call("POST", "/security/data-theft/sweep", tokens["FARM_OPERATOR"])
-        assert status == 200, tenant
+        assert status == 403, tenant
         status, oversight = call("POST", "/security/data-theft/sweep",
                                  tokens["SECURITY_ANALYST"])
         assert status == 200, oversight
-        assert oversight["count"] >= tenant["count"], \
-            "a tenant sweep returned more than the platform-wide one"

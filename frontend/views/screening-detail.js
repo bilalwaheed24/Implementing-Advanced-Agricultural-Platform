@@ -1,5 +1,5 @@
-import { el, api, badge, field, fmtDate, fmtPct, fmtNum, table, toast, can, reasonList,
-         titleCase, empty } from '/static/assets/core.js';
+import { session, el, api, badge, field, fmtDate, fmtPct, fmtNum, table, toast, can, reasonList,
+         humanize, empty, refreshView } from '/static/assets/core.js';
 
 export async function render({ id }) {
   if (!id) return empty('No screening selected', 'Choose a screening from the list.');
@@ -21,8 +21,10 @@ export async function render({ id }) {
     ]),
     el('div', { class: 'tile' }, [
       el('div', { class: 'label', text: 'Dual-use flag' }),
+      // A green "Verified" tick here sat next to a FLAG or BLOCK verdict and read as if the
+      // screening had been cleared. No flag is a neutral fact, not a verification.
       el('div', { class: 'u-mt-6' }, [screening.durc_flag
-        ? badge('CRITICAL') : badge('VERIFIED')]),
+        ? badge('CRITICAL') : badge('NOT_FLAGGED', 'neutral')]),
     ]),
   ]);
 
@@ -30,7 +32,7 @@ export async function render({ id }) {
   const evidence = hits.length
     ? table([
       { label: 'Agent', key: 'agent_name' },
-      { label: 'Hazard class', render: (row) => titleCase(row.hazard_class) },
+      { label: 'Hazard class', render: (row) => humanize(row.hazard_class) },
       { label: 'Severity', numeric: true, render: (row) => badge(
         row.severity >= 5 ? 'CRITICAL' : row.severity >= 4 ? 'HIGH' : 'WARNING') },
       { label: 'Identity', numeric: true, render: (row) => fmtPct(row.identity, 1) },
@@ -74,6 +76,15 @@ export async function render({ id }) {
       el('p', { text: screening.review_rationale }),
     ]));
   } else if (can('biosecurity:review')
+      && ['PENDING_REVIEW', 'BLOCKED'].includes(screening.status)
+      && screening.submitted_by === session.read()?.id) {
+    // Four-eyes rule: the API refuses a self-review (409), so do not offer one.
+    parts.push(el('div', { class: 'card' }, [
+      el('h2', { text: 'Biosafety review required' }),
+      el('p', { class: 'hint', text: 'You submitted this screening, so a different biosafety '
+        + 'officer must review it (four-eyes rule).' }),
+    ]));
+  } else if (can('biosecurity:review')
       && ['PENDING_REVIEW', 'BLOCKED'].includes(screening.status)) {
     const rationale = el('textarea', { required: 'required', minlength: '10',
       placeholder: 'Record the reasoning for this decision. It is written to the audit trail.' });
@@ -88,13 +99,16 @@ export async function render({ id }) {
           method: 'POST', body: { decision, rationale: rationale.value.trim() },
         });
         toast(`Screening ${decision === 'APPROVE' ? 'approved' : 'rejected'}`, 'ok');
-        window.location.reload();
+        refreshView();
       } catch (error) { message.textContent = error.message; }
     }
     parts.push(el('div', { class: 'card' }, [
       el('h2', { text: 'Biosafety review required' }),
-      el('p', { class: 'hint', text: 'Only a biosafety officer can release a blocked record, '
-        + 'and the decision is audit-logged with its rationale.' }),
+      el('p', { class: 'hint', text: screening.status === 'BLOCKED'
+        ? 'Only a biosafety officer can release a blocked record, and the decision is '
+          + 'audit-logged with its rationale.'
+        : 'The screening engine flagged this sequence for human judgement. Approve or reject '
+          + 'it; the decision is audit-logged with its rationale and the submitter is told.' }),
       field('Rationale', rationale),
       message,
       el('div', { class: 'row' }, [

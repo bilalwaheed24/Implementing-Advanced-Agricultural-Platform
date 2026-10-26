@@ -5,19 +5,21 @@ FR-D3 (fraud detection), FR-D4 (consumer verification).
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, select, update
+from sqlalchemy.orm import Session, aliased
 
 from ..core.config import get_settings
 from ..core.errors import Conflict, NotFound, PermissionDenied, ValidationFailed
+from ..core.permissions import CROSS_TENANT_ROLES
 from ..core.security import ensure_aware as _aware, content_hash, utcnow, verification_code
 from ..repositories import get_or_404, visible
-from ..models import (Batch, Certification, CertificationLink, Crop, Farm, FraudAssessment,
-                      GMOEvent, Organization, Product, SeedLot, Shipment, SupplyChainEvent)
-from . import ai_client, audit, gmo as gmo_service, ledger_client, notifications, telemetry as telemetry_service
+from ..models import (Batch, Certification, CertificationLink, Crop, Device, Farm, Field,
+                      FraudAssessment, GMOApproval, GMOEvent, Organization, Product, SeedLot,
+                      Notification, Shipment, SupplyChainEvent, User)
+from . import ai_client, audit, cold_chain, gmo as gmo_service, ledger_client, notifications, telemetry as telemetry_service
 
 BIZ_STEP_TO_STATE = {
     "commissioning": "CREATED", "harvesting": "HARVESTED", "transforming": "PROCESSED",
@@ -59,6 +61,86 @@ def require_batch_transition(current: str, target: str) -> None:
             f"{', '.join(sorted(allowed)) or 'none, this state is final'}")
 
 
+# --------------------------------------------------------------------------- #
+# Event timing and receivers (round 6)
+# --------------------------------------------------------------------------- #
+# How far ahead of the server clock a date may be: enough for a client clock running a little
+# fast, not enough to schedule a step. A shipping event dated years ahead used to freeze the
+# batch, because every later step (arrival, even the recall) was then "before" it.
+FUTURE_TOLERANCE = timedelta(minutes=5)
+# Steps that come before or at the harvest itself, so the harvest date does not bound them.
+PRE_HARVEST_STEPS = frozenset({"commissioning", "harvesting"})
+# The organisation types that can record a batch's steps and take custody of it on the
+# ledger: provenance.RecordEvent and provenance.TransferCustody in ledger/contracts.py
+# SUBMIT_RIGHTS (tests/test_round6_timing.py keeps the two equal). A batch handed to any
+# other type could never be marked arrived, so it stayed IN_TRANSIT for good.
+RECEIVER_ORG_TYPES = frozenset({"FARM", "SUPPLY"})
+
+
+def human_when(value: datetime) -> str:
+    """A moment as people write it, to the minute: "19 Oct 2026, 03:48 UTC". Rounded up, so
+    a date "on or after" the time shown is always accepted."""
+    moment = _aware(value).astimezone(timezone.utc)
+    if moment.second or moment.microsecond:
+        moment = moment.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    return f"{moment.day} {moment.strftime('%b %Y, %H:%M')} UTC"
+
+
+def require_not_future(value: datetime | None, what: str) -> None:
+    """Refuse a date more than a few minutes ahead of now (422, in words)."""
+    if value is None:
+        return
+    now = utcnow()
+    if _aware(value) > now + FUTURE_TOLERANCE:
+        raise ValidationFailed(
+            f"The {what} cannot be in the future. Choose a date no later than "
+            f"{human_when(now)}.")
+
+
+def require_chronology(db: Session, batch: Batch, occurred_at: datetime, biz_step: str) -> None:
+    """Refuse a step dated before the batch's latest recorded step, or (after the harvest)
+    before its harvest date.
+
+    The chain of custody is ordered by occurred_at, so a backdated step would land between
+    earlier ones and rewrite the history: before a hand-over it fell in the previous holder's
+    time with the batch, and a booking dated so never counted as booking the hand-over in.
+    Recording yesterday's step today is still fine as long as it comes after the last one.
+    A recall is exempt: it is how a batch is taken out of the chain, and it must never be
+    blocked by how the chain was dated.
+    """
+    if biz_step == "recalling":
+        return
+    when = _aware(occurred_at)
+    latest = db.execute(select(func.max(SupplyChainEvent.occurred_at)).where(
+        SupplyChainEvent.batch_id == batch.id)).scalar_one_or_none()
+    if latest is not None and when < _aware(latest):
+        raise ValidationFailed(
+            f"Choose a date on or after {human_when(latest)} — the batch's last recorded "
+            f"step.")
+    if (biz_step not in PRE_HARVEST_STEPS and batch.harvested_at is not None
+            and when < _aware(batch.harvested_at)):
+        raise ValidationFailed(
+            f"Choose a date on or after {human_when(batch.harvested_at)} — when the batch was "
+            f"harvested.")
+
+
+def require_receiver(db: Session, to_org_id: str) -> Organization:
+    """The organisation a batch is handed to must exist, be active, and be of a type that can
+    act on the batch on the ledger (RECEIVER_ORG_TYPES)."""
+    receiver = db.get(Organization, to_org_id)
+    if receiver is None or not receiver.is_active:
+        raise NotFound("Receiving organisation not found")
+    if receiver.org_type not in RECEIVER_ORG_TYPES:
+        raise ValidationFailed(
+            f"{receiver.name} cannot receive batches: only farms and supply-chain "
+            f"organisations can take custody of a batch and record its next steps.")
+    return receiver
+
+
+def _is_cross_tenant(role: str) -> bool:
+    return role in {r.value for r in CROSS_TENANT_ROLES}
+
+
 def _require_exists(db: Session, model: type, entity_id: str, name: str) -> Any:
     """Referential-integrity check for a cross-organisation provenance reference.
 
@@ -77,6 +159,105 @@ def _msp_for(db: Session, org_id: str) -> str:
     if organization is None:
         raise NotFound("Organisation not found")
     return organization.msp_id
+
+
+# --------------------------------------------------------------------------- #
+# Read access for certifiers
+# --------------------------------------------------------------------------- #
+def certified_by(org_id: str | None) -> Any:
+    """SQL condition: the batch carries a certificate `org_id` issued.
+
+    A certifier is not a party to the batches its certificates are claimed on, yet it is told
+    about them (claims, expiry, revocation, compliance) and must be able to check the claim. It
+    therefore reads those batches, read-only: this widens the read paths only (`readable_batch`,
+    the batch list, verify-record), never the paths that record events, ship or verify.
+    """
+    if org_id is None:
+        return None
+    return Batch.id.in_(
+        select(CertificationLink.batch_id)
+        .join(Certification, Certification.id == CertificationLink.certification_id)
+        .where(Certification.issuer_org_id == org_id, *_live_certificate()))
+
+
+def _live_certificate() -> list[Any]:
+    """A certificate still in force: ACTIVE and not past valid_to. A revoked or expired one
+    no longer gives its issuer read access to the batches it was claimed on (round 5)."""
+    return [Certification.status == "ACTIVE", Certification.valid_to >= utcnow()]
+
+
+def certified_subjects(org_id: str | None, batch_id: str) -> Any:
+    """SELECT of the organisations certified, by a live certificate `org_id` issued, on a
+    certificate claimed on this batch. A certifier reads the batch's shipments only where one
+    of these is the sender or the receiver: it never dealt with the downstream holders."""
+    return (select(Certification.subject_org_id)
+            .join(CertificationLink, CertificationLink.certification_id == Certification.id)
+            .where(CertificationLink.batch_id == batch_id,
+                   Certification.issuer_org_id == org_id, *_live_certificate()))
+
+
+def readable_batch(db: Session, batch_id: str, role: str, org_id: str | None) -> Batch:
+    """A batch the caller may read: its owner, its custodian, a cross-tenant role, or the issuer
+    of a certificate claimed on it. 404 otherwise, as `get_or_404`."""
+    return get_or_404(db, Batch, batch_id, role, org_id, name="Batch",
+                      also=certified_by(org_id))
+
+
+def readable_batches(role: str, org_id: str | None):
+    """SELECT of every batch `readable_batch` would return for the caller."""
+    return visible(Batch, role, org_id, also=certified_by(org_id))
+
+
+# --------------------------------------------------------------------------- #
+# Release gate: what may be shipped or put on sale
+# --------------------------------------------------------------------------- #
+# Business steps that put a batch in front of a buyer, and how the refusal names them.
+RELEASE_STEPS = {"shipping": "shipped", "retail_selling": "put on sale"}
+# The one step that may carry a receiver (to_org_id) and so move custody. It is a release
+# step, so a hand-over always passes require_releasable.
+HANDOVER_STEP = "shipping"
+
+
+def _recalled_ancestor(db: Session, batch: Batch, max_depth: int = 12) -> Batch | None:
+    seen = {batch.id}
+    current, depth = batch, 0
+    while current.parent_batch_id and depth < max_depth:
+        current = db.get(Batch, current.parent_batch_id)
+        if current is None or current.id in seen:
+            return None
+        if current.state == "RECALLED":
+            return current
+        seen.add(current.id)
+        depth += 1
+    return None
+
+
+def require_releasable(db: Session, batch: Batch, action: str) -> None:
+    """Refuse to ship or sell a batch that must not reach a buyer (422 with the reason).
+
+    Recalled, made from a recalled batch (the SUSPECT descendants `propagate_recall` flags),
+    integrity FAILED, or carrying a GMO event with no live approval anywhere (the same
+    `require_live_approval` gate that stops new seed lots and batches). A recall itself is never
+    gated: it is how such a batch is taken out of the chain.
+    """
+    code = batch.batch_code
+    if batch.state == "RECALLED":
+        raise ValidationFailed(f"Batch {code} has been recalled and cannot be {action}.")
+    recalled = _recalled_ancestor(db, batch)
+    if recalled is not None:
+        raise ValidationFailed(
+            f"Batch {code} is made from recalled batch {recalled.batch_code} and cannot be "
+            f"{action}. Quarantine the stock, or recall it too.")
+    if batch.integrity_status == "FAILED":
+        raise ValidationFailed(
+            f"Batch {code} failed integrity verification and cannot be {action}. Investigate "
+            f"the failure and re-run the verification first.")
+    event = gmo_service.lineage_gmo_event(db, batch)
+    if event is not None:
+        try:
+            gmo_service.require_live_approval(db, event, f"A batch {action}")
+        except ValidationFailed as exc:
+            raise ValidationFailed(f"Batch {code} cannot be {action}: {exc.detail}") from exc
 
 
 
@@ -121,6 +302,8 @@ def create_batch(db: Session, org_id: str, actor_id: str, actor_role: str, batch
                  origin_country: str | None, harvested_at: datetime | None) -> Batch:
     if db.execute(select(Batch).where(Batch.batch_code == batch_code)).scalar_one_or_none():
         raise Conflict(f"Batch {batch_code} already exists")
+    # A harvest date ahead of now would refuse every later step until that date came.
+    require_not_future(harvested_at, "harvest date")
     # Every id below arrives from the request body, so each is resolved rather than trusted.
     # Two different rules apply, because a supply chain legitimately spans organisations:
     #
@@ -139,17 +322,55 @@ def create_batch(db: Session, org_id: str, actor_id: str, actor_role: str, batch
     parent = None
     if parent_batch_id:
         parent = get_or_404(db, Batch, parent_batch_id, actor_role, org_id, name="Parent batch")
+        if not _is_cross_tenant(actor_role) and parent.custodian_org_id != org_id:
+            raise PermissionDenied("A batch can only be derived from a batch you currently hold")
+        if parent.state in {"RECALLED", "CONSUMED"}:
+            # A recalled lot must not re-enter the chain under a new code.
+            raise ValidationFailed(
+                f"Batch {parent.batch_code} is {notifications.human_status(parent.state)} and "
+                f"cannot be used as a parent")
         if quantity > parent.quantity + 1e-9:
             raise ValidationFailed(
-                f"Quantity {quantity} exceeds the parent batch quantity {parent.quantity}")
-    if seed_lot_id:
-        _require_exists(db, SeedLot, seed_lot_id, "Seed lot")
+                f"Quantity {notifications.human_quantity(quantity, unit)} exceeds the parent "
+                f"batch quantity {notifications.human_quantity(parent.quantity, parent.unit)}")
     if crop_id:
-        _require_exists(db, Crop, crop_id, "Crop")
+        # A grower harvesting its own crop: the batch inherits the crop's farm, seed lot and
+        # GMO event, so lineage is recorded from the planting rather than retyped — and a
+        # different value sent alongside it is refused, as create_crop refuses a mismatch.
+        crop = db.execute(visible(Crop, actor_role, org_id).where(
+            Crop.id == crop_id)).scalar_one_or_none()
+        if crop is not None:
+            field = db.get(Field, crop.field_id)
+            crop_farm = field.farm_id if field else None
+            for label, given, planted in (("farm", farm_id, crop_farm),
+                                          ("seed lot", seed_lot_id, crop.seed_lot_id),
+                                          ("GMO event", gmo_event_id, crop.gmo_event_id)):
+                if given and planted and given != planted:
+                    raise ValidationFailed(
+                        f"The {label} does not match the harvested crop's {label}")
+            farm_id = farm_id or crop_farm
+            seed_lot_id = seed_lot_id or crop.seed_lot_id
+            gmo_event_id = gmo_event_id or crop.gmo_event_id
+        else:
+            _require_exists(db, Crop, crop_id, "Crop")
+    lot = _require_exists(db, SeedLot, seed_lot_id, "Seed lot") if seed_lot_id else None
     if farm_id:
         _require_exists(db, Farm, farm_id, "Farm")
+    # The GMO event the batch will carry, from wherever its lineage brings it in: named
+    # directly, through the seed lot, or through the parent batch. Each route needs the
+    # same live approval, or a lapsed event could enter the chain by the side door.
     if gmo_event_id:
-        _require_exists(db, GMOEvent, gmo_event_id, "GMO event")
+        event = _require_exists(db, GMOEvent, gmo_event_id, "GMO event")
+        if lot is not None and lot.gmo_event_id and lot.gmo_event_id != gmo_event_id:
+            raise ValidationFailed("The GMO event does not match the seed lot's GMO event")
+    elif lot is not None and lot.gmo_event_id:
+        event = db.get(GMOEvent, lot.gmo_event_id)
+    elif parent is not None:
+        event = gmo_service.lineage_gmo_event(db, parent)
+    else:
+        event = None
+    if event is not None:
+        gmo_service.require_live_approval(db, event, "A batch")
 
     batch = Batch(org_id=org_id, batch_code=batch_code, verification_code=verification_code(),
                   product_id=product_id, parent_batch_id=parent_batch_id, seed_lot_id=seed_lot_id,
@@ -159,6 +380,10 @@ def create_batch(db: Session, org_id: str, actor_id: str, actor_role: str, batch
                   origin_region=origin_region, origin_country=origin_country,
                   harvested_at=_aware(harvested_at), created_by=actor_id)
     db.add(batch)
+    if parent is not None:
+        # The child takes its quantity out of the parent (quantity conservation): otherwise
+        # every child could claim the parent's full amount.
+        parent.quantity = max(0.0, parent.quantity - quantity)
     db.flush()
 
     digest = content_hash(batch_content(batch, product))
@@ -171,7 +396,7 @@ def create_batch(db: Session, org_id: str, actor_id: str, actor_role: str, batch
          "parents": [parent.batch_code] if parent else [],
          "gmo_event": lineage_event.event_code if lineage_event else None,
          "content_hash": digest},
-        _msp_for(db, org_id))
+        _msp_for(db, org_id), db=db, entity=batch)
     gmo_service._apply_receipt(db, batch, receipt, "Batch")
 
     audit.record(db, "supply.create_batch", actor_id=actor_id, actor_role=actor_role,
@@ -193,6 +418,17 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
                  quantity: float | None, unit: str | None, to_org_id: str | None,
                  occurred_at: datetime, detail: dict[str, Any]) -> SupplyChainEvent:
     """Append an EPCIS-shaped event, anchor it, and advance the batch state."""
+    if to_org_id and to_org_id != batch.custodian_org_id and biz_step != HANDOVER_STEP:
+        # Custody moves only with a shipping event, which passes the release gate below. Any
+        # other step carrying a receiver handed over a FAILED or recalled batch that
+        # POST /shipments had just refused (round 4).
+        raise ValidationFailed(
+            f"to_org_id hands the batch to another organisation, which only a "
+            f"'{HANDOVER_STEP}' event may do; '{biz_step}' cannot carry a receiver")
+    if to_org_id and to_org_id != batch.custodian_org_id:
+        require_receiver(db, to_org_id)
+    if biz_step in RELEASE_STEPS:
+        require_releasable(db, batch, RELEASE_STEPS[biz_step])
     if quantity is not None and quantity > batch.quantity + 1e-9:
         raise ValidationFailed(
             f"Event quantity {quantity} exceeds the batch quantity {batch.quantity} "
@@ -202,6 +438,8 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
     target_state = BIZ_STEP_TO_STATE.get(biz_step)
     if target_state:
         require_batch_transition(batch.state, target_state)
+    require_not_future(occurred_at, "date of the step")
+    require_chronology(db, batch, occurred_at, biz_step)
 
     event = SupplyChainEvent(
         batch_id=batch.id, org_id=org_id, event_type=event_type, biz_step=biz_step,
@@ -219,10 +457,12 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
          "disposition": disposition, "location_gln": location_gln or "",
          "quantity": quantity, "occurred_at": _aware(occurred_at).isoformat(),
          "content_hash": event.content_hash},
-        _msp_for(db, org_id))
+        _msp_for(db, org_id), db=db, entity=event)
 
     if receipt.get("status") == "REJECTED":
-        # The contract enforces the lifecycle; surface its reason to the caller.
+        # The contract enforces the lifecycle; surface its reason to the caller. A batch whose
+        # own anchor is still pending does not land here: the event is queued behind it
+        # (services/anchoring.py) and comes back PENDING.
         db.expunge(event)
         raise ValidationFailed(receipt.get("detail", "Ledger rejected the event"))
 
@@ -234,31 +474,325 @@ def record_event(db: Session, org_id: str, actor_id: str, actor_role: str, batch
     if quantity is not None:
         batch.quantity = quantity
 
-    if to_org_id and to_org_id != batch.custodian_org_id:
+    if to_org_id and to_org_id != batch.custodian_org_id and new_state != "RECALLED":
         transfer_custody(db, batch, org_id, to_org_id, occurred_at)
+
+    if biz_step in SHIPMENT_CLOSING_STEPS:
+        # Receipt recorded directly closes the shipment that was carrying the batch, so the
+        # shipment and the batch never disagree about whether the goods have arrived, with the
+        # same side effects as marking the shipment arrived (sender told, temperatures, audit).
+        _deliver_open_shipments(db, batch, occurred_at, org_id, actor_id, actor_role,
+                                location_name)
+    if biz_step in BOOKING_STEPS and batch.custodian_org_id \
+            and org_id == batch.custodian_org_id:
+        # Booked in by its holder: the "handed over to you" notification has nothing left to
+        # ask for. A hand-over by a bare shipping event has no shipment, so _shipment_arrived
+        # never ran to settle it (round 5).
+        _settle_handover_notifications(db, batch.custodian_org_id, batch.id)
 
     db.flush()
     audit.record(db, "supply.record_event", actor_id=actor_id, actor_role=actor_role,
                  org_id=org_id, entity_type="SupplyChainEvent", entity_id=event.id,
                  detail={"batch_code": batch.batch_code, "biz_step": biz_step,
                          "anchor_status": event.anchor_status})
+    if new_state == "RECALLED":
+        propagate_recall(db, batch, actor_id, actor_role, org_id)
     return event
+
+
+def _related_batches(db: Session, batch: Batch, max_depth: int = 12
+                     ) -> tuple[list[Batch], list[Batch]]:
+    """Every ancestor and every descendant of a batch, across organisations.
+
+    Deliberately unscoped: a recall has to reach whoever holds product made from the batch,
+    whichever organisation that is. Only codes are disclosed, in the notifications.
+    """
+    ancestors: list[Batch] = []
+    seen = {batch.id}
+    current, depth = batch, 0
+    while current.parent_batch_id and depth < max_depth:
+        current = db.get(Batch, current.parent_batch_id)
+        if current is None or current.id in seen:
+            break
+        ancestors.append(current)
+        seen.add(current.id)
+        depth += 1
+    descendants: list[Batch] = []
+    frontier, depth = [batch.id], 0
+    while frontier and depth < max_depth:
+        children = [child for child in db.execute(select(Batch).where(
+            Batch.parent_batch_id.in_(frontier))).scalars() if child.id not in seen]
+        for child in children:
+            seen.add(child.id)
+        descendants.extend(children)
+        frontier = [child.id for child in children]
+        depth += 1
+    return ancestors, descendants
+
+
+def propagate_recall(db: Session, batch: Batch, actor_id: str | None, actor_role: str | None,
+                     org_id: str) -> dict[str, Any]:
+    """Tell every party to a recalled batch, and flag every batch made from it.
+
+    The owner, the custodian and the owners and holders of every parent and child batch are
+    notified, and so is every organisation that handled one of those batches on the way: named
+    as sender or receiver on a custody event, or as either end of a shipment. An intermediate
+    processor that passed the batch on may still hold part of it, or know where it went. Each
+    descendant batch is marked SUSPECT and carries an open COMPLIANCE alert, so product derived
+    from a recalled lot is visible as such wherever it now is.
+    """
+    ancestors, descendants = _related_batches(db, batch)
+    title = f"Batch {batch.batch_code} has been recalled"
+    related_batches = [batch, *ancestors, *descendants]
+    # org -> the batch its notification should point at (one the org can open).
+    recipients: dict[str, Batch] = {}
+    for related in related_batches:
+        for party in (related.org_id, related.custodian_org_id):
+            if party and party not in recipients:
+                recipients[party] = related
+    for party, subject in recipients.items():
+        body = (f"{batch.batch_code} was recalled. "
+                + (f"Your batch {subject.batch_code} is in its lineage; "
+                   f"check and quarantine the stock." if subject.id != batch.id
+                   else "Stop distribution and quarantine the stock."))
+        notifications.notify_org(db, party, "RECALL", title, body, "Batch", subject.id,
+                                 severity="HIGH")
+    # Earlier holders. They can no longer open the batch, so the notification points at a
+    # shipment they were party to where there is one, and otherwise carries the codes only.
+    by_id = {b.id: b for b in related_batches}
+    handlers: dict[str, tuple[Batch, Shipment | None]] = {}
+    for event in db.execute(select(SupplyChainEvent).where(
+            SupplyChainEvent.batch_id.in_(list(by_id)))
+            .order_by(SupplyChainEvent.occurred_at.asc())).scalars():
+        for party in (event.from_org_id, event.to_org_id):
+            if party and party not in recipients and party not in handlers:
+                handlers[party] = (by_id[event.batch_id], None)
+    for shipment in db.execute(select(Shipment).where(
+            Shipment.batch_id.in_(list(by_id))).order_by(Shipment.departed_at.asc())).scalars():
+        for party in (shipment.org_id, shipment.to_org_id):
+            if not party or party in recipients:
+                continue
+            handled, known = handlers.get(party, (by_id[shipment.batch_id], None))
+            handlers[party] = (handled, known or shipment)
+    for party, (handled, shipment) in handlers.items():
+        body = (f"{batch.batch_code} was recalled. Your organisation handled batch "
+                f"{handled.batch_code}"
+                + (" (this batch)" if handled.id == batch.id else ", which is in its lineage")
+                + ". Check whether any of that stock is still with you and tell whoever you "
+                  "passed it to.")
+        notifications.notify_org(db, party, "RECALL", title, body,
+                                 "Shipment" if shipment else None,
+                                 shipment.id if shipment else None, severity="HIGH")
+    # Matched on kind: any other open COMPLIANCE alert on the batch (a failed evaluation, a
+    # cold-chain excursion) used to suppress the recall alert entirely.
+    # notify=False: every user of the owner and custodian organisations has just had the
+    # RECALL notification above, so the category fan-out told their supply-chain operators and
+    # regulators twice (round 4). The platform-wide COMPLIANCE oversight roles, which the
+    # RECALL round does not reach, are told here instead.
+    if not notifications.has_open_alert(db, "COMPLIANCE", batch.id, kind="recall"):
+        notifications.raise_alert(
+            db, "COMPLIANCE", "HIGH", title,
+            detail=f"{len(descendants)} derived batch(es) flagged.", org_id=batch.org_id,
+            entity_type="Batch", entity_id=batch.id, reasons=["Batch recalled"], notify=False,
+            kind="recall", party_org_id=batch.custodian_org_id)
+        notifications.notify_parties(
+            db, [], "COMPLIANCE", title, f"{len(descendants)} derived batch(es) flagged.",
+            "Batch", batch.id, "HIGH", include_oversight=True,
+            exclude_org_ids=set(recipients) | set(handlers))
+    for child in descendants:
+        if child.integrity_status != "FAILED":
+            child.integrity_status = "SUSPECT"
+        if not notifications.has_open_alert(db, "COMPLIANCE", child.id,
+                                            kind="parent_recalled"):
+            notifications.raise_alert(
+                db, "COMPLIANCE", "HIGH",
+                f"Batch {child.batch_code} derives from recalled batch {batch.batch_code}",
+                detail="Quarantine the stock and decide whether to recall it too.",
+                org_id=child.org_id, entity_type="Batch", entity_id=child.id,
+                reasons=["Made from a recalled batch"], notify=False,
+                kind="parent_recalled", party_org_id=child.custodian_org_id)
+    db.flush()
+    audit.record(db, "supply.recall_propagated", actor_id=actor_id, actor_role=actor_role,
+                 org_id=org_id, entity_type="Batch", entity_id=batch.id,
+                 detail={"batch_code": batch.batch_code,
+                         "descendants": [b.batch_code for b in descendants],
+                         "ancestors": [b.batch_code for b in ancestors],
+                         "organisations_notified": len(recipients) + len(handlers)})
+    return {"descendants": descendants, "ancestors": ancestors,
+            "organisations": [*recipients, *handlers]}
+
+
+# The holder's first step after a shipment that shows the goods have reached it. Receiving is
+# the usual one, but a receiver that books the batch straight into storage (or processes it)
+# has equally taken delivery: each closes the open shipment with the arrival's side effects,
+# so a shipment can no longer stay IN_TRANSIT forever behind a `storing` event.
+SHIPMENT_CLOSING_STEPS = frozenset({"receiving", "storing", "transforming"})
+# The steps that book a handed-over batch in ("Hand-overs to book in").
+BOOKING_STEPS = SHIPMENT_CLOSING_STEPS
+
+
+def awaiting_booking(org_id: str | None) -> list[Any]:
+    """SQL conditions: a batch handed over to `org_id` (any holder when None) that has reached
+    it but that it has not booked in yet.
+
+    Held by someone other than its originator, not on the road (a batch IN_TRANSIT is counted
+    under "awaiting arrival" instead, by its shipment), and with no receiving, storing or
+    transforming event recorded by the holder since custody last moved to it.
+    """
+    handover = aliased(SupplyChainEvent)
+    handed_at = (select(func.max(handover.occurred_at))
+                 .where(handover.batch_id == Batch.id,
+                        handover.to_org_id == Batch.custodian_org_id)
+                 # Tied to the outer batch explicitly: nested inside `booked`, it was otherwise
+                 # given its own FROM batches and took the latest hand-over on the platform.
+                 .correlate(Batch)
+                 .scalar_subquery())
+    booked = select(SupplyChainEvent.id).where(
+        SupplyChainEvent.batch_id == Batch.id,
+        SupplyChainEvent.org_id == Batch.custodian_org_id,
+        SupplyChainEvent.biz_step.in_(BOOKING_STEPS),
+        or_(handed_at.is_(None), SupplyChainEvent.occurred_at >= handed_at)).correlate(Batch)
+    conditions = [Batch.custodian_org_id != Batch.org_id, Batch.state != "IN_TRANSIT",
+                  ~booked.exists()]
+    if org_id is not None:
+        conditions.append(Batch.custodian_org_id == org_id)
+    return conditions
+
+
+def gmo_lineage_ids() -> Any:
+    """SELECT of the ids of every batch with a GMO lineage, matching `lineage_gmo_event`: a GMO
+    event named on the batch, carried by its seed lot, or inherited from any ancestor batch.
+
+    A recursive CTE from the batches that carry an event themselves down through their
+    descendants; UNION (not UNION ALL) also stops a corrupted parent cycle from looping.
+    """
+    lot = aliased(SeedLot)
+    roots = (select(Batch.id.label("id"))
+             .outerjoin(lot, lot.id == Batch.seed_lot_id)
+             .where(or_(Batch.gmo_event_id.is_not(None), lot.gmo_event_id.is_not(None)))
+             .cte("gmo_lineage", recursive=True))
+    child = aliased(Batch)
+    tree = roots.union(select(child.id).where(child.parent_batch_id == roots.c.id))
+    return select(tree.c.id)
+
+
+def _deliver_open_shipments(db: Session, batch: Batch, arrived_at: datetime, org_id: str,
+                            actor_id: str | None, actor_role: str | None,
+                            location_name: str | None = None) -> None:
+    arrived = _aware(arrived_at)
+    for shipment in list(db.execute(select(Shipment).where(
+            Shipment.batch_id == batch.id, Shipment.status == "IN_TRANSIT")).scalars()):
+        shipment.status = "DELIVERED"
+        shipment.arrived_at = max(arrived, _aware(shipment.departed_at))
+        db.flush()
+        _shipment_arrived(db, shipment, org_id, actor_id, actor_role, location_name)
+    db.flush()
+
+
+def _shipment_arrived(db: Session, shipment: Shipment, org_id: str, actor_id: str | None,
+                      actor_role: str | None, location_name: str | None) -> None:
+    """Side effects of a shipment arriving, however its arrival was recorded: the shipment's
+    temperature range is fixed from its readings, the arrival is audited, and the sender of a
+    hand-over is told."""
+    refresh_shipment_temperatures(db, shipment)
+    audit.record(db, "supply.shipment_arrived", actor_id=actor_id, actor_role=actor_role,
+                 org_id=org_id, entity_type="Shipment", entity_id=shipment.id,
+                 detail={"sscc": shipment.sscc, "batch_id": shipment.batch_id})
+    if shipment.to_org_id and shipment.org_id != org_id:
+        notifications.notify_org(
+            db, shipment.org_id, "SHIPMENT", f"Shipment {shipment.sscc} arrived",
+            f"Received at {location_name or shipment.destination_name}.", "Shipment",
+            shipment.id)
+    if shipment.to_org_id:
+        _settle_handover_notifications(db, shipment.to_org_id, shipment.batch_id)
+
+
+def _settle_handover_notifications(db: Session, receiver_org_id: str, batch_id: str) -> None:
+    """The receiver's "handed over to you" notification asks it to mark the batch arrived;
+    once it has arrived nothing is left to do, so it is marked read for every user of the
+    receiving organisation rather than lingering in the unread count."""
+    db.execute(
+        update(Notification)
+        .where(Notification.category == "HANDOVER", Notification.entity_type == "Batch",
+               Notification.entity_id == batch_id, Notification.read_at.is_(None),
+               Notification.user_id.in_(select(User.id).where(User.org_id == receiver_org_id)))
+        .values(read_at=utcnow())
+        .execution_options(synchronize_session=False))
 
 
 def transfer_custody(db: Session, batch: Batch, from_org_id: str, to_org_id: str,
                      occurred_at: datetime) -> dict[str, Any]:
     receiving = db.get(Organization, to_org_id)
-    if receiving is None:
+    if receiving is None or not receiving.is_active:
         raise NotFound("Receiving organisation not found")
     receipt = ledger_client.submit(
         "provenance", "TransferCustody",
         {"batch_code": batch.batch_code, "from_org": _msp_for(db, from_org_id),
          "to_org": receiving.msp_id, "occurred_at": _aware(occurred_at).isoformat()},
-        _msp_for(db, from_org_id))
-    if receipt.get("ok"):
-        batch.custodian_org_id = to_org_id
-        db.flush()
+        _msp_for(db, from_org_id), db=db)
+    if receipt.get("status") == "REJECTED":
+        # The contract refused the hand-over: fail the whole request (nothing is committed),
+        # so the caller is never told a transfer happened when it did not.
+        raise ValidationFailed(receipt.get("detail", "The ledger rejected the custody transfer"))
+    # Anchored, or PENDING/FAILED because the ledger is degraded: the database is the system
+    # of record for who holds the batch, exactly as for every other write that anchors
+    # asynchronously, so the hand-over takes effect and the ledger status is audited.
+    batch.custodian_org_id = to_org_id
+    db.flush()
+    # The batch's open alerts and active incidents follow it to the new holder, and the
+    # previous holder, which can no longer open the batch, stops seeing them (round 4).
+    notifications.sync_custodian(db, "Batch", batch.id, batch.org_id, to_org_id)
+    if not receipt.get("ok"):
+        audit.record(db, "supply.custody_transfer_unanchored", actor_id=None, actor_role=None,
+                     org_id=from_org_id, entity_type="Batch", entity_id=batch.id,
+                     detail={"batch_code": batch.batch_code, "to_org": receiving.msp_id,
+                             "ledger_status": receipt.get("status")})
+    notifications.notify_org(
+        db, to_org_id, "HANDOVER", f"Batch {batch.batch_code} handed over to you",
+        f"{notifications.human_quantity(batch.quantity, batch.unit)}. "
+        + ("Mark it arrived when it reaches you." if batch.state == "IN_TRANSIT"
+           else "Record its receipt to continue the chain of custody."), "Batch", batch.id)
     return receipt
+
+
+def batch_context(db: Session, batch: Batch, events: list[SupplyChainEvent]) -> dict[str, Any]:
+    """Who the batch belongs to, who holds it, where it was grown and its GMO lineage.
+
+    Every party to a batch needs this to act on it, but the farm, the developer's GMO event and
+    the other organisations are not readable through their own scoped endpoints. Only
+    names, codes and approval states are returned, never the underlying records.
+    """
+    org_ids = {batch.org_id, batch.custodian_org_id}
+    org_ids |= {e.from_org_id for e in events if e.from_org_id}
+    org_ids |= {e.to_org_id for e in events if e.to_org_id}
+    organisations = {o.id: o.name for o in db.execute(
+        select(Organization).where(Organization.id.in_(org_ids))).scalars()}
+    farm = db.get(Farm, batch.farm_id) if batch.farm_id else None
+    if farm is not None and farm.org_id not in {batch.org_id, batch.custodian_org_id}:
+        # A farm id is accepted on existence alone when a batch is created, so naming a
+        # stranger's farm must not be a way to read its name and location back.
+        farm = None
+    event = gmo_service.lineage_gmo_event(db, batch)
+    gmo = None
+    if event is not None:
+        approvals = db.execute(select(GMOApproval).where(
+            GMOApproval.gmo_event_id == event.id)).scalars()
+        gmo = {"event_code": event.event_code, "crop_type": event.crop_type,
+               "trait": event.trait, "developer": event.developer,
+               "approvals": [{"jurisdiction": a.jurisdiction, "status": a.status,
+                              "expires_at": a.expires_at.isoformat() if a.expires_at else None}
+                             for a in approvals]}
+    product = db.get(Product, batch.product_id)
+    return {
+        "owner": {"id": batch.org_id, "name": organisations.get(batch.org_id)},
+        "custodian": {"id": batch.custodian_org_id,
+                      "name": organisations.get(batch.custodian_org_id)},
+        "organisations": organisations,
+        "farm": {"name": farm.name, "region": farm.region, "country": farm.country}
+                if farm else None,
+        "product": {"name": product.name, "gtin": product.gtin} if product else None,
+        "gmo": gmo,
+    }
 
 
 def chain_of_custody(db: Session, batch: Batch) -> list[SupplyChainEvent]:
@@ -295,24 +829,135 @@ def lineage(db: Session, batch: Batch, role: str | None = None, org_id: str | No
 # --------------------------------------------------------------------------- #
 # Shipments
 # --------------------------------------------------------------------------- #
-def create_shipment(db: Session, org_id: str, actor_id: str, actor_role: str, **kwargs) -> Shipment:
+def create_shipment(db: Session, org_id: str, actor_id: str, actor_role: str, *,
+                    to_org_id: str | None = None, **kwargs) -> Shipment:
+    """Ship a batch: the `shipping` event, the custody hand-over and the shipment, together.
+
+    Recording a hand-over first and the shipment afterwards could not work, because the
+    hand-over moves custody and only the holder may ship. So the shipment is the hand-over:
+    custody moves to `to_org_id` when the shipment is created, and the receiver marks it
+    arrived (`arrive_shipment`), which records the batch's `receiving` event.
+    """
     if db.execute(select(Shipment).where(Shipment.sscc == kwargs["sscc"])).scalar_one_or_none():
         raise Conflict(f"Shipment {kwargs['sscc']} already exists")
-    # A shipment must reference a batch the caller actually holds (audit P1).
+    # A shipment must reference a batch the caller actually holds (audit P1). Visibility is
+    # not enough: the producer still sees a batch after handing it over, but no longer holds it.
     batch = get_or_404(db, Batch, kwargs["batch_id"], actor_role, org_id, name="Batch")
+    if not _is_cross_tenant(actor_role) and batch.custodian_org_id != org_id:
+        raise PermissionDenied("Only the organisation currently holding this batch may ship it")
+    require_releasable(db, batch, "shipped")
     arrived = _aware(kwargs.get("arrived_at"))
     departed = _aware(kwargs["departed_at"])
+    require_not_future(departed, "departure date")
+    require_not_future(arrived, "arrival date")
     if arrived and arrived < departed:
-        raise ValidationFailed("arrived_at must not precede departed_at")
+        raise ValidationFailed("The arrival date cannot be before the departure date.")
+    if to_org_id == batch.custodian_org_id:
+        to_org_id = None                     # shipping to yourself is an internal move
+    if to_org_id:
+        require_receiver(db, to_org_id)
+        if arrived:
+            raise ValidationFailed(
+                "A shipment to another organisation is marked arrived by the receiver; "
+                "leave arrived_at empty")
+    device_id = kwargs.get("cold_chain_device_id")
+    if device_id:
+        device = db.get(Device, device_id)
+        if (device is None or device.deleted_at is not None
+                or device.org_id not in {org_id, batch.custodian_org_id}):
+            raise NotFound("Cold-chain sensor not found")
+        busy = db.execute(select(Shipment.sscc).where(
+            Shipment.cold_chain_device_id == device_id,
+            Shipment.status == "IN_TRANSIT")).first()
+        if busy is not None and not arrived:
+            raise Conflict(f"That sensor is already travelling with shipment {busy[0]}")
+    require_batch_transition(batch.state, "IN_TRANSIT")
+
+    # The batch's shipping event, carrying the hand-over. If the holder already recorded a
+    # shipping event without a hand-over, an internal shipment aligns with it instead of
+    # repeating it. A hand-over always gets its own shipping event naming the receiver
+    # (round 6): moving custody with no event recording to_org_id left the hand-over out of
+    # the chain of custody, so the receiver's next step could be dated before it.
+    already_shipping = batch.state == "IN_TRANSIT"
+    if not already_shipping or to_org_id:
+        record_event(db, org_id, actor_id, actor_role, batch, "shipping", "in_transit", "OBJECT",
+                     None, kwargs["origin_name"], kwargs["origin_lat"], kwargs["origin_lon"],
+                     None, None, to_org_id, departed, {"sscc": kwargs["sscc"]})
+    else:
+        require_chronology(db, batch, departed, "shipping")
+
     kwargs["departed_at"] = departed
-    kwargs["arrived_at"] = arrived
-    shipment = Shipment(org_id=org_id, status="DELIVERED" if arrived else "IN_TRANSIT", **kwargs)
+    kwargs["arrived_at"] = None
+    shipment = Shipment(org_id=org_id, to_org_id=to_org_id, status="IN_TRANSIT", **kwargs)
     db.add(shipment)
     db.flush()
     audit.record(db, "supply.create_shipment", actor_id=actor_id, actor_role=actor_role,
                  org_id=org_id, entity_type="Shipment", entity_id=shipment.id,
-                 detail={"sscc": shipment.sscc, "batch_id": shipment.batch_id})
+                 detail={"sscc": shipment.sscc, "batch_id": shipment.batch_id,
+                         "to_org_id": to_org_id})
+    if arrived:
+        # A completed internal move entered after the fact.
+        arrive_shipment(db, shipment, org_id, actor_id, actor_role, arrived)
     return shipment
+
+
+def arrive_shipment(db: Session, shipment: Shipment, org_id: str, actor_id: str,
+                    actor_role: str, arrived_at: datetime,
+                    location_name: str | None = None) -> Shipment:
+    """The receiver marks a shipment arrived, which records the batch's `receiving` event."""
+    if shipment.status != "IN_TRANSIT":
+        raise Conflict(f"Shipment {shipment.sscc} is {shipment.status}, not in transit")
+    receiver = shipment.to_org_id or shipment.org_id
+    if not _is_cross_tenant(actor_role) and org_id != receiver:
+        raise PermissionDenied("Only the receiving organisation may mark this shipment arrived")
+    arrived = _aware(arrived_at)
+    require_not_future(arrived, "arrival date")
+    if arrived < _aware(shipment.departed_at):
+        raise ValidationFailed(
+            f"Choose an arrival date on or after {human_when(shipment.departed_at)} — when "
+            f"shipment {shipment.sscc} departed.")
+    batch = db.get(Batch, shipment.batch_id)
+    # Closed first, so the receiving event's own shipment sync finds nothing left to close.
+    shipment.status = "DELIVERED"
+    shipment.arrived_at = arrived
+    db.flush()
+    if batch is not None and batch.state == "IN_TRANSIT":
+        record_event(db, batch.custodian_org_id if _is_cross_tenant(actor_role) else org_id,
+                     actor_id, actor_role, batch, "receiving", "in_storage", "OBJECT", None,
+                     location_name or shipment.destination_name, shipment.destination_lat,
+                     shipment.destination_lon, None, None, None, arrived,
+                     {"sscc": shipment.sscc})
+    _shipment_arrived(db, shipment, org_id, actor_id, actor_role, location_name)
+    return shipment
+
+
+def shipment_views(db: Session, shipments: list[Shipment]) -> list[dict[str, Any]]:
+    """Shipments with their batch code, product and cold-chain verdict, for display."""
+    batch_ids = {s.batch_id for s in shipments}
+    batches = {b.id: b for b in db.execute(
+        select(Batch).where(Batch.id.in_(batch_ids))).scalars()} if batch_ids else {}
+    product_ids = {b.product_id for b in batches.values()}
+    products = {p.id: p for p in db.execute(
+        select(Product).where(Product.id.in_(product_ids))).scalars()} if product_ids else {}
+    views = []
+    for shipment in shipments:
+        batch = batches.get(shipment.batch_id)
+        product = products.get(batch.product_id) if batch else None
+        low = product.storage_temp_min_c if product else None
+        high = product.storage_temp_max_c if product else None
+        excursion = None
+        if shipment.temp_min_c is not None and (low is not None or high is not None):
+            excursion = (cold_chain.outside(shipment.temp_min_c, low, high)
+                         or cold_chain.outside(shipment.temp_max_c, low, high))
+        views.append({
+            **{column: getattr(shipment, column) for column in (
+                "id", "sscc", "batch_id", "org_id", "to_org_id", "carrier", "origin_name",
+                "destination_name", "departed_at", "arrived_at", "status", "temp_min_c",
+                "temp_max_c", "cold_chain_device_id")},
+            "batch_code": batch.batch_code if batch else None,
+            "product_name": product.name if product else None,
+            "storage_temp_min_c": low, "storage_temp_max_c": high, "excursion": excursion})
+    return views
 
 
 def refresh_shipment_temperatures(db: Session, shipment: Shipment) -> Shipment:
@@ -345,13 +990,14 @@ def issue_certification(db: Session, issuer_org_id: str, actor_id: str, actor_ro
     trusted = [t.upper() for t in (issuer.trusted_issuer_types or [])]
     if cert_type not in trusted:
         raise ValidationFailed(
-            f"{issuer.name} is not a trusted issuer for {cert_type} certifications "
-            f"(trusted for: {trusted or 'none'})")
+            f"{issuer.name} is not a trusted issuer for "
+            f"{notifications.human_status(cert_type)} certifications (trusted for: "
+            f"{', '.join(notifications.human_status(t) for t in trusted) or 'none'})")
     if db.get(Organization, subject_org_id) is None:
         raise NotFound("Subject organisation not found")
     valid_from, valid_to = _aware(valid_from), _aware(valid_to)
     if valid_to <= valid_from:
-        raise ValidationFailed("valid_to must be after valid_from")
+        raise ValidationFailed("The end date must be after the start date.")
 
     certification = Certification(
         cert_code=cert_code, cert_type=cert_type, standard=standard,
@@ -368,7 +1014,7 @@ def issue_certification(db: Session, issuer_org_id: str, actor_id: str, actor_ro
         {"cert_code": cert_code, "cert_type": cert_type, "standard": standard,
          "subject": subject_org_id, "valid_from": valid_from.isoformat(),
          "valid_to": valid_to.isoformat(), "content_hash": digest},
-        _msp_for(db, issuer_org_id))
+        _msp_for(db, issuer_org_id), db=db, entity=certification)
     if receipt.get("status") == "REJECTED":
         # The chaincode restricts certification.Issue to RegulatorMSP. Recording the rejection
         # as an anchor_status left an ACTIVE certification in the database that the ledger had
@@ -382,7 +1028,42 @@ def issue_certification(db: Session, issuer_org_id: str, actor_id: str, actor_ro
                  entity_type="Certification", entity_id=certification.id,
                  detail={"cert_code": cert_code, "cert_type": cert_type,
                          "subject_org_id": subject_org_id})
+    notifications.notify_org(
+        db, subject_org_id, "CERTIFICATION",
+        f"Certification {cert_code} issued to you",
+        f"{issuer.name} issued {notifications.with_article(notifications.human_status(cert_type))} "
+        f"certification ({standard}) for: {scope}. "
+        f"Valid from {notifications.human_date(valid_from)} to "
+        f"{notifications.human_date(valid_to)}. You can now "
+        f"claim it on batches you own or hold.", "Certification", certification.id)
     return certification
+
+
+def effective_status(certification: Certification, now: datetime | None = None) -> str:
+    """The status a reader should see. A certificate stored ACTIVE but past its valid_to is
+    EXPIRED even before the scheduled sweep has persisted that."""
+    if certification.status == "ACTIVE" \
+            and _aware(certification.valid_to) < (now or utcnow()):
+        return "EXPIRED"
+    return certification.status
+
+
+def linked_batches(db: Session, certification: Certification) -> list[Batch]:
+    return list(db.execute(select(Batch).join(
+        CertificationLink, CertificationLink.batch_id == Batch.id).where(
+        CertificationLink.certification_id == certification.id)
+        .order_by(Batch.batch_code.asc())).scalars())
+
+
+def certification_parties(db: Session, certification: Certification,
+                          batches: list[Batch] | None = None) -> set[str]:
+    """Everyone a change to the certificate concerns: the issuer, the certified organisation,
+    and the owner and holder of every batch it is claimed on."""
+    batches = linked_batches(db, certification) if batches is None else batches
+    parties = {certification.issuer_org_id, certification.subject_org_id}
+    for batch in batches:
+        parties |= {batch.org_id, batch.custodian_org_id}
+    return {p for p in parties if p}
 
 
 def revoke_certification(db: Session, certification: Certification, actor_id: str,
@@ -395,22 +1076,108 @@ def revoke_certification(db: Session, certification: Certification, actor_id: st
     db.flush()
     receipt = ledger_client.submit(
         "certification", "Revoke", {"cert_code": certification.cert_code, "reason": reason},
-        _msp_for(db, certification.issuer_org_id))
+        _msp_for(db, certification.issuer_org_id), db=db)
     db.flush()
     audit.record(db, "cert.revoke", actor_id=actor_id, actor_role=actor_role,
                  org_id=certification.issuer_org_id, entity_type="Certification",
                  entity_id=certification.id,
                  detail={"reason": reason, "anchored": bool(receipt.get("ok"))})
 
-    for link in db.execute(select(CertificationLink).where(
-            CertificationLink.certification_id == certification.id)).scalars():
-        batch = db.get(Batch, link.batch_id)
-        if batch:
-            notifications.raise_alert(
-                db, "CERTIFICATION", "HIGH",
-                f"Certification {certification.cert_code} revoked; batch {batch.batch_code} affected",
-                detail=reason, org_id=batch.org_id, entity_type="Batch", entity_id=batch.id)
+    batches = linked_batches(db, certification)
+    for batch in batches:
+        # A VERIFIED verdict was reached while this certificate was valid, so it no longer
+        # stands. UNVERIFIED rather than SUSPECT: a revocation is not evidence that the batch
+        # itself was tampered with, and SUSPECT is the fraud model's verdict, which drives fraud
+        # alerts and dashboards. UNVERIFIED says "re-verify"; the next integrity check sees the
+        # revoked claim and reaches an evidence-based verdict. A worse verdict is left alone.
+        if batch.integrity_status == "VERIFIED":
+            batch.integrity_status = "UNVERIFIED"
+        notifications.raise_alert(
+            db, "CERTIFICATION", "HIGH",
+            f"Certification {certification.cert_code} revoked; batch {batch.batch_code} affected",
+            detail=reason, org_id=batch.org_id, entity_type="Batch", entity_id=batch.id,
+            notify=False, kind=f"cert_revoked:{certification.cert_code}"[:80],
+            party_org_id=batch.custodian_org_id)
+    db.flush()
+    claimed = ", ".join(b.batch_code for b in batches[:20])
+    notifications.notify_parties(
+        db, certification_parties(db, certification, batches), "CERTIFICATION",
+        f"Certification {certification.cert_code} revoked",
+        f"Reason: {reason}."
+        + (f" Claimed on: {claimed}. Those batches must be re-verified and may no longer "
+           f"carry the {notifications.human_status(certification.cert_type)} claim."
+           if claimed else " It was not claimed on any batch."),
+        "Certification", certification.id, severity="HIGH", include_oversight=True)
     return certification
+
+
+def sweep_certification_expiry(db: Session, warn_days: int = 30) -> dict[str, int]:
+    """Expire certificates past valid_to and warn about those expiring within `warn_days`.
+
+    Both reach the certified organisation and every holder of a batch the certificate is
+    claimed on, not only the issuer. Safe to run repeatedly: an expiry happens once (the status
+    leaves ACTIVE) and a warning is skipped while one is still open for the certificate.
+    """
+    from datetime import timedelta
+
+    now = utcnow()
+    horizon = now + timedelta(days=warn_days)
+    expired = warned = 0
+    for certification in list(db.execute(select(Certification).where(
+            Certification.status == "ACTIVE",
+            Certification.valid_to <= horizon)).scalars()):
+        valid_to = _aware(certification.valid_to)
+        batches = linked_batches(db, certification)
+        # Named only when there is one: "Claimed on: no batch." read as a broken sentence.
+        claimed = (f" Claimed on: {', '.join(b.batch_code for b in batches[:20])}."
+                   if batches else "")
+        if valid_to < now:
+            certification.status = "EXPIRED"
+            # Treated as revocation treats it (see revoke_certification): a VERIFIED verdict
+            # reached while the certificate was valid no longer stands, so the batch reads
+            # UNVERIFIED until it is re-verified. Not SUSPECT: an expiry is not evidence of
+            # tampering. A worse verdict is left alone.
+            for batch in batches:
+                if batch.integrity_status == "VERIFIED":
+                    batch.integrity_status = "UNVERIFIED"
+            db.flush()
+            audit.record(db, "cert.expire", actor_id=None, actor_role=None,
+                         org_id=certification.issuer_org_id, entity_type="Certification",
+                         entity_id=certification.id,
+                         detail={"cert_code": certification.cert_code,
+                                 "valid_to": valid_to.isoformat()})
+            # The "expires soon" warning has been overtaken by the expiry itself.
+            notifications.resolve_entity_alerts(db, "Certification", certification.id, None,
+                                                "Superseded: the certificate has expired")
+            notifications.raise_alert(
+                db, "CERTIFICATION", "WARNING",
+                f"Certification {certification.cert_code} has expired",
+                detail=f"Valid until {notifications.human_date(valid_to)}.{claimed}",
+                org_id=certification.subject_org_id, entity_type="Certification",
+                entity_id=certification.id, notify=False, open_incident=False)
+            notifications.notify_parties(
+                db, certification_parties(db, certification, batches), "CERTIFICATION",
+                f"Certification {certification.cert_code} has expired",
+                f"It was valid until {notifications.human_date(valid_to)} and no longer "
+                f"authenticates.{claimed}", "Certification", certification.id,
+                severity="WARNING")
+            expired += 1
+            continue
+        if notifications.has_open_alert(db, "CERTIFICATION", certification.id):
+            continue
+        notifications.raise_alert(
+            db, "CERTIFICATION", "WARNING",
+            f"Certification {certification.cert_code} expires soon",
+            detail=f"Valid until {notifications.human_date(valid_to)}.{claimed}",
+            org_id=certification.issuer_org_id, entity_type="Certification",
+            entity_id=certification.id, notify=False, open_incident=False)
+        notifications.notify_parties(
+            db, certification_parties(db, certification, batches), "CERTIFICATION",
+            f"Certification {certification.cert_code} expires soon",
+            f"Valid until {notifications.human_date(valid_to)}.{claimed}",
+            "Certification", certification.id, severity="WARNING")
+        warned += 1
+    return {"expired": expired, "expiring": warned}
 
 
 def link_certification(db: Session, certification: Certification, batch: Batch, actor_id: str,
@@ -420,13 +1187,16 @@ def link_certification(db: Session, certification: Certification, batch: Batch, 
     # attach ANY other organisation's certification id to it, forging an organic/non-GMO/
     # specialty claim they were never issued — the exact failure FR-D2 exists to prevent.
     # Unguessable UUIDs are not an authorisation boundary; this check is.
-    if certification.subject_org_id != batch.org_id:
+    # The producer and the current custodian are both parties to the batch: a processor that
+    # received it may claim its own processing certification on it.
+    if certification.subject_org_id not in {batch.org_id, batch.custodian_org_id}:
         raise PermissionDenied(
             f"Certification {certification.cert_code} was issued to a different "
             f"organisation and cannot be claimed on this batch")
-    if certification.status != "ACTIVE":
+    status = effective_status(certification)
+    if status != "ACTIVE":
         raise ValidationFailed(
-            f"Certification {certification.cert_code} is {certification.status}, not ACTIVE, "
+            f"Certification {certification.cert_code} is {status}, not ACTIVE, "
             f"and cannot be linked")
     if db.execute(select(CertificationLink).where(
             CertificationLink.certification_id == certification.id,
@@ -468,7 +1238,8 @@ def authenticate_certifications(db: Session, batch: Batch,
         scope_ok = True     # scope is free text in this implementation; see Known Limitations
         results.append({
             "cert_code": certification.cert_code, "cert_type": certification.cert_type,
-            "standard": certification.standard, "status": certification.status,
+            "standard": certification.standard,
+            "status": effective_status(certification, now),
             "issuer": issuer.name if issuer else "unknown", "issuer_trusted": trusted,
             "valid_from": valid_from, "valid_to": valid_to, "within_validity": in_window,
             "scope_matches": scope_ok,
@@ -506,6 +1277,17 @@ def verify_batch(db: Session, batch: Batch, actor_id: str | None = None,
         if result.get("result") == "MISMATCH":
             ledger_status = "MISMATCH"
             mismatches.append(f"event:{event.id}")
+
+    # Independent second opinion from the Hyperledger Fabric network, when connected.
+    # Informational: it does not change the fraud score, which the local check already drives.
+    fabric_status = None
+    if product is not None:
+        from . import fabric_bridge                                   # noqa: PLC0415
+
+        if fabric_bridge.enabled():
+            fabric_status = fabric_bridge.verify(
+                f"batch:{batch.batch_code}", content_hash(batch_content(batch, product))
+            ).get("result")
 
     telemetry_summary: dict[str, Any] = {}
     for shipment in shipments:
@@ -548,7 +1330,10 @@ def verify_batch(db: Session, batch: Batch, actor_id: str | None = None,
 
     integrity = {"VERIFIED": "VERIFIED", "SUSPECT": "SUSPECT", "FAILED": "FAILED"}[verdict["level"]]
     batch.integrity_status = integrity
-    db.add(FraudAssessment(batch_id=batch.id, org_id=batch.org_id, score=verdict["score"],
+    # Stored for both parties to the batch: the owner, and the custodian — usually the
+    # processor that ran the check, which otherwise could not read its own result.
+    db.add(FraudAssessment(batch_id=batch.id, org_id=batch.org_id,
+                           custodian_org_id=batch.custodian_org_id, score=verdict["score"],
                            level=verdict["level"], reasons=verdict["reasons"],
                            ledger_status=ledger_status, model_version=verdict["model_version"]))
     db.flush()
@@ -562,16 +1347,26 @@ def verify_batch(db: Session, batch: Batch, actor_id: str | None = None,
                              "rules": verdict["rules_triggered"]})
 
     if integrity != "VERIFIED":
-        notifications.raise_alert(
+        # kind="fraud": re-verifying a batch that still fails folds into the open alert
+        # (escalating it from SUSPECT to FAILED) instead of stacking another one.
+        notifications.alert_parties(
             db, "FRAUD", "CRITICAL" if integrity == "FAILED" else "HIGH",
-            f"Supply-chain integrity {integrity} for batch {batch.batch_code}",
-            detail="; ".join(r["detail"] for r in verdict["reasons"][:3]),
-            org_id=batch.org_id, entity_type="Batch", entity_id=batch.id,
-            reasons=[r["rule"] for r in verdict["reasons"]])
+            f"Supply-chain integrity check flagged batch {batch.batch_code}",
+            detail=f"Verdict: {integrity.lower()}. "
+                   + "; ".join(r["detail"] for r in verdict["reasons"][:3]),
+            org_id=batch.org_id, party_org_ids=[batch.custodian_org_id],
+            entity_type="Batch", entity_id=batch.id,
+            reasons=[r["rule"] for r in verdict["reasons"]], kind="fraud",
+            party_org_id=batch.custodian_org_id)
+    else:
+        notifications.resolve_alerts(
+            db, "FRAUD", batch.id, kind="fraud", actor_id=actor_id,
+            note="A later integrity check verified the batch")
 
     return {
         "integrity_status": integrity, "fraud_score": verdict["score"],
         "fraud_level": verdict["level"], "ledger_status": ledger_status,
+        "fabric_status": fabric_status,
         "ledger_mismatches": mismatches, "reasons": verdict["reasons"],
         "events_checked": len(events), "certifications_checked": len(certifications),
         "verified_at": utcnow(), "model_version": verdict["model_version"],

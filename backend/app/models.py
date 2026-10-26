@@ -170,6 +170,11 @@ class Device(Base):
     auth_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     quarantine_reason: Mapped[str | None] = mapped_column(Text)
+    # Set by the health sweep when an ACTIVE device has missed several reporting intervals,
+    # cleared by its next accepted reading. The lifecycle status stays ACTIVE (the device must
+    # still be able to authenticate to come back), so "active and reporting" is
+    # status == ACTIVE and offline_since IS NULL.
+    offline_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime] = _created()
@@ -229,6 +234,15 @@ class SatelliteScene(Base):
     cloud_cover_pct: Mapped[float] = mapped_column(Float, nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     is_simulated: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Drone / OpenDroneMap imagery (migration 0002). `index_name` says which vegetation index
+    # the ndvi_* columns hold: true NDVI needs a near-infrared band, an RGB drone camera gives
+    # VARI instead. `file_sha256` is the hash of the actual orthophoto file, anchored on the
+    # ledger so the imagery itself can be proven unaltered later.
+    source: Mapped[str | None] = mapped_column(String(20), default="SATELLITE")
+    index_name: Mapped[str | None] = mapped_column(String(10), default="NDVI")
+    file_sha256: Mapped[str | None] = mapped_column(String(64))
+    footprint_geojson: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    anchor_tx_id: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = _created()
 
 
@@ -255,6 +269,11 @@ class Alert(Base):
     __tablename__ = "alerts"
     id: Mapped[str] = _pk()
     org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"), index=True)
+    # A second organisation the alert concerns: the custodian of a batch owned by org_id.
+    # repositories.PARTY_COLUMNS makes the alert visible (and workable) there too, so the
+    # processor holding a recalled or failing batch sees its alert, not only the farm.
+    custodian_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"),
+                                                         index=True)
     category: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     severity: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -267,6 +286,12 @@ class Alert(Base):
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     incident_id: Mapped[str | None] = mapped_column(ForeignKey("incidents.id"), index=True)
+    # Discriminator within category + entity ("low_battery", "silent", "anomaly", ...). An
+    # unresolved alert with the same (category, entity_id, kind) absorbs a repeat occurrence
+    # instead of a new row being raised (notifications.raise_alert).
+    kind: Mapped[str | None] = mapped_column(String(80), index=True)
+    occurrences: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _created()
 
 
@@ -280,6 +305,17 @@ class Incident(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     root_cause: Mapped[str | None] = mapped_column(Text)
     opened_by: Mapped[str | None] = mapped_column(String(36))
+    # What the incident is about: the category of the alert that opened it, and the record
+    # that alert was raised against (a Device, a SequenceScreening, a Batch, ...).
+    category: Mapped[str | None] = mapped_column(String(40), index=True)
+    entity_type: Mapped[str | None] = mapped_column(String(40))
+    entity_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    source_alert_id: Mapped[str | None] = mapped_column(String(36))
+    # Copied from the alert that opened it: the custodian of the batch the incident is about
+    # reads it too (repositories.PARTY_COLUMNS).
+    custodian_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"),
+                                                         index=True)
+    assignee_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
@@ -462,6 +498,10 @@ class SeedLot(Base):
     content_hash: Mapped[str | None] = mapped_column(String(64))
     tx_id: Mapped[str | None] = mapped_column(String(64), index=True)
     anchor_status: Mapped[str] = mapped_column(String(16), default="PENDING", nullable=False)
+    # The organisation currently holding the seed (the developer until it is supplied to a
+    # farm). Like Batch.custodian_org_id, it makes the lot visible to that organisation.
+    custodian_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"),
+                                                         index=True)
     created_at: Mapped[datetime] = _created()
     __table_args__ = (CheckConstraint("quantity_kg >= 0", name="ck_seedlot_qty"),)
 
@@ -548,8 +588,13 @@ class SupplyChainEvent(Base):
 
 class Shipment(Base):
     __tablename__ = "shipments"
+    # Both ends of a shipment are parties to it: the sender (org_id) and, for a hand-over, the
+    # receiver (to_org_id). repositories.scoped() reads this to make the row visible to both.
+    __party_columns__ = ("org_id", "to_org_id")
     id: Mapped[str] = _pk()
     org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    # Receiving organisation when the shipment hands the batch over; NULL for an internal move.
+    to_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"), index=True)
     sscc: Mapped[str] = mapped_column(String(18), unique=True, nullable=False, index=True)
     batch_id: Mapped[str] = mapped_column(ForeignKey("batches.id"), nullable=False, index=True)
     carrier: Mapped[str] = mapped_column(String(160), nullable=False)
@@ -605,6 +650,10 @@ class FraudAssessment(Base):
     id: Mapped[str] = _pk()
     batch_id: Mapped[str] = mapped_column(ForeignKey("batches.id"), nullable=False, index=True)
     org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    # The batch's custodian when the check ran (migration 0006). Usually the processor that ran
+    # it; repositories.scoped() makes the assessment visible to it as well as to the owner.
+    custodian_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"),
+                                                         index=True)
     score: Mapped[float] = mapped_column(Float, nullable=False)
     level: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     reasons: Mapped[list[Any]] = mapped_column(JSON, default=list)
@@ -616,7 +665,14 @@ class FraudAssessment(Base):
 class ComplianceReport(Base):
     __tablename__ = "compliance_reports"
     id: Mapped[str] = _pk()
+    # The organisation that ran the evaluation and anchored the report (often the regulator).
     org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    # The parties to the subject (migration 0006): a batch's owner and custodian, or a GMO
+    # event's developer. A report about a batch is as much theirs as the runner's, so
+    # repositories.scoped() makes it visible to them too.
+    owner_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"), index=True)
+    custodian_org_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"),
+                                                         index=True)
     report_type: Mapped[str] = mapped_column(String(40), default="COMPLIANCE", nullable=False)
     subject_type: Mapped[str] = mapped_column(String(40), nullable=False)
     subject_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
@@ -646,6 +702,43 @@ class BlockchainTx(Base):
     entity_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     entity_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     created_at: Mapped[datetime] = _created()
+
+
+class LedgerWrite(Base):
+    """Journal of every ledger submission made on behalf of a stored record (services/anchoring).
+
+    Keeps the exact (contract, function, args, submitter) so a write that could not be anchored
+    is replayed later in its original order, and records whether each anchored write reached
+    the Hyperledger Fabric mirror, so neither survives only in process memory.
+    """
+    __tablename__ = "ledger_writes"
+    __table_args__ = (Index("ix_ledger_writes_status_created", "anchor_status", "created_at"),)
+    id: Mapped[str] = _pk()
+    contract: Mapped[str] = mapped_column(String(40), nullable=False)
+    function: Mapped[str] = mapped_column(String(60), nullable=False)
+    args: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    submitter_msp: Mapped[str] = mapped_column(String(40), nullable=False)
+    # The world-state key this write creates or advances, and the keys it needs to exist.
+    # A write waits behind any unanchored earlier write to one of them.
+    chain_key: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    requires: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    entity_type: Mapped[str | None] = mapped_column(String(40))
+    entity_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    anchor_status: Mapped[str] = mapped_column(String(16), nullable=False)   # PENDING|FAILED|ANCHORED|REJECTED
+    tx_id: Mapped[str | None] = mapped_column(String(64))
+    block_number: Mapped[int | None] = mapped_column(Integer)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    anchored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Fabric mirror: NULL when the write carries no content hash; else PENDING|MIRRORED|FAILED.
+    fabric_key: Mapped[str | None] = mapped_column(String(160))
+    fabric_status: Mapped[str | None] = mapped_column(String(16), index=True)
+    fabric_tx_id: Mapped[str | None] = mapped_column(String(128))
+    fabric_error: Mapped[str | None] = mapped_column(Text)
+    fabric_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    mirrored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
 
 
 class AuditLog(Base):

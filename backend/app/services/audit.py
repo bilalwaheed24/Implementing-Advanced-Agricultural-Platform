@@ -106,7 +106,7 @@ def anchor_head(db: Session, submitter_msp: str) -> dict[str, Any]:
     if seq == 0:
         return {"ok": False, "detail": "Audit chain is empty"}
     return ledger_client.submit("compliance_anchor", "AnchorAuditHead",
-                                {"seq": seq, "head_hash": head_hash}, submitter_msp)
+                                {"seq": seq, "head_hash": head_hash}, submitter_msp, db=db)
 
 
 def count(db: Session) -> int:

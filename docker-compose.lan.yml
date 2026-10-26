@@ -1,0 +1,26 @@
+# LAN demo overlay — opt in, never the default.
+#
+#   LAN_IP=$(ip route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p') \
+#     docker compose -f docker-compose.yml -f docker-compose.lan.yml up -d
+#
+# Why this exists: the base stack publishes 127.0.0.1:8080 only, and a QR code built from
+# that request host encodes 127.0.0.1 — dead on a phone. For the walk-up demo the batch QR
+# has to resolve from another device on the same Wi-Fi, which needs two things: the port
+# reachable off the loopback, and an address printed into the code that is not 127.0.0.1.
+#
+# Applying this file publishes 8080 to every host on the network the laptop is joined to.
+# That is a deliberate act for the duration of a demo, not a setting to leave on. Restart
+# without this file to close it again. Note that Docker publishes ports through its own
+# iptables chain, so a ufw rule denying 8080 does not stop this.
+#
+# LAN_IP must be set; PUBLIC_BASE_URL is capped at 48 characters by the api's configuration
+# check (backend/app/core/config.py), which an address of this shape stays well inside.
+
+services:
+  frontend:
+    ports: !override ["0.0.0.0:8080:8080"]
+
+  api:
+    environment:
+      PUBLIC_BASE_URL: http://${LAN_IP:?set LAN_IP to this laptop's address on the Wi-Fi network}:8080
+      CORS_ORIGINS: http://127.0.0.1:8080,http://localhost:8080,http://${LAN_IP}:8080

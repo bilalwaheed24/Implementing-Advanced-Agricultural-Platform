@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
+from .core import request_flags
 from .core.config import get_settings
 from .core.errors import AppError, RateLimited, app_error_handler, problem, unhandled_handler
 from .core.logging_conf import (actor_id as actor_ctx, app_log, configure_logging,
@@ -125,6 +126,7 @@ def create_app() -> FastAPI:
     @application.middleware("http")
     async def access_recorder(request: Request, call_next):             # noqa: ANN001
         """Feed the agricultural data-theft detector (FR-A3)."""
+        flags = request_flags.begin()
         response = await call_next(request)
         principal = getattr(request.state, "principal", None)
         if principal is not None and request.url.path.startswith(settings.api_prefix):
@@ -138,7 +140,8 @@ def create_app() -> FastAPI:
                         session, principal.id, principal.org_id, request.url.path,
                         request.method, page_size, 0, response.status_code,
                         request.client.host if request.client else None,
-                        cross_tenant_attempt=(response.status_code == 403))
+                        cross_tenant_attempt=(response.status_code == 403
+                                              or flags.get("cross_tenant_probe", False)))
                     session.commit()
             except Exception:                                           # noqa: BLE001
                 pass                     # detection telemetry must never break a request

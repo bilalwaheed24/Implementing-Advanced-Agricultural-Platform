@@ -96,6 +96,15 @@ def telemetry_reading(device_type: str, when: datetime, rng: random.Random,
             "humidity_pct": round(max(0.0, min(100.0, 85 + rng.gauss(0, 3))), 1),
             "shock_g": round(max(0.0, abs(rng.gauss(0.4, 0.5))), 2),
         }
+    if device_type == "LAB_INSTRUMENT":
+        # A failing biosafety cabinet loses airflow and a failing freezer warms up; an
+        # attacker spoofing "all is well" tends to send values that are too stable or drifted.
+        return {
+            "chamber_temp_c": round(37.0 + rng.gauss(0, 0.15) + drift * 8, 2),
+            "co2_pct": round(max(0.0, 5.0 + rng.gauss(0, 0.1) + drift * 4), 2),
+            "cabinet_airflow_ms": round(max(0.0, 0.45 + rng.gauss(0, 0.02) - drift * 0.3), 3),
+            "freezer_temp_c": round(-80.0 + rng.gauss(0, 1.2) + drift * 50, 1),
+        }
     raise ValueError(f"Unknown device type {device_type}")
 
 

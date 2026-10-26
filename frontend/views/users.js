@@ -1,18 +1,79 @@
-import { el, api, badge, fmtDate, table, titleCase, toast, can, empty, roleLabel } from '/static/assets/core.js';
+import { el, api, badge, fmtDate, fmtDay, table, toast, can, empty, roleLabel,
+         refreshView, session, orgName, humanize, orgTypeLabel } from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
+import { createPanel, choiceSelect } from '/static/views/formkit.js';
+
+const ORG_TYPES = ['FARM', 'SUPPLY', 'BIOTECH', 'REGULATOR']
+  .map((code) => [code, orgTypeLabel(code)]);
+
+/* Onboarding a new organisation, e.g. a farm joining the platform. */
+function addOrgPanel() {
+  const name = el('input', { required: 'required', maxlength: '200',
+    placeholder: 'e.g. Prairie Ridge Farms' });
+  const type = choiceSelect(ORG_TYPES);
+  const msp = el('input', { required: 'required', minlength: '3', maxlength: '40',
+    placeholder: 'ledger identity, e.g. PrairieRidgeMSP' });
+  const country = el('input', { maxlength: '2', minlength: '2', placeholder: 'e.g. US' });
+  return createPanel({
+    toggleLabel: 'Add organisation',
+    submitLabel: 'Create organisation',
+    primary: false,
+    hint: 'Creates the organisation and its ledger signing identity. Add its people next.',
+    controls: [['Name', name], ['Type', type], ['Ledger identity (MSP)', msp],
+      ['Country', country]],
+    submit: async () => {
+      const created = await api('/admin/organizations', { method: 'POST', body: {
+        name: name.value, org_type: type.value, msp_id: msp.value,
+        country: country.value ? country.value.toUpperCase() : null } });
+      return `Organisation ${created.name} created`;
+    },
+    onDone: () => refreshView(),
+  });
+}
+
+/* Onboarding a person into an organisation with a temporary password. */
+function addUserPanel(orgs) {
+  const email = el('input', { type: 'email', required: 'required', maxlength: '255' });
+  const fullName = el('input', { required: 'required', minlength: '2', maxlength: '200' });
+  const org = choiceSelect(orgs.map((o) => [o.id, `${o.name} (${orgTypeLabel(o.org_type)})`]));
+  const roleSelect = choiceSelect(ROLES.map((r) => [r, roleName(r)]), { value: 'FARM_OPERATOR' });
+  const password = el('input', { type: 'text', required: 'required', minlength: '12',
+    maxlength: '128', placeholder: 'temporary, at least 12 characters' });
+  return createPanel({
+    toggleLabel: 'Add user',
+    submitLabel: 'Create user',
+    primary: false,
+    hint: 'Ordinary roles can sign in at once. Privileged roles (administrator, security '
+      + 'analyst, biosafety officer, certifier, regulator) are created Pending and must be '
+      + 'approved below. Give the person the temporary password through a separate channel.',
+    controls: [['Email', email], ['Full name', fullName], ['Organisation', org],
+      ['Role', roleSelect], ['Temporary password', password]],
+    submit: async () => {
+      const created = await api('/admin/users', { method: 'POST', body: {
+        email: email.value, full_name: fullName.value, org_id: org.value,
+        role: roleSelect.value, password: password.value } });
+      return `${created.email} created (${humanize(created.status).toLowerCase()})`;
+    },
+    onDone: () => refreshView(),
+  });
+}
 
 async function orgsCard() {
   try {
-    const orgs = await api('/admin/organizations?page_size=20');
+    const orgs = await api('/admin/organizations?page_size=100');
     return el('div', { class: 'card' }, [
       el('h2', { text: 'Organisations' }),
       table([
         { label: 'Name', key: 'name' },
-        { label: 'Type', render: (row) => titleCase(row.org_type) },
+        { label: 'Type', render: (row) => orgTypeLabel(row.org_type) },
         { label: 'MSP identity', render: (row) => el('span', { class: 'mono', text: row.msp_id }) },
         { label: 'Trusted issuer for',
-          render: (row) => (row.trusted_issuer_types || []).map(titleCase).join(', ') || '—' },
+          render: (row) => (row.trusted_issuer_types || []).map((t) => humanize(t)).join(', ') || '—' },
       ], orgs.items),
+      el('div', { class: 'row u-toolbar u-mt-12' }, [
+        can('org:write') ? addOrgPanel() : null,
+        can('user:write') ? addUserPanel(orgs.items) : null,
+      ]),
     ]);
   } catch (error) {
     return el('div', { class: 'card' }, [el('p', { class: 'error-text', text: error.message })]);
@@ -23,16 +84,16 @@ const ROLES = ['ADMIN', 'SECURITY_ANALYST', 'FARM_OPERATOR', 'AGRONOMIST',
               'BIOTECH_RESEARCHER', 'BIOSAFETY_OFFICER', 'SUPPLY_CHAIN_OPERATOR',
               'CERTIFIER', 'REGULATOR'];
 
-function roleName(role) {
-  return String(role).toLowerCase().split('_')
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
-}
+/* One spelling of a role everywhere ("Administrator", not "Admin" in the menu and
+ * "Administrator" in the cell beside it). */
+const roleName = roleLabel;
 
 
 function roleCell(row, reload) {
-  if (!can('user:write')) return roleLabel(row.role);
+  // Your own role is not edited from here: demoting yourself would lock you out mid-session.
+  if (!can('user:write') || row.id === session.read()?.id) return roleLabel(row.role);
+  // The select shows the current role itself, so the role is not printed a second time.
   return el('div', { class: 'row' }, [
-    roleLabel(row.role),
     // A select, not a free-text prompt: a typo previously reached the API as an invalid role.
     el('select', { 'aria-label': `Role for ${row.email}`, onChange: async (event) => {
       const select = event.currentTarget;
@@ -72,7 +133,17 @@ function userActions(row, reload) {
       } catch (error) { toast(error.message, 'error'); }
     } }));
   }
-  if (row.status === 'ACTIVE') {
+  if (row.status === 'SUSPENDED') {
+    buttons.push(el('button', { text: 'Reactivate', onClick: async () => {
+      try {
+        await api(`/admin/users/${row.id}/approve`, { method: 'POST' });
+        toast('User reactivated', 'ok');
+        reload();
+      } catch (error) { toast(error.message, 'error'); }
+    } }));
+  }
+  // No Suspend on your own row: it would end the session you are using to administer.
+  if (row.status === 'ACTIVE' && row.id !== session.read()?.id) {
     buttons.push(el('button', { class: 'danger', text: 'Suspend', onClick: async () => {
       const reason = window.prompt('Reason for suspension:');
       if (!reason) return;
@@ -91,12 +162,17 @@ export const render = listView({
   subtitle: 'Privileged roles are created Pending and require administrator approval.',
   endpoint: '/admin/users',
   extra: orgsCard,
+  search: { key: 'q', placeholder: 'Name or email' },
   filters: [{ key: 'status', label: 'Status', options: ['PENDING', 'ACTIVE', 'SUSPENDED'] }],
   columns: [
-    { label: 'Name', key: 'full_name' },
+    { label: 'Name', render: (row) => (row.id === session.read()?.id
+      ? `${row.full_name} (you)` : row.full_name) },
     { label: 'Email', render: (row) => el('span', { class: 'mono', text: row.email }) },
+    // "(you)" belongs to the caller's own row, not to every colleague's organisation cell.
+    { label: 'Organisation', render: (row) => orgName(row.org_id, '—',
+      { ownSuffix: ' (your organisation)' }) },
     { label: 'Role', render: (row, { reload }) => roleCell(row, reload) },
-    { label: 'Joined', render: (row) => fmtDate(row.created_at) },
+    { label: 'Joined', render: (row) => fmtDay(row.created_at) },
     { label: 'Last login', render: (row) => fmtDate(row.last_login_at) },
     { label: 'Status', render: (row, { reload }) => userActions(row, reload) },
   ],

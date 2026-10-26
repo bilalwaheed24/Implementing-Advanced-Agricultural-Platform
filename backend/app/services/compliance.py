@@ -15,6 +15,7 @@ from ..core.errors import NotFound, PermissionDenied, ValidationFailed
 from ..core.security import ensure_aware as _aware, content_hash, utcnow
 from ..models import (Batch, ComplianceReport, GMOApproval, GMOEvent, Organization, Product,
                       SequenceScreening, SupplyChainEvent)
+from ..repositories import scoped
 from . import audit, gmo as gmo_service, ledger_client, notifications, supplychain
 
 DISCLAIMER = ("Automated evaluation of publicly published regulatory requirements. "
@@ -83,14 +84,16 @@ def rule_gmo_approval(db: Session, batch: Batch, ctx: dict) -> dict[str, Any]:
         GMOApproval.gmo_event_id == event.id,
         GMOApproval.jurisdiction == jurisdiction)).scalar_one_or_none()
     status = approval.status if approval else "NOT_SUBMITTED"
-    expired = bool(approval and approval.expires_at and _aware(approval.expires_at) < utcnow())
-    passed = status == "APPROVED" and not expired
+    expired = bool(approval and approval.expires_at and _aware(approval.expires_at) <= utcnow())
+    passed = gmo_service.is_live(approval)
     return _result(
         "GMO-001", "GMO approval in the destination jurisdiction",
         "EU 1829/2003 / USDA APHIS 7 CFR 340", passed, "CRITICAL",
-        f"Event {event.event_code} is approved in {jurisdiction}" if passed
+        f"Event {event.event_code} is approved in {notifications.jurisdiction_label(jurisdiction)}"
+        if passed
         else f"Event {event.event_code} has approval status {status}"
-             + (" and the approval has expired" if expired else "") + f" in {jurisdiction}",
+             + (" and the approval has expired" if expired else "")
+             + f" in {notifications.jurisdiction_label(jurisdiction)}",
         event_code=event.event_code, approval_status=status, expired=expired)
 
 
@@ -125,7 +128,7 @@ def rule_biosecurity_screening(db: Session, batch: Batch, ctx: dict) -> dict[str
     return _result(
         "BIO-001", "Biosecurity screening before release",
         "Internal biosafety policy / DURC oversight", passed, "CRITICAL",
-        f"Screening {screening.id[:8]} passed with verdict {screening.verdict}" if passed
+        f"Screening {screening.name} passed with verdict {screening.verdict}" if passed
         else "The GMO event has no screening in a passing state",
         screening_status=screening.status if screening else None,
         durc_flag=screening.durc_flag if screening else None)
@@ -262,21 +265,23 @@ def evaluate_batch(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
         "disclaimer": DISCLAIMER,
     }
 
+    # org_id is the organisation that ran and anchors the report; the batch's owner and
+    # custodian are parties to it too and read it through repositories.scoped().
     report = ComplianceReport(
-        org_id=org_id, report_type="COMPLIANCE", subject_type="BATCH", subject_id=batch.id,
+        org_id=org_id, owner_org_id=batch.org_id, custodian_org_id=batch.custodian_org_id,
+        report_type="COMPLIANCE", subject_type="BATCH", subject_id=batch.id,
         jurisdiction=jurisdiction, status=status, results=results, summary=summary,
         generated_by=actor_id)
     db.add(report)
     db.flush()
 
-    digest = content_hash({"subject": batch.batch_code, "jurisdiction": jurisdiction,
-                           "status": status, "results": results})
+    digest = content_hash(_compliance_content(batch.batch_code, jurisdiction, status, results))
     report.content_hash = digest
     receipt = ledger_client.submit(
         "compliance_anchor", "AnchorReport",
         {"report_id": report.id, "subject": batch.batch_code, "jurisdiction": jurisdiction,
          "status": status, "content_hash": digest},
-        _reporting_msp(db, org_id))
+        _reporting_msp(db, org_id), db=db, entity=report)
     gmo_service._apply_receipt(db, report, receipt, "ComplianceReport")
 
     audit.record(db, "compliance.evaluate", actor_id=actor_id, actor_role=actor_role,
@@ -285,20 +290,69 @@ def evaluate_batch(db: Session, batch: Batch, jurisdiction: str, actor_id: str,
                  detail={"batch_code": batch.batch_code, "jurisdiction": jurisdiction,
                          "status": status, "failed_rules": [r["rule_id"] for r in failed]})
 
+    # The alert belongs to the batch's owner (it is about their batch), and the owner, the
+    # custodian and the runner are all told. Previously it was filed under the runner — usually
+    # the regulator — so neither party to the batch saw it.
+    parties = [batch.custodian_org_id, org_id]
+    # One alert per batch and jurisdiction (kind): re-evaluating a batch that still fails
+    # folds into it rather than stacking a new alert and notification round, and a later
+    # COMPLIANT result resolves it.
+    kind = f"compliance:{jurisdiction}"[:80]
     if status != "COMPLIANT":
-        notifications.raise_alert(
+        notifications.alert_parties(
             db, "COMPLIANCE", "CRITICAL" if critical_failures else "HIGH",
-            f"Batch {batch.batch_code} is {status} in {jurisdiction}",
-            detail="; ".join(r["detail"] for r in failed[:3]), org_id=org_id,
-            entity_type="Batch", entity_id=batch.id,
-            reasons=[r["rule_id"] for r in failed])
+            f"Batch {batch.batch_code} is {notifications.human_status(status)} "
+            f"in {notifications.jurisdiction_label(jurisdiction)}",
+            detail="; ".join(r["detail"] for r in failed[:3]), org_id=batch.org_id,
+            party_org_ids=parties, entity_type="Batch", entity_id=batch.id,
+            reasons=[r["rule_id"] for r in failed], kind=kind,
+            party_org_id=batch.custodian_org_id)
+    else:
+        notifications.resolve_alerts(
+            db, "COMPLIANCE", batch.id, kind=kind, actor_id=actor_id,
+            note=f"A later evaluation found the batch compliant in "
+                 f"{notifications.jurisdiction_label(jurisdiction)}")
+        notifications.notify_parties(
+            db, [batch.org_id, *parties], "COMPLIANCE",
+            f"Batch {batch.batch_code} is compliant in "
+            f"{notifications.jurisdiction_label(jurisdiction)}",
+            f"All {len(results)} rules passed.", "Batch", batch.id)
     return report
 
 
-# Identities the compliance_anchor.AnchorReport chaincode function accepts
-# (ledger/contracts.py SUBMIT_RIGHTS). Kept in one place so the application and the
-# chaincode cannot drift apart silently.
-ANCHOR_RIGHTS = frozenset({"RegulatorMSP", "SupplyMSP"})
+def _compliance_content(subject_code: str, jurisdiction: str, status: str,
+                        results: list[dict[str, Any]]) -> dict[str, Any]:
+    """What a compliance report anchors. The subject is the batch's business code."""
+    return {"subject": subject_code, "jurisdiction": jurisdiction, "status": status,
+            "results": results}
+
+
+def _eia_content(subject_code: str, status: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
+    """What an environmental impact assessment anchors. The subject is the GMO event code."""
+    return {"subject": subject_code, "type": "EIA", "status": status, "results": findings}
+
+
+def report_digest(db: Session, report: ComplianceReport) -> str:
+    """Recompute a stored report's content hash exactly as it was anchored.
+
+    Verification used to hash the subject's database id where the anchor had hashed its
+    business code (batch code, GMO event code), so every report verified as MISMATCH. The
+    code is read back from the subject record; batch and event codes are immutable.
+    """
+    if report.subject_type == "GMO_EVENT" or report.report_type == "ENVIRONMENTAL_IMPACT":
+        event = db.get(GMOEvent, report.subject_id)
+        code = event.event_code if event else (report.summary or {}).get("event_code")
+        return content_hash(_eia_content(code, report.status, report.results))
+    batch = db.get(Batch, report.subject_id)
+    code = batch.batch_code if batch else (report.summary or {}).get("batch_code")
+    return content_hash(_compliance_content(code, report.jurisdiction, report.status,
+                                            report.results))
+
+
+# Organisation types the compliance_anchor.AnchorReport chaincode function accepts
+# (ledger/contracts.py, rights by organisation type). By type rather than MSP name, so an
+# organisation an administrator adds later — a second processor, a retailer — can anchor too.
+ANCHOR_RIGHTS = frozenset({"REGULATOR", "SUPPLY"})
 
 
 def _reporting_msp(db: Session, org_id: str) -> str:
@@ -313,10 +367,11 @@ def _reporting_msp(db: Session, org_id: str) -> str:
     organization = db.get(Organization, org_id)
     if organization is None:
         raise NotFound("Organisation not found")
-    if organization.msp_id not in ANCHOR_RIGHTS:
+    if organization.org_type not in ANCHOR_RIGHTS:
         raise PermissionDenied(
             f"{organization.name} ({organization.msp_id}) is not permitted to anchor compliance "
-            f"reports on the ledger. Permitted identities: {', '.join(sorted(ANCHOR_RIGHTS))}.")
+            f"reports on the ledger. Permitted organisation types: "
+            f"{', '.join(sorted(ANCHOR_RIGHTS))}.")
     return organization.msp_id
 
 
@@ -377,18 +432,19 @@ def environmental_impact(db: Session, event: GMOEvent, actor_id: str, actor_role
                "disclaimer": DISCLAIMER}
 
     report = ComplianceReport(
-        org_id=org_id, report_type="ENVIRONMENTAL_IMPACT", subject_type="GMO_EVENT",
+        org_id=org_id, owner_org_id=event.org_id,
+        report_type="ENVIRONMENTAL_IMPACT", subject_type="GMO_EVENT",
         subject_id=event.id, jurisdiction="US-USDA", status=status, results=findings,
         summary=summary, generated_by=actor_id)
     db.add(report)
     db.flush()
-    digest = content_hash({"subject": event.event_code, "type": "EIA", "status": status,
-                           "results": findings})
+    digest = content_hash(_eia_content(event.event_code, status, findings))
     report.content_hash = digest
     receipt = ledger_client.submit(
         "compliance_anchor", "AnchorReport",
         {"report_id": report.id, "subject": event.event_code, "jurisdiction": "US-USDA",
-         "status": status, "content_hash": digest}, _reporting_msp(db, org_id))
+         "status": status, "content_hash": digest}, _reporting_msp(db, org_id),
+        db=db, entity=report)
     gmo_service._apply_receipt(db, report, receipt, "ComplianceReport")
 
     audit.record(db, "compliance.eia", actor_id=actor_id, actor_role=actor_role, org_id=org_id,
@@ -398,9 +454,8 @@ def environmental_impact(db: Session, event: GMOEvent, actor_id: str, actor_role
 
 
 def dashboard(db: Session, org_id: str | None) -> dict[str, Any]:
-    query = select(ComplianceReport)
-    if org_id:
-        query = query.where(ComplianceReport.org_id == org_id)
+    # The same visibility as the report list: reports run by, or about batches of, the org.
+    query = scoped(ComplianceReport, org_id) if org_id else select(ComplianceReport)
     reports = list(db.execute(query).scalars())
     by_status: dict[str, int] = {}
     for report in reports:

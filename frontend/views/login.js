@@ -1,4 +1,4 @@
-import { el, api, session, toast } from '/static/assets/core.js';
+import { el, api, session, toast, roleLabel } from '/static/assets/core.js';
 
 const DEMO_ACCOUNTS = [
   ['admin@absp.demo', 'Administrator'],
@@ -38,7 +38,7 @@ export async function render() {
       session.write(tokens);
       const me = await api('/auth/me');
       session.write({ ...tokens, ...me });
-      toast(`Signed in as ${me.full_name} (${me.role})`, 'ok');
+      toast(`Signed in as ${me.full_name} (${roleLabel(me.role)})`, 'ok');
       window.location.hash = '#/dashboard';
     } catch (error) {
       errorNode.textContent = error.status === 429

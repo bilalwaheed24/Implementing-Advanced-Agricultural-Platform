@@ -1,9 +1,10 @@
 """Telemetry ingestion (device-authenticated) and the satellite pipeline (FR-A2)."""
 from __future__ import annotations
 
+import json
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request, Response, status
 
 from ..core.config import get_settings
 from ..core.deps import device_rate_limit, DbSession, PagingDep, client_ip, rate_limit, require_permission
@@ -121,14 +122,15 @@ def device_series(device_id: str, db: DbSession,
 
 
 @router.post("/satellite/scenes", response_model=SatelliteSceneOut, status_code=201,
-             summary="Ingest satellite scene metadata (checksum verified)")
+             summary="Ingest satellite or drone (OpenDroneMap) scene metadata, checksum verified")
 def ingest_scene(payload: SatelliteSceneCreate, db: DbSession,
                  principal: Annotated[object, Depends(require_permission(P.TELEMETRY_WRITE))],
                  _limit: None = Depends(rate_limit)) -> SatelliteSceneOut:
     scene = telemetry_service.ingest_scene(
         db, principal.org_id, principal.id, principal.role, payload.scene_id, payload.field_id,
         payload.provider, payload.captured_at, payload.ndvi_mean, payload.ndvi_min,
-        payload.ndvi_max, payload.cloud_cover_pct, payload.checksum)
+        payload.ndvi_max, payload.cloud_cover_pct, payload.checksum, payload.source,
+        payload.index_name, payload.file_sha256, payload.footprint_geojson)
     db.commit()
     return SatelliteSceneOut.model_validate(scene)
 
@@ -146,6 +148,16 @@ def list_scenes(db: DbSession, paging: PagingDep,
     rows, total = paginate(db, query, paging.page, paging.page_size)
     return Page[SatelliteSceneOut](items=[SatelliteSceneOut.model_validate(r) for r in rows],
                                    total=total, page=paging.page, page_size=paging.page_size)
+
+
+@router.get("/satellite/geojson", summary="Fields with their latest vegetation index, as GeoJSON for QGIS")
+def fields_geojson(db: DbSession,
+                   principal: Annotated[object, Depends(require_permission(P.TELEMETRY_READ))],
+                   _limit: None = Depends(rate_limit)) -> Response:
+    org_id = None if principal.is_cross_tenant else principal.org_id
+    collection = telemetry_service.fields_geojson(db, org_id)
+    return Response(content=json.dumps(collection, default=str), media_type="application/geo+json",
+                    headers={"Content-Disposition": 'attachment; filename="absp-fields.geojson"'})
 
 
 @router.get("/insights/field-stress", summary="Precision-farming field stress ranking")

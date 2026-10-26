@@ -1,9 +1,44 @@
 import { el, api, badge, fmtDate, table, empty, errorBox, toast } from '/static/assets/core.js';
 
+function fabricCard(fabric) {
+  if (!fabric) return null;
+  if (!fabric.enabled) {
+    return el('div', { class: 'card' }, [
+      el('h2', { text: 'Hyperledger Fabric network' }),
+      el('p', { class: 'hint', text: 'Not connected. When a platform operator connects the '
+        + 'Fabric network, every anchor is also mirrored onto a two-organisation Fabric '
+        + 'network and its status appears here.' }),
+    ]);
+  }
+  const bridge = fabric.bridge || {};
+  return el('div', { class: 'card' }, [
+    el('h2', { text: 'Hyperledger Fabric network' }),
+    el('div', { class: 'grid cols-4' }, [
+      el('div', { class: 'tile' }, [el('div', { class: 'label', text: 'Bridge' }),
+        el('div', { class: 'u-mt-6' }, [badge(fabric.reachable ? 'CONNECTED' : 'UNAVAILABLE')])]),
+      el('div', { class: 'tile' }, [el('div', { class: 'label', text: 'Channel / chaincode' }),
+        el('div', { class: 'mono u-mt-6', text: `${bridge.channel || '—'} / ${bridge.chaincode || '—'}` })]),
+      el('div', { class: 'tile' }, [el('div', { class: 'label', text: 'Mirrored (recent)' }),
+        el('div', { class: 'value', text: fabric.mirrored_ok ?? 0 })]),
+      el('div', { class: 'tile' }, [el('div', { class: 'label', text: 'Mirror failures' }),
+        el('div', { class: 'value', text: fabric.mirrored_failed ?? 0 })]),
+    ]),
+    fabric.recent?.length ? table([
+      { label: 'Key', render: (row) => el('span', { class: 'mono', text: row.key }) },
+      { label: 'Version', numeric: true, render: (row) => row.version ?? '—' },
+      { label: 'Fabric tx', render: (row) => el('span', { class: 'mono',
+        text: row.fabric_tx_id ? `${row.fabric_tx_id.slice(0, 16)}…` : '—' }) },
+      { label: 'Result', render: (row) => badge(row.ok ? 'ANCHORED' : 'FAILED') },
+      { label: 'When', render: (row) => fmtDate(row.at) },
+    ], fabric.recent) : el('p', { class: 'hint', text: 'Connected. New anchors appear here.' }),
+  ]);
+}
+
 export async function render() {
-  const [stats, verification, blocks, contracts] = await Promise.all([
+  const [stats, verification, blocks, contracts, fabric] = await Promise.all([
     api('/blockchain/stats'), api('/blockchain/verify'),
     api('/blockchain/blocks?limit=15'), api('/blockchain/contracts'),
+    api('/blockchain/fabric').catch(() => null),
   ]);
 
   const functionRows = Object.entries(stats.by_function || {})
@@ -22,16 +57,12 @@ export async function render() {
   return el('div', {}, [
     el('h1', { text: 'Permissioned ledger explorer' }),
     el('p', { class: 'subtitle' }, [
-      el('span', { class: 'demo-flag', text: 'DEMO: single-node ordering' }),
-      ' — cryptography (ECDSA P-256, SHA-256, Merkle proofs) is real. See ',
-      // Was a display:none anchor whose text read like a repository path but whose href
-      // pointed at Wikipedia — invisible to a user, and misleading to anything reading the
-      // DOM. It now visibly links to the project document it actually names.
-      el('a', { href: 'https://github.com/bilalwaheed24/Implementing-Advanced-Agricultural'
-        + '-Platform/blob/main/docs/Blockchain-integration.md', target: '_blank',
-        rel: 'noopener', text: 'docs/Blockchain-integration.md' }),
-      ' for the migration path to production Hyperledger Fabric.',
+      el('span', { class: 'demo-flag', text: 'Platform ledger: single-node ordering' }),
+      ' — cryptography (ECDSA P-256, SHA-256, Merkle proofs) is real. When the Fabric bridge '
+        + 'is connected, every anchor is also written to a Hyperledger Fabric network '
+        + '(card below), where two organisations\' peers must endorse it.',
     ]),
+    fabricCard(fabric),
     el('div', { class: 'grid cols-4' }, [
       el('div', { class: 'tile' }, [el('div', { class: 'label', text: 'Chain valid' }),
         el('div', { class: 'u-mt-6' },

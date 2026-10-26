@@ -67,3 +67,10 @@ junit*.xml
 
 # Transient terraform state-lock marker
 *.tfstate.lock.info
+
+# Hyperledger Fabric: downloaded network and Node dependencies
+fabric/.network/
+node_modules/
+
+# Claude Code agent worktrees
+.claude/

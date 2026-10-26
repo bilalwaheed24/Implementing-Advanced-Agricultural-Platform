@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..core.config import get_settings
 from ..core.errors import AccountLocked, AuthError, Conflict, NotFound, ValidationFailed
 from ..core.logging_conf import security_event
-from ..core.permissions import SELF_REGISTRATION_ROLE, Role
+from ..core.permissions import APPROVAL_REQUIRED_ROLES, SELF_REGISTRATION_ROLE, Role
 from ..core.security import (create_access_token, create_refresh_token, decode_token,
                              ensure_aware, hash_password, new_id, utcnow,
                              validate_password_strength, verify_password)
@@ -61,6 +61,33 @@ def register(db: Session, email: str, full_name: str, password: str,
     return user
 
 
+def create_user(db: Session, email: str, full_name: str, password: str, org_id: str,
+                role: str, actor_id: str, actor_role: str) -> User:
+    """Administrator onboarding. Ordinary roles are ACTIVE at once; the privileged roles in
+    APPROVAL_REQUIRED_ROLES are created PENDING and still need an explicit approval."""
+    try:
+        role_enum = Role(role.upper())
+    except ValueError as exc:
+        raise ValidationFailed(f"Unknown role {role}") from exc
+    if db.execute(select(User).where(User.email == email)).scalar_one_or_none():
+        raise Conflict("A user with this email address already exists")
+    organization = db.execute(
+        select(Organization).where(Organization.id == org_id,
+                                   Organization.is_active.is_(True))).scalar_one_or_none()
+    if organization is None:
+        raise ValidationFailed("Unknown or inactive organisation")
+    validate_password_strength(password)
+    status = "PENDING" if role_enum in APPROVAL_REQUIRED_ROLES else "ACTIVE"
+    user = User(email=email, full_name=full_name, password_hash=hash_password(password),
+                role=role_enum.value, org_id=org_id, status=status)
+    db.add(user)
+    db.flush()
+    audit.record(db, "user.create", actor_id=actor_id, actor_role=actor_role, org_id=org_id,
+                 entity_type="User", entity_id=user.id,
+                 detail={"role": user.role, "status": status, "org": organization.msp_id})
+    return user
+
+
 def authenticate(db: Session, email: str, password: str, ip: str | None = None,
                  user_agent: str | None = None) -> User:
     settings = get_settings()
@@ -89,7 +116,10 @@ def authenticate(db: Session, email: str, password: str, ip: str | None = None,
             notifications.raise_alert(
                 db, "DATA_THEFT", "HIGH", f"Account locked after {user.failed_attempts} failed logins",
                 detail=f"Account {user.email} was locked following repeated authentication failures.",
-                org_id=user.org_id, entity_type="User", entity_id=user.id)
+                org_id=user.org_id, entity_type="User", entity_id=user.id,
+                # Its own kind: sharing DATA_THEFT + user with no kind, an open lockout
+                # alert suppressed the exfiltration sweep's alert for the same user.
+                kind="account_lockout")
         db.flush()
         audit.record(db, "auth.login", actor_id=user.id, actor_role=user.role, org_id=user.org_id,
                      entity_type="User", entity_id=user.id, outcome="FAILURE", ip=ip,
@@ -152,7 +182,8 @@ def refresh(db: Session, token: str, ip: str | None = None) -> dict[str, object]
             db, "DATA_THEFT", "CRITICAL", "Refresh token reuse detected",
             detail="A refresh token was presented after it had already been rotated. "
                    "Every token in the family has been invalidated.",
-            org_id=user.org_id if user else None, entity_type="User", entity_id=stored.user_id)
+            org_id=user.org_id if user else None, entity_type="User", entity_id=stored.user_id,
+            kind="refresh_token_reuse")
         audit.record(db, "auth.refresh_reuse", actor_id=stored.user_id,
                      entity_type="RefreshToken", entity_id=stored.id, outcome="FAILURE", ip=ip)
         # Durable before unwinding: the route does not commit on an error path, so

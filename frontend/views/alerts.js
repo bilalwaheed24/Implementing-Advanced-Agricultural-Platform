@@ -1,58 +1,113 @@
 import { el, api, badge, fmtDate, humanizeText, titleCase, toast,
-         can } from '/static/assets/core.js';
+         can, role , humanize} from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
+import { entityLink, incidentLink } from '/static/views/entity-links.js';
+
+async function alertAction(row, action, done, reload) {
+  try {
+    await api(`/security/alerts/${row.id}/${action}`, { method: 'POST' });
+    toast(done, 'ok');
+    reload();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+/* Mirrors core/permissions.py. Two different sets, because reading and working these alerts
+ * are now two different rights: OVERSIGHT_READER_ROLES (SECURITY_OVERSIGHT_ROLES plus
+ * OVERSIGHT_ALERT_READER_ROLES) may see a data-theft or ledger alert, but only
+ * OVERSIGHT_ROLES (SECURITY_OVERSIGHT_ROLES) may acknowledge or resolve one, so nobody clears
+ * an alert raised about themselves and an overseer is never offered a button the API refuses. */
+const OVERSIGHT_CATEGORIES = new Set(['DATA_THEFT', 'LEDGER']);
+const OVERSIGHT_ROLES = new Set(['ADMIN', 'SECURITY_ANALYST']);
+const OVERSIGHT_READER_ROLES = new Set([...OVERSIGHT_ROLES, 'REGULATOR', 'BIOSAFETY_OFFICER']);
+
+const CATEGORIES = ['DEVICE_ANOMALY', 'DEVICE_HEALTH', 'DEVICE_AUTH', 'DATA_THEFT',
+  'BIOSECURITY', 'DURC', 'FRAUD', 'COMPLIANCE', 'CERTIFICATION', 'LEDGER', 'AGRONOMY'];
+
+/* Data-theft and ledger alerts are never listed for a tenant role (the server hides them), so
+ * those filter options would only ever give an empty list (round 6). A role that may read
+ * them keeps the filter. Evaluated per render: the role is known only once someone is
+ * signed in. */
+async function categoryOptions() {
+  const reader = OVERSIGHT_READER_ROLES.has(role());
+  return CATEGORIES.filter((category) => reader || !OVERSIGHT_CATEGORIES.has(category));
+}
 
 function actionButtons(row, reload) {
-  // Permission- and state-aware exactly as before: only an open alert can be acted on,
-  // and only by a principal holding alert:write. The difference is that the current
-  // state is no longer communicated by the absence of buttons — it has its own column.
-  if (!can('alert:write') || row.status !== 'OPEN') {
+  // Mirrors the server's alert lifecycle (notifications.ALERT_TRANSITIONS): an OPEN alert
+  // may be acknowledged or resolved, an ACKNOWLEDGED one may still be resolved, and a
+  // RESOLVED one is final. Only a principal holding alert:write is offered either.
+  if (!can('alert:write') || row.status === 'RESOLVED') {
     return el('span', { class: 'hint', text: '—' });
   }
-  return el('div', { class: 'row' }, [
-    el('button', { text: 'Acknowledge', onClick: async () => {
-      try {
-        await api(`/security/alerts/${row.id}/acknowledge`, { method: 'POST' });
-        toast('Alert acknowledged', 'ok');
-        reload();
-      } catch (error) { toast(error.message, 'error'); }
-    } }),
-    el('button', { text: 'Resolve', onClick: async () => {
-      try {
-        await api(`/security/alerts/${row.id}/resolve`, { method: 'POST' });
-        toast('Alert resolved', 'ok');
-        reload();
-      } catch (error) { toast(error.message, 'error'); }
-    } }),
-  ]);
+  if (OVERSIGHT_CATEGORIES.has(row.category) && !OVERSIGHT_ROLES.has(role())) {
+    return el('span', { class: 'hint', text: 'Handled by security analysts' });
+  }
+  const buttons = [];
+  if (row.status === 'OPEN') {
+    buttons.push(el('button', { text: 'Acknowledge',
+      onClick: () => alertAction(row, 'acknowledge', 'Alert acknowledged', reload) }));
+  }
+  buttons.push(el('button', { text: 'Resolve', title: row.incident_id
+    ? 'Resolving the last open alert on an incident also resolves the incident' : null,
+    onClick: () => alertAction(row, 'resolve', 'Alert resolved', reload) }));
+  return el('div', { class: 'row' }, buttons);
+}
+
+/* The reasons worth showing besides the detail line: those it does not already say. Most
+ * alerts' detail is their first reasons joined, so a Reasons column of its own was "—" on
+ * most rows; what is left is shown as one short line under the detail instead. */
+function extraReasons(row) {
+  const detail = String(row.detail || '').toLowerCase();
+  const reasons = (row.reasons || [])
+    .map((r) => (typeof r === 'string' ? r : r.rule || r.detail || ''))
+    .filter((r) => r && !detail.includes(String(r).toLowerCase()));
+  if (!reasons.length) return '';
+  const first = humanizeText(String(reasons[0]));
+  const short = first.length > 120 ? `${first.slice(0, 117)}…` : first;
+  return reasons.length > 1 ? `${short} (+${reasons.length - 1} more)` : short;
+}
+
+function occurrenceHint(row) {
+  if (!row.occurrences || row.occurrences < 2) return null;
+  return el('div', { class: 'hint', text: `Seen ${row.occurrences} times, last `
+    + `${fmtDate(row.last_seen_at)}` });
 }
 
 export const render = listView({
   title: 'Security and agronomy alerts',
   subtitle: 'Raised by AI scoring, deterministic rules and scheduled sweeps. '
-    + 'Every alert carries the reasons that produced it.',
+    + 'Every alert carries the reasons that produced it. A condition that keeps recurring '
+    + 'is counted on its open alert rather than raised again.',
   endpoint: '/security/alerts',
   filters: [
     { key: 'severity', label: 'Severity', options: ['INFO', 'WARNING', 'HIGH', 'CRITICAL'] },
-    { key: 'status', label: 'Status', options: ['OPEN', 'ACKNOWLEDGED', 'RESOLVED'] },
-    { key: 'category', label: 'Category', options: ['DEVICE_ANOMALY', 'DEVICE_HEALTH',
-        'DEVICE_AUTH', 'DATA_THEFT', 'BIOSECURITY', 'DURC', 'FRAUD', 'COMPLIANCE',
-        'CERTIFICATION', 'AGRONOMY'] },
+    { key: 'status', label: 'Status', options: [['UNRESOLVED', 'Unresolved (open or acknowledged)'],
+      'OPEN', 'ACKNOWLEDGED', 'RESOLVED'] },
+    { key: 'category', label: 'Category', options: categoryOptions },
     ],
   columns: [
-    { label: 'Raised', render: (row) => fmtDate(row.created_at) },
+    { label: 'Raised', render: (row) => el('div', {}, [fmtDate(row.created_at),
+      occurrenceHint(row)]) },
     { label: 'Severity', render: (row) => badge(row.severity) },
-    { label: 'Category', render: (row) => titleCase(row.category) },
-    { label: 'Title', render: (row) => el('div', {}, [
-        el('strong', { text: row.title }),
-        row.detail ? el('div', { class: 'hint', text: humanizeText(row.detail) }) : null,
+    { label: 'Category', render: (row) => humanize(row.category) },
+    { label: 'Title', render: (row) => {
+        const more = extraReasons(row);
+        return el('div', {}, [
+          el('strong', { text: row.title }),
+          row.detail ? el('div', { class: 'hint', text: humanizeText(row.detail) }) : null,
+          more ? el('div', { class: 'hint', text: `Also: ${more}` }) : null,
+        ]);
+      } },
+    { label: 'Source', render: (row) => el('div', {}, [
+        entityLink(row.entity_type, row.entity_id, row.source_label)
+          || el('span', { class: 'hint', text: '—' }),
+        row.incident_id ? el('div', {}, [incidentLink(row.incident_id,
+          row.incident_label ? `Incident: ${row.incident_label}` : null)]) : null,
       ]) },
-    { label: 'Reasons', render: (row) => el('span', { class: 'hint',
-        text: humanizeText((row.reasons || []).slice(0, 2)
-          .map((r) => (typeof r === 'string' ? r : r.rule || '')).join('; ')) }) },
     { label: 'Status', render: (row) => badge(row.status) },
     { label: 'Actions', render: (row, ctx) => actionButtons(row, ctx.reload) },
   ],
   emptyTitle: 'No alerts',
-  emptyMessage: 'Nothing has triggered an alert. Try: python3 iot/simulator.py --mode spoof',
+  emptyMessage: 'Nothing has triggered an alert. Alerts appear here when a device, screening '
+    + 'or supply-chain check needs attention.',
 });

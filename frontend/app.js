@@ -1,8 +1,10 @@
 /* Application shell: hash router, role-filtered navigation, view mounting. */
 import { el, clear, session, api, can, toast, errorBox, loading,
          unauthorizedCard,
-         roleLabel } from '/static/assets/core.js';
+         roleLabel, menuHidden } from '/static/assets/core.js';
 
+/* Menu items withheld from roles that hold the read permission but can never see data there
+ * are listed in core.js (NOT_USEFUL_FOR / menuHidden), shared with the Settings page. */
 const NAV = [
   { group: 'Overview', items: [
     { path: '#/dashboard', label: 'Dashboard', permission: null },
@@ -11,7 +13,7 @@ const NAV = [
     { path: '#/farms', label: 'Farms & Fields', permission: 'farm:read' },
     { path: '#/devices', label: 'Devices', permission: 'device:read' },
     { path: '#/telemetry', label: 'Telemetry', permission: 'telemetry:read' },
-    { path: '#/satellite', label: 'Satellite & NDVI', permission: 'telemetry:read' },
+    { path: '#/satellite', label: 'Satellite & Drone', permission: 'telemetry:read' },
   ] },
   { group: 'Intelligence', items: [
     { path: '#/ai', label: 'AI Insights', permission: 'ai:read' },
@@ -53,6 +55,7 @@ const ROUTES = {
   '#/login': () => import('/static/views/login.js'),
   '#/dashboard': () => import('/static/views/dashboard.js'),
   '#/farms': () => import('/static/views/farms.js'),
+  '#/farm': () => import('/static/views/farm-detail.js'),
   '#/devices': () => import('/static/views/devices.js'),
   '#/device': () => import('/static/views/device-detail.js'),
   '#/telemetry': () => import('/static/views/telemetry.js'),
@@ -99,7 +102,9 @@ function parseHash() {
 function sidebar(current) {
   const groups = [];
   for (const group of NAV) {
-    const items = group.items.filter((item) => !item.permission || can(item.permission));
+    const role = session.read()?.role;
+    const items = group.items.filter((item) => (!item.permission || can(item.permission))
+      && !menuHidden(item.path, role));
     if (!items.length) continue;
     groups.push(el('div', { class: 'nav-group' }, [
       el('h2', { text: group.group }),
@@ -111,10 +116,15 @@ function sidebar(current) {
     ]));
   }
   const user = session.read();
-  return el('aside', { class: 'sidebar' }, [
-    el('div', { class: 'brand' }, [
-      'ABSP',
-      el('small', { text: 'Agricultural Biotechnology Security Platform' }),
+  return el('aside', { class: 'sidebar', id: 'sidebar' }, [
+    el('div', { class: 'row' }, [
+      el('div', { class: 'brand u-flex-1' }, [
+        'ABSP',
+        el('small', { text: 'Agricultural Biotechnology Security Platform' }),
+      ]),
+      // Only shown on a narrow screen, where the menu opens over the page.
+      el('button', { class: 'menu-close', type: 'button', 'aria-label': 'Close menu',
+        text: '×', onClick: () => setMenuOpen(false) }),
     ]),
     el('span', { class: 'demo-flag', title: 'Synthetic data; single-node ledger',
       text: 'DEMO / SIMULATION' }),
@@ -122,6 +132,7 @@ function sidebar(current) {
     el('div', { class: 'u-push-top' }, [
       el('div', { class: 'hint', text: user?.full_name || '' }),
       el('div', { class: 'hint', text: user?.role ? roleLabel(user.role) : '' }),
+      user?.org_name ? el('div', { class: 'hint', text: user.org_name }) : null,
       el('button', { class: 'u-mt-8 u-full-width', text: 'Sign out',
         onClick: signOut }),
     ]),
@@ -132,13 +143,49 @@ function topbar(title) {
   // The count is the obvious thing to click when you want to read what it is counting.
   const badgeNode = el('a', { href: '#/notifications', class: 'badge neutral',
     id: 'unread-badge', text: 'Notifications' });
+  // On a narrow screen the sidebar (up to two dozen links) would stack above the page, so
+  // it is collapsed behind this button instead. Hidden by CSS on a wide screen.
+  const menuButton = el('button', {
+    class: 'menu-toggle', type: 'button', id: 'menu-toggle',
+    'aria-controls': 'sidebar', 'aria-expanded': 'false', text: 'Menu',
+    onClick: () => setMenuOpen(!root.querySelector('.app')?.classList.contains('nav-open')),
+  });
   return el('header', { class: 'topbar' }, [
+    menuButton,
     el('strong', { text: title }),
     el('div', { class: 'spacer' }),
     el('a', { href: '/verify.html', target: '_blank', rel: 'noopener',
       class: 'hint', text: 'Public verification page ↗' }),
     badgeNode,
   ]);
+}
+
+function setMenuOpen(open) {
+  const shell = root.querySelector('.app');
+  if (!shell) return;
+  shell.classList.toggle('nav-open', open);
+  const button = document.getElementById('menu-toggle');
+  if (button) button.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) root.querySelector('.sidebar a')?.focus();
+  else if (button && button.offsetParent !== null) button.focus();
+}
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && root.querySelector('.app.nav-open')) setMenuOpen(false);
+});
+
+/* A session saved before /auth/me returned the organisation name lacks it; fetch it once
+ * so views can name the user's own organisation. */
+let profileChecked = false;
+async function ensureProfile() {
+  const current = session.read();
+  if (profileChecked || !current?.access_token || current.org_name !== undefined) return;
+  profileChecked = true;
+  try {
+    const me = await api('/auth/me');
+    const latest = session.read();
+    if (latest?.access_token) session.write({ ...latest, org_name: me.org_name ?? null });
+  } catch { /* non-fatal */ }
 }
 
 async function refreshUnread() {
@@ -223,6 +270,7 @@ async function render() {
   ]);
   root.appendChild(shell);
   refreshUnread();
+  ensureProfile();
 
   try {
     const module = await loader();
@@ -248,7 +296,23 @@ async function render() {
   }
 }
 
-window.addEventListener('hashchange', render);
+/* A dialog belongs to the screen that opened it. Views append theirs to <body>, outside the
+ * re-rendered root, so without this a modal (the CRISPR review dialog, say) stayed over the
+ * next screen after Back or a link and blocked every click on it. */
+function closeOpenDialogs() {
+  for (const dialog of document.querySelectorAll('dialog')) {
+    if (dialog.open) dialog.close();
+    dialog.remove();
+  }
+  for (const node of document.querySelectorAll('[aria-modal="true"], .modal-backdrop')) {
+    node.remove();
+  }
+}
+
+window.addEventListener('hashchange', () => {
+  closeOpenDialogs();
+  render();
+});
 // Exactly one initial render: listen only while the document is still parsing.
 if (document.readyState === 'loading') {
   window.addEventListener('DOMContentLoaded', render, { once: true });
@@ -256,4 +320,7 @@ if (document.readyState === 'loading') {
   render();
 }
 unreadTimer = setInterval(refreshUnread, 30000);
+// A view that marks notifications read raises this, so the header count changes at once
+// rather than on the next 30-second poll.
+window.addEventListener('absp:unread-changed', refreshUnread);
 window.addEventListener('beforeunload', () => clearInterval(unreadTimer));

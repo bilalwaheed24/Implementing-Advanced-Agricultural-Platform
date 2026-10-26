@@ -150,6 +150,8 @@ th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--bor
 th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
   color: var(--text-muted); font-weight: 700; }
 tbody tr:hover { background: var(--surface-2); }
+/* A row a link pointed at (#/crispr?focus=<id>). */
+tbody tr.row-focus { background: var(--surface-2); outline: 2px solid var(--accent); outline-offset: -2px; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 /* Row header in a key/value table. Semantically a <th scope="row"> so assistive
    technology can name the value, but styled as a body cell: the uppercase 11px
@@ -210,6 +212,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .reasons li { padding: 6px 10px; border-left: 3px solid var(--border);
   background: var(--surface-2); border-radius: 0 6px 6px 0; margin-bottom: 6px; font-size: 13px; }
 .reasons li.bad { border-left-color: var(--critical); }
+.reasons li.warn { border-left-color: var(--warning); }
 .reasons li.good { border-left-color: var(--verified); }
 
 /* ---------- login ---------- */
@@ -246,13 +249,32 @@ svg.chart { width: 100%; height: auto; display: block; }
 }
 .skip-link:focus { left: 0; outline: 3px solid var(--focus, #0b5); outline-offset: 2px; }
 
+/* A tile that links to the list it counts. */
+a.tile-link { display: block; color: inherit; text-decoration: none; }
+a.tile-link:hover { border-color: var(--accent); background: var(--surface-2); }
+a.tile-link .value { color: var(--accent); }
+
+/* Mobile menu controls: only shown below the breakpoint. */
+.menu-toggle, .menu-close { display: none; }
+
 /* ---------- responsive ---------- */
-@media (max-width: 900px) {
+@media (max-width: 800px) {
   .app { grid-template-columns: 1fr; }
-  .sidebar { position: static; height: auto; border-right: none;
-    border-bottom: 1px solid var(--border); }
+  /* The sidebar holds up to two dozen links; stacked above the page it pushed the content
+     a full screen down. It is collapsed behind the Menu button and opens over the page. */
+  .sidebar { display: none; }
+  .app.nav-open .sidebar {
+    display: flex; position: fixed; top: 0; left: 0; bottom: 0; z-index: 30;
+    width: min(300px, 85vw); height: auto; box-shadow: 0 0 40px rgba(0,0,0,0.35);
+  }
+  .menu-toggle, .menu-close { display: inline-block; }
+  .menu-close { padding: 4px 10px; font-size: 18px; line-height: 1; }
+  .topbar { padding: var(--space) calc(var(--space) * 2); flex-wrap: wrap; }
   .content { padding: calc(var(--space) * 2); }
 }
+
+/* List search box */
+.u-search-field { min-width: 220px; margin-bottom: 0; }
 @media (max-width: 620px) {
   table thead { display: none; }
   table tr { display: block; border-bottom: 1px solid var(--border); padding: 8px 0; }
@@ -293,3 +315,12 @@ svg.chart { width: 100%; height: auto; display: block; }
     .lookup-form input { flex: 1; }
   .u-text-center { text-align: center; }
 .u-block-mb-12 { display: block; margin-bottom: 12px; }
+
+/* Consumer label on the batch page: QR plus the typed code, printable on its own. */
+.qr-label { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.qr-image { width: 148px; height: 148px; background: #fff; border-radius: 4px; }
+@media print {
+  body * { visibility: hidden; }
+  .print-area, .print-area * { visibility: visible; color: #000; }
+  .print-area { position: absolute; left: 0; top: 0; padding: 12mm; }
+}

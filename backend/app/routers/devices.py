@@ -13,7 +13,7 @@ from ..models import Device, DeviceVulnerability
 from ..repositories import get_or_404, paginate, visible
 from ..schemas import (DeviceAction, DeviceCreate, DeviceOut, DeviceProvisionOut, Page,
                        VulnerabilityCreate, VulnerabilityOut)
-from ..services import devices as device_service
+from ..services import devices as device_service, telemetry as telemetry_service
 
 router = APIRouter(prefix="/devices", tags=["Devices"], dependencies=[Depends(rate_limit)])
 
@@ -36,8 +36,16 @@ def list_devices(db: DbSession, paging: PagingDep,
                  principal: Annotated[object, Depends(require_permission(P.DEVICE_READ))],
                  farm_id: str | None = Query(default=None),
                  device_type: str | None = Query(default=None),
-                 status_filter: str | None = Query(default=None, alias="status")) -> Page[DeviceOut]:
+                 status_filter: str | None = Query(default=None, alias="status"),
+                 offline: bool | None = Query(
+                     default=None, description="true: only devices the health sweep has "
+                     "marked silent (offline_since set); false: only devices reporting")
+                 ) -> Page[DeviceOut]:
     query = visible(Device, principal.role, principal.org_id).order_by(Device.created_at.desc())
+    if offline is True:
+        query = query.where(Device.offline_since.is_not(None))
+    elif offline is False:
+        query = query.where(Device.offline_since.is_(None))
     if farm_id:
         query = query.where(Device.farm_id == farm_id)
     if device_type:
@@ -61,10 +69,13 @@ def posture(db: DbSession,
 def list_vulnerabilities(db: DbSession, paging: PagingDep,
                          principal: Annotated[object, Depends(require_permission(P.DEVICE_READ))],
                          severity: str | None = Query(default=None),
-                         status_filter: str | None = Query(default=None, alias="status")
+                         status_filter: str | None = Query(default=None, alias="status"),
+                         device_id: str | None = Query(default=None)
                          ) -> Page[VulnerabilityOut]:
     query = visible(DeviceVulnerability, principal.role, principal.org_id).order_by(
         DeviceVulnerability.discovered_at.desc())
+    if device_id:
+        query = query.where(DeviceVulnerability.device_id == device_id)
     if severity:
         query = query.where(DeviceVulnerability.severity == severity.upper())
     if status_filter:
@@ -177,5 +188,8 @@ def sweep_health(db: DbSession,
     # the request cannot raise alerts inside another tenant.
     scope = None if principal.is_cross_tenant else principal.org_id
     silent = device_service.sweep_silent_devices(db, org_id=scope)
+    # Readings stored unscored while the AI service was unavailable are scored now.
+    rescored = telemetry_service.rescore_unscored(db, org_id=scope)
     db.commit()
-    return {"silent_devices": [d.id for d in silent], "count": len(silent)}
+    return {"silent_devices": [d.id for d in silent], "count": len(silent),
+            "rescored_readings": rescored}

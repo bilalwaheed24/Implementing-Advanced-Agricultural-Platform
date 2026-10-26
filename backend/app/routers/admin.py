@@ -11,8 +11,8 @@ from ..core.permissions import P, ROLE_PERMISSIONS, Role
 from ..models import Organization, User
 from ..repositories import paginate, unscoped, visible
 from ..core.errors import ValidationFailed
-from ..schemas import (OrganizationCreate, OrganizationOut, Page, UserOut,
-                      UserUpdate)
+from ..schemas import (AdminUserCreate, OrganizationCreate, OrganizationDirectoryEntry,
+                      OrganizationOut, Page, UserOut, UserUpdate)
 from ..services import audit, identity, ledger_client
 
 router = APIRouter(prefix="/admin", tags=["Administration"],
@@ -23,15 +23,35 @@ router = APIRouter(prefix="/admin", tags=["Administration"],
 def list_users(db: DbSession, paging: PagingDep,
                principal: Annotated[object, Depends(require_permission(P.USER_READ))],
                role: str | None = Query(default=None),
-               status_filter: str | None = Query(default=None, alias="status")) -> Page[UserOut]:
+               status_filter: str | None = Query(default=None, alias="status"),
+               q: str | None = Query(default=None, max_length=100,
+                                     description="Matches email or name")) -> Page[UserOut]:
     query = visible(User, principal.role, principal.org_id).order_by(User.created_at.desc())
     if role:
         query = query.where(User.role == role)
     if status_filter:
         query = query.where(User.status == status_filter)
+    if q and q.strip():
+        from sqlalchemy import or_
+
+        # LIKE wildcards in the term are matched literally, not as patterns.
+        term = q.strip().lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{term}%"
+        query = query.where(or_(User.email.ilike(pattern, escape="\\"),
+                                User.full_name.ilike(pattern, escape="\\")))
     rows, total = paginate(db, query, paging.page, paging.page_size)
     return Page[UserOut](items=[UserOut.model_validate(r) for r in rows], total=total,
                          page=paging.page, page_size=paging.page_size)
+
+
+@router.post("/users", response_model=UserOut, status_code=201,
+             summary="Onboard a user into an organisation")
+def create_user(payload: AdminUserCreate, db: DbSession,
+                principal: Annotated[object, Depends(require_permission(P.USER_WRITE))]) -> UserOut:
+    user = identity.create_user(db, payload.email, payload.full_name, payload.password,
+                                payload.org_id, payload.role, principal.id, principal.role)
+    db.commit()
+    return UserOut.model_validate(user)
 
 
 @router.post("/users/{user_id}/approve", response_model=UserOut, summary="Approve a pending user")
@@ -69,6 +89,26 @@ def list_organizations(db: DbSession, paging: PagingDep,
                                  total=total, page=paging.page, page_size=paging.page_size)
 
 
+@router.get("/organizations/directory", response_model=list[OrganizationDirectoryEntry],
+            summary="Trading-partner directory: names and types of active organisations")
+def organization_directory(db: DbSession,
+                           principal: Annotated[object, Depends(require_permission(P.ORG_READ))]
+                           ) -> list[OrganizationDirectoryEntry]:
+    """What a hand-over needs: whom to send seed or a batch to. A deliberate, narrow exception
+    to the no-global-directory rule on /organizations: it is offered only to roles that hand
+    records over (or already read across tenants), and exposes only name, type and id — no
+    MSP identity, country, GLN or member list. Receiving a record grants nothing else."""
+    from sqlalchemy import select
+    from ..core.errors import PermissionDenied
+    granted = set(principal.permissions())
+    if not ({P.SUPPLY_WRITE.value, P.GMO_WRITE.value, P.USER_READ.value} & granted):
+        raise PermissionDenied("The partner directory is available to roles that hand over "
+                               "seed or batches")
+    rows = db.execute(select(Organization).where(Organization.is_active.is_(True))
+                      .order_by(Organization.name.asc())).scalars()
+    return [OrganizationDirectoryEntry(id=o.id, name=o.name, org_type=o.org_type) for o in rows]
+
+
 @router.post("/organizations", response_model=OrganizationOut, status_code=201,
              summary="Create an organisation and its ledger identity")
 def create_organization(payload: OrganizationCreate, db: DbSession,
@@ -86,7 +126,7 @@ def create_organization(payload: OrganizationCreate, db: DbSession,
     db.flush()
     # Ensure the organisation has a ledger signing identity.
     try:
-        ledger_client.ensure_identity(organization.msp_id, organization.name)
+        ledger_client.ensure_identity(organization.msp_id, organization.name, organization.org_type)
     except Exception:                                    # noqa: BLE001 - non-fatal
         pass
     audit.record(db, "org.create", actor_id=principal.id, actor_role=principal.role,

@@ -16,6 +16,8 @@ export function remoteSelect({ endpoint, label, required = true, placeholder = '
   const select = el('select', required ? { required: 'required' } : {});
   select.appendChild(el('option', { value: '', text: 'Loading…' }));
   select.disabled = true;
+  // Known before any request, so a form can withdraw the field before it is first drawn.
+  if (requires && !can(requires)) select.unavailable = true;
 
   const ready = (async () => {
     // When the session plainly lacks the permission the source endpoint requires, do not
@@ -78,11 +80,26 @@ export function dateInput(value = null, attrs = {}) {
   return input;
 }
 
-export function todayIso() { return new Date().toISOString().slice(0, 10); }
+/* Today as yyyy-mm-dd in the operator's own time zone (a date input's `max`), not in UTC,
+ * which near midnight is already tomorrow or still yesterday. */
+export function todayIso() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
 
-/* Turn a yyyy-mm-dd value into the ISO instant the API expects. */
+/* Turn a yyyy-mm-dd value into the ISO instant the API expects.
+ *
+ * A date carries no time of day, so it is read as local noon (noon UTC is 17:00 at UTC+5,
+ * which put a shipment that left at 15:00 "in the future"). When the date is today the
+ * current instant is used instead, so a record is never stamped later than it was made.
+ * The name is kept for the many forms that import it. */
 export function atNoon(dayValue) {
-  return dayValue ? new Date(`${dayValue}T12:00:00Z`).toISOString() : null;
+  if (!dayValue) return null;
+  const [year, month, day] = String(dayValue).split('-').map(Number);
+  if (!year || !month || !day) return null;
+  if (dayValue === todayIso()) return new Date().toISOString();
+  return new Date(year, month - 1, day, 12, 0, 0, 0).toISOString();
 }
 
 /* A toggle button plus a hidden form, with one place for errors and the busy state.
@@ -95,13 +112,19 @@ export function createPanel({ toggleLabel, submitLabel, controls, submit, onDone
   const button = el('button', { class: 'primary', type: 'submit', text: submitLabel });
   const wrappers = controls.map(([labelText, control, extras]) => {
     const wrapper = field(labelText, control, extras || []);
-    // An optional selector whose source this role may not read is withdrawn once its load
-    // settles, so no unauthorised-looking control is left on the form.
-    if (control && control.whenReady) {
-      control.whenReady.then(() => {
-        if (control.unavailable && !control.hasAttribute('required')) wrapper.hidden = true;
-      });
-    }
+    // An optional selector whose source this role may not read is withdrawn, so no
+    // unauthorised-looking control is left on the form. When the permission is plainly
+    // missing that is known at once (no flash of a dead control); a 403 from the source is
+    // known only once its load settles. The class as well as the attribute, so no layout
+    // rule giving .field a display value can bring it back.
+    const withdraw = () => {
+      if (control.unavailable && !control.hasAttribute('required')) {
+        wrapper.hidden = true;
+        wrapper.classList.add('u-hidden');
+      }
+    };
+    if (control && control.unavailable) withdraw();
+    if (control && control.whenReady) control.whenReady.then(withdraw);
     return wrapper;
   });
   const form = el('form', { class: 'u-hidden' }, [
@@ -125,7 +148,9 @@ export function createPanel({ toggleLabel, submitLabel, controls, submit, onDone
       if (onDone) onDone();
     } catch (error) {
       message.textContent = error.message
-        + (error.fields || []).map((f) => ` (${f.field}: ${f.message})`).join('');
+        // Pydantic prefixes a validator's own text with "Value error, "; the reader needs only
+        // the reason, next to the field it is about.
+        + (error.fields || []).map((f) => ` (${f.field}: ${String(f.message).replace(/^Value error, /, '')})`).join('');
     } finally {
       button.disabled = false;
       button.textContent = original;

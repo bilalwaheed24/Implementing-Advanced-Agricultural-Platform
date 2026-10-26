@@ -48,13 +48,28 @@ jobs:
       # pinned to a malformed 39-character SHA (a git SHA is 40), so the job failed at
       # "Set up job", and the action itself has not been updated since January 2024
       # (its successor semgrep/semgrep-action is archived). The CLI is maintained.
+      # A scanner that silently does not run is worse than no scanner. This step used to
+      # swallow everything with `|| echo ::warning`, so when semgrep 1.90.0 started dying at
+      # import with "No module named 'pkg_resources'" (its opentelemetry instrumentation wants
+      # setuptools, which Python 3.12 no longer ships), the job went on reporting success while
+      # nothing was scanned at all. setuptools is now installed explicitly, and the two cases
+      # are told apart by semgrep's own exit codes: 1 means it ran and found something, which
+      # stays report-only; 2 or more means it failed to run, which fails the build.
       - name: SAST — Semgrep
-        continue-on-error: true
         run: |
-          pip install semgrep==1.90.0
+          pip install setuptools semgrep==1.90.0
+          set +e
           semgrep scan --config p/security-audit --config p/python \
-                       --config p/owasp-top-ten --error --metrics=off || \
-            (echo "::warning::Semgrep reported findings — see log above" && true)
+                       --config p/owasp-top-ten --metrics=off
+          rc=$?
+          set -e
+          if [ "$rc" -ge 2 ]; then
+            echo "::error::Semgrep did not run (exit $rc) — the scan was not performed"
+            exit 1
+          fi
+          if [ "$rc" -eq 1 ]; then
+            echo "::warning::Semgrep reported findings — see log above"
+          fi
 
       - name: SCA — pip-audit
         run: |

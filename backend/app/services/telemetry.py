@@ -20,7 +20,7 @@ from ..core.security import (canonical_json, content_hash, decrypt_at_rest, encr
                              ensure_aware as _aware, nonce_cache, sha256_hex,
                              timestamp_within_window, utcnow, verify_device_signature)
 from ..models import AIAnalysis, Device, SatelliteScene, Telemetry
-from . import ai_client, audit, devices as device_service, notifications
+from . import ai_client, audit, cold_chain, devices as device_service, notifications
 
 
 
@@ -77,17 +77,23 @@ def verify_and_ingest(db: Session, device_id: str, timestamp_header: str, nonce:
         security_event("telemetry quarantined: failed range validation", device_id=device_id,
                        problems=problems[:5])
 
-    # 6. persist, encrypted at rest
+    # 6. persist, encrypted at rest. The shipment comes from the device's cold-chain binding;
+    #    a shipment id the device sends is only honoured when it is bound to this device.
+    shipment = cold_chain.bind_shipment(db, device, shipment_id, recorded_at)
     payload = canonical_json(readings)
     record = Telemetry(
         device_id=device.id, org_id=device.org_id, field_id=device.field_id,
-        shipment_id=shipment_id, recorded_at=_aware(recorded_at), nonce=nonce,
+        shipment_id=shipment.id if shipment else None, recorded_at=_aware(recorded_at),
+        nonce=nonce,
         payload_enc="", payload_hash=sha256_hex(payload),
         summary=_summary(readings), quality=quality,
         backfilled=allow_backfill)
     db.add(record)
     db.flush()
     record.payload_enc = encrypt_at_rest(payload, record.id)
+    if shipment is not None and quality == "OK":
+        # Running temperature range and the storage-range excursion alert (FR-D1).
+        cold_chain.record_reading(db, shipment, record)
 
     if sequence is not None:
         device.last_sequence = sequence
@@ -135,11 +141,15 @@ def _score_and_persist(db: Session, device: Device, record: Telemetry,
     if verdict["score"] >= settings.anomaly_alert_threshold:
         if record.quality == "OK":
             record.quality = "SUSPECT"
+        # kind="anomaly": while this device's anomaly alert is unresolved, further anomalous
+        # readings are counted on it (and noted on its incident) instead of each raising a
+        # new alert and incident — a faulty sensor otherwise produced ~96 of each a day.
         notifications.raise_alert(
             db, "DEVICE_ANOMALY", verdict["level"],
-            f"Anomalous telemetry from {device.device_type} {device.id[:8]}",
+            f"Anomalous telemetry from {device_service.device_label(device)}",
             detail="; ".join(verdict["reasons"][:3]), org_id=device.org_id,
-            entity_type="Device", entity_id=device.id, reasons=verdict["reasons"])
+            entity_type="Device", entity_id=device.id, reasons=verdict["reasons"],
+            kind="anomaly")
     db.flush()
     return verdict
 
@@ -209,7 +219,9 @@ def shipment_summary(db: Session, shipment_id: str) -> dict[str, Any]:
 def ingest_scene(db: Session, org_id: str, actor_id: str, actor_role: str, scene_id: str,
                  field_id: str, provider: str, captured_at: datetime, ndvi_mean: float,
                  ndvi_min: float, ndvi_max: float, cloud_cover_pct: float,
-                 checksum: str) -> SatelliteScene:
+                 checksum: str, source: str = "SATELLITE", index_name: str = "NDVI",
+                 file_sha256: str | None = None,
+                 footprint_geojson: dict[str, Any] | None = None) -> SatelliteScene:
     from ..models import Field
 
     field = db.execute(select(Field).where(Field.id == field_id, Field.org_id == org_id,
@@ -222,9 +234,7 @@ def ingest_scene(db: Session, org_id: str, actor_id: str, actor_role: str, scene
     if not (ndvi_min <= ndvi_mean <= ndvi_max):
         raise ValidationFailed("NDVI statistics are inconsistent: min <= mean <= max is required")
 
-    expected = content_hash({"scene_id": scene_id, "field_id": field_id,
-                             "captured_at": _aware(captured_at).isoformat(),
-                             "ndvi_mean": ndvi_mean})
+    expected = scene_checksum(scene_id, field_id, captured_at, ndvi_mean, file_sha256)
     if checksum != expected:
         security_event("satellite scene rejected: checksum mismatch", scene_id=scene_id)
         raise ValidationFailed("Scene checksum does not match its metadata")
@@ -232,32 +242,127 @@ def ingest_scene(db: Session, org_id: str, actor_id: str, actor_role: str, scene
     scene = SatelliteScene(scene_id=scene_id, org_id=org_id, field_id=field_id, provider=provider,
                            captured_at=_aware(captured_at), ndvi_mean=ndvi_mean,
                            ndvi_min=ndvi_min, ndvi_max=ndvi_max,
-                           cloud_cover_pct=cloud_cover_pct, checksum=checksum, is_simulated=True)
+                           cloud_cover_pct=cloud_cover_pct, checksum=checksum,
+                           # A scene that arrives with the hash of a real image file (an
+                           # OpenDroneMap orthophoto) is not simulated metadata.
+                           is_simulated=file_sha256 is None, source=source,
+                           index_name=index_name, file_sha256=file_sha256,
+                           footprint_geojson=footprint_geojson)
     db.add(scene)
     db.flush()
     audit.record(db, "satellite.ingest", actor_id=actor_id, actor_role=actor_role, org_id=org_id,
                  entity_type="SatelliteScene", entity_id=scene.id,
-                 detail={"scene_id": scene_id, "field_id": field_id})
+                 detail={"scene_id": scene_id, "field_id": field_id, "source": source,
+                         "file_sha256": file_sha256})
 
-    if ndvi_mean < 0.35 and cloud_cover_pct < 40:
-        notifications.raise_alert(
-            db, "AGRONOMY", "WARNING", f"Low vegetation index on field {field.name}",
-            detail=f"NDVI mean {ndvi_mean:.2f} indicates crop stress in this field.",
-            org_id=org_id, entity_type="Field", entity_id=field_id, open_incident=False)
+    if file_sha256:
+        from ..models import Organization
+        from . import ledger_client
+
+        organization = db.get(Organization, org_id)
+        receipt = ledger_client.submit(
+            "imagery", "AnchorScene",
+            {"scene_id": scene_id, "field": field.name, "source": source,
+             "index_name": index_name, "file_sha256": file_sha256, "content_hash": checksum},
+            organization.msp_id if organization else "FarmMSP", db=db, entity=scene)
+        if receipt.get("ok"):
+            scene.anchor_tx_id = receipt.get("tx_id")
+        else:
+            security_event("scene file hash not anchored", scene_id=scene_id,
+                           reason=receipt.get("error") or receipt.get("detail"))
+
+    # VARI (RGB cameras) sits lower than NDVI for the same healthy crop, so it has its own line.
+    threshold = 0.35 if index_name == "NDVI" else 0.05
+    # One alert per field (kind="low_ndvi"): each further low scene folds into it, and a
+    # clear scene at or above the line resolves it. A cloudy scene says nothing either way.
+    if cloud_cover_pct < 40:
+        if ndvi_mean < threshold:
+            notifications.raise_alert(
+                db, "AGRONOMY", "WARNING",
+                # With the farm: "Block C" alone is ambiguous across a tenant's farms.
+                f"Low vegetation index on field {field_label(field)}",
+                detail=f"{index_name} mean {ndvi_mean:.2f} from {source.lower()} imagery "
+                       f"indicates crop stress in this field.",
+                org_id=org_id, entity_type="Field", entity_id=field_id, open_incident=False,
+                kind="low_ndvi")
+        else:
+            notifications.resolve_alerts(
+                db, "AGRONOMY", field_id, kind="low_ndvi", actor_id=actor_id,
+                note=f"A later scene shows {index_name} mean {ndvi_mean:.2f}, above the "
+                     f"crop-stress line")
     return scene
 
 
-def scene_checksum(scene_id: str, field_id: str, captured_at: datetime, ndvi_mean: float) -> str:
-    """Helper used by the simulator and tests to produce a valid checksum."""
-    return content_hash({"scene_id": scene_id, "field_id": field_id,
-                         "captured_at": _aware(captured_at).isoformat(), "ndvi_mean": ndvi_mean})
+def scene_checksum(scene_id: str, field_id: str, captured_at: datetime, ndvi_mean: float,
+                   file_sha256: str | None = None) -> str:
+    """Checksum binding a scene's metadata (and, for real imagery, its file hash) together."""
+    payload = {"scene_id": scene_id, "field_id": field_id,
+               "captured_at": _aware(captured_at).isoformat(), "ndvi_mean": ndvi_mean}
+    if file_sha256:
+        payload["file_sha256"] = file_sha256
+    return content_hash(payload)
+
+
+def fields_geojson(db: Session, org_id: str | None) -> dict[str, Any]:
+    """Every field as a GeoJSON Feature with its latest vegetation index, plus the footprint of
+    each drone orthophoto. Opens directly in QGIS (Layer > Add Vector Layer). Coordinates are
+    WGS84 (EPSG:4326), which is what the GeoJSON standard requires."""
+    from ..models import Farm, Field
+
+    field_query = select(Field).where(Field.deleted_at.is_(None))
+    scene_query = select(SatelliteScene).order_by(SatelliteScene.captured_at.desc()).limit(1000)
+    if org_id:
+        field_query = field_query.where(Field.org_id == org_id)
+        scene_query = scene_query.where(SatelliteScene.org_id == org_id)
+    scenes = list(db.execute(scene_query).scalars())
+    latest: dict[str, SatelliteScene] = {}
+    for scene in scenes:
+        latest.setdefault(scene.field_id, scene)
+    stress = {row["field_id"]: row for row in field_stress_ranking(db, org_id, limit=1000)}
+
+    features: list[dict[str, Any]] = []
+    for field in db.execute(field_query).scalars():
+        farm = db.get(Farm, field.farm_id)
+        geometry = field.boundary_geojson or (
+            {"type": "Point", "coordinates": [farm.longitude, farm.latitude]} if farm else None)
+        scene = latest.get(field.id)
+        ranked = stress.get(field.id, {})
+        features.append({"type": "Feature", "geometry": geometry, "properties": {
+            "layer": "field", "field_id": field.id, "field": field.name,
+            "farm": farm.name if farm else None, "area_ha": field.area_ha,
+            "soil_type": field.soil_type,
+            "index_name": scene.index_name if scene else None,
+            "index_mean": scene.ndvi_mean if scene else None,
+            "cloud_cover_pct": scene.cloud_cover_pct if scene else None,
+            "captured_at": scene.captured_at.isoformat() if scene else None,
+            "source": scene.source if scene else None,
+            "stress_index": ranked.get("stress_index"), "stress_level": ranked.get("level")}})
+    for scene in scenes:
+        if scene.footprint_geojson:
+            features.append({"type": "Feature", "geometry": scene.footprint_geojson, "properties": {
+                "layer": "drone_footprint", "scene_id": scene.scene_id,
+                "field_id": scene.field_id, "source": scene.source,
+                "index_name": scene.index_name, "index_mean": scene.ndvi_mean,
+                "file_sha256": scene.file_sha256, "anchor_tx_id": scene.anchor_tx_id,
+                "captured_at": scene.captured_at.isoformat()}})
+    return {"type": "FeatureCollection", "name": "absp_fields", "features": features}
+
+
+def field_label(field: Any) -> str:
+    """ "Block C (Green Valley North)": a field named with its farm."""
+    farm = getattr(field, "farm", None)
+    return f"{field.name} ({farm.name})" if farm is not None else field.name
 
 
 def field_stress_ranking(db: Session, org_id: str | None, limit: int = 10) -> list[dict[str, Any]]:
     """Precision-farming insight: rank fields by vegetation index and soil moisture."""
     from ..models import Field
 
-    query = select(SatelliteScene).order_by(SatelliteScene.captured_at.desc()).limit(400)
+    # NDVI scenes only: VARI from an RGB drone camera sits on a different scale, so mixing the
+    # two would rank a healthy drone-mapped field as stressed. Drone VARI has its own alert.
+    query = (select(SatelliteScene)
+             .where((SatelliteScene.index_name == "NDVI") | SatelliteScene.index_name.is_(None))
+             .order_by(SatelliteScene.captured_at.desc()).limit(400))
     if org_id:
         query = query.where(SatelliteScene.org_id == org_id)
     latest: dict[str, SatelliteScene] = {}
@@ -277,6 +382,9 @@ def field_stress_ranking(db: Session, org_id: str | None, limit: int = 10) -> li
                        + (0.3 * (1 - min(1.0, (moisture or 30) / 40)) if moisture is not None else 0.1), 4)
         ranking.append({
             "field_id": field_id, "field_name": field.name if field else "unknown",
+            # Two farms may both have a "Block C": the farm names the field unambiguously.
+            "farm_name": field.farm.name if field is not None and field.farm is not None
+            else None,
             "ndvi_mean": scene.ndvi_mean, "soil_moisture_pct": moisture,
             "captured_at": scene.captured_at, "stress_index": stress,
             "level": "HIGH" if stress > 0.55 else "MODERATE" if stress > 0.4 else "LOW",
@@ -309,3 +417,44 @@ def score_pending(telemetry_id: str) -> None:
             _ = verdict
     except Exception:                                    # noqa: BLE001
         security_event("deferred anomaly scoring failed", telemetry_id=telemetry_id)
+
+
+def rescore_unscored(db: Session, limit: int = 200, org_id: str | None = None,
+                     min_age: timedelta = timedelta(minutes=2)) -> int:
+    """Score stored readings that were never scored (the AI service was down at ingest, or a
+    deferred task was lost). Run by the health sweep; returns how many were scored.
+
+    Readings younger than `min_age` are left to their own background task. The pass stops at
+    the first ServiceUnavailable: the service is still down, and the rest wait for the next
+    sweep. The caller commits.
+    """
+    settings = get_settings()
+    query = (select(Telemetry).where(Telemetry.anomaly_score.is_(None),
+                                     Telemetry.received_at <= utcnow() - min_age)
+             .order_by(Telemetry.recorded_at.asc()).limit(limit))
+    if org_id is not None:
+        query = query.where(Telemetry.org_id == org_id)
+    scored = 0
+    for record in list(db.execute(query).scalars()):
+        device = db.get(Device, record.device_id)
+        if device is None:
+            continue
+        previous = db.execute(
+            select(Telemetry).where(Telemetry.device_id == device.id,
+                                    Telemetry.recorded_at < record.recorded_at)
+            .order_by(Telemetry.recorded_at.desc()).limit(1)).scalars().first()
+        try:
+            readings = decrypt_payload(record)
+            problems = ai_client.validate_readings(device.device_type, readings)
+            _score_and_persist(db, device, record, readings,
+                               previous.summary if previous else None, settings, problems)
+        except ai_client.service_http.ServiceUnavailable:
+            security_event("rescore paused: anomaly scoring is still unavailable",
+                           telemetry_id=record.id)
+            break
+        except Exception:                                # noqa: BLE001 - one bad row must not stop the pass
+            security_event("rescore of a stored reading failed", telemetry_id=record.id)
+            continue
+        scored += 1
+    db.flush()
+    return scored

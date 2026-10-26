@@ -56,8 +56,9 @@ agri-biotech-security-platform/
 ├── iot/                Device simulator (DEMO/SIMULATION fleet, real security envelope)
 ├── frontend/           28 view modules, framework-free ES modules, public verify.html
 ├── infrastructure/     Terraform (AWS) and Kubernetes manifests
-├── scripts/            run_local.sh, seed_demo.py, demo_flow.py, train_models.py, smoke_test.py
+├── scripts/            start.sh, stop.sh, run_local.sh, seed_demo.py, demo_flow.py, train_models.py
 ├── security/           Disclosure policy and OWASP ZAP rules
+├── fabric/             Hyperledger Fabric chaincode (absp-anchor) and the gateway bridge
 ├── .github/workflows/  CI and security pipelines
 ├── docker/             One Dockerfile per service (api, ai, ledger, frontend) + nginx config
 ├── requirements/       Per-image dependency subsets (requirements.txt is the full set)
@@ -66,12 +67,15 @@ agri-biotech-security-platform/
 ```
 
 `backend/` contains `app/` (16 routers, 11 service modules, 34-table model layer),
-`migrations/` (forward-only SQL runner) and `tests/` (469 tests, 102 of them security).
+`migrations/` (forward-only SQL runner) and `tests/` (791 tests).
 
 ## 5. Prerequisites
 
 - Python 3.12 with the packages in `requirements.txt` installed (`pip install -r requirements.txt`)
-- Node.js is **not** required — the frontend has no build step
+- Node.js is **not** required for the platform itself — the frontend has no build step. The
+  optional Hyperledger Fabric mirror (§12) does need Node.js 22.12 or newer for its bridge
+  (`@hyperledger/fabric-gateway` requires it); the version is pinned in `.nvmrc` and in
+  `engines` in `fabric/gateway/package.json`. With nvm: `nvm install 22 && nvm alias default 22`
 - Docker (optional, for the containerised path)
 - No internet access is required to run the platform
 
@@ -106,6 +110,14 @@ Sign in at `http://127.0.0.1:8000/` with any seeded account (password `DemoPassw
 | `regulator@absp.demo` | Regulator |
 
 Consumer verification needs no login: `http://127.0.0.1:8000/verify.html`.
+
+That is the no-Docker path, and it runs the ledger in-process. For the full containerised
+demonstration — all six services plus the Hyperledger Fabric mirror behind them, on
+`http://127.0.0.1:8080` — one command covers both halves (§16):
+
+```bash
+./scripts/start.sh
+```
 
 ## 7. Manual setup
 
@@ -181,6 +193,68 @@ python3 iot/simulator.py --mode malformed                  # demonstrates quaran
 python3 iot/simulator.py --mode cold-chain-break --count 10 # temperature excursion
 ```
 
+### IoT attack tests
+
+```bash
+python3 scripts/iot_attack_tests.py --api-url http://127.0.0.1:8000
+```
+
+Plays nine attackers against the live, seeded API: replay, forged signature, unregistered
+device, stale timestamp, impossible values, spoofed but validly signed data, and a tenant
+probing another organisation's shipments (which must stay a plain 404 *and* be counted by the
+data-theft detector). Runs in CI as the `iot-attack-tests` job of the Security workflow.
+
+### Drone imagery (OpenDroneMap) and QGIS
+
+OpenDroneMap turns drone photos into one georeferenced map (`odm_orthophoto.tif`).
+`scripts/odm_ingest.py` hashes that file, computes a vegetation index from the pixels (NDVI
+with a near-infrared band, VARI for an ordinary RGB camera), converts the footprint to WGS84
+and ingests it as a DRONE scene; the API anchors the file's SHA-256 on the ledger.
+
+```bash
+pip install -r requirements/geo.txt                       # rasterio, for these scripts only
+docker run --rm -v "$PWD/odm:/datasets" opendronemap/odm --project-path /datasets project --fast-orthophoto
+python3 scripts/odm_ingest.py --project odm/project --field-id <field id> --captured-at <flight time, ISO 8601>
+python3 scripts/make_sample_orthophoto.py --lat 42.03 --lon -93.63 --out sample.tif   # synthetic test image
+```
+
+The **Satellite & Drone** page has *Download fields for QGIS (GeoJSON)*: every field polygon
+with its latest index and stress level, plus each drone footprint. In QGIS: Layer > Add Layer >
+Add Vector Layer, then style by `index_mean`.
+
+Run once against real imagery: ODM's public Caliterra sample (77 photographs from a drone over
+Texas) was processed with `opendronemap/odm --fast-orthophoto` into a 1789 x 1937 px,
+10 cm RGB orthophoto, ingested as a DRONE scene by a farm operator (an agronomist cannot: it
+lacks `telemetry:write`), and the file's SHA-256 was found on both the local ledger and
+Fabric. It has no near-infrared band, so it took the VARI path and stayed out of the NDVI
+stress ranking. The exported GeoJSON was opened with GDAL (`ogrinfo`, `ogr2ogr`), the library
+QGIS reads files with: EPSG:4326, a footprint at lon -98.0911..-98.0892, lat 30.1704..30.1722,
+which matches the photographs' EXIF GPS. That is GDAL validation, not a QGIS desktop session.
+The ingest script needs only `requirements/geo.txt`; the first real run showed it had been
+importing the backend's own packages, which is fixed. The export mixes polygons and points
+in one layer (a field with no boundary is exported as a point), so QGIS offers it as sublayers.
+
+### Hyperledger Fabric mirror
+
+`./scripts/fabric_up.sh` starts a Fabric 2.5 test network (two organisations, Raft orderer),
+deploys the `absp-anchor` chaincode with `AND('Org1MSP.peer','Org2MSP.peer')` endorsement and
+starts the bridge. With `FABRIC_BRIDGE_URL` set, every ledger anchor is also written to Fabric,
+and record and batch verification return a second verdict read from Fabric. See
+`fabric/README.md`; `./scripts/fabric_down.sh` removes it. The bridge needs Node.js 22.12 or
+newer (§5); `fabric_up.sh` checks that before it downloads anything. `./scripts/start.sh`
+starts this and the compose stack together (§16).
+
+### Scheduled security sweeps
+
+`scripts/scheduled_tasks.py` (ledger anchor retry and Fabric re-mirror, silent devices,
+data-theft scoring, certification expiry) runs every 15 minutes as the Kubernetes CronJob
+`security-sweeps`, and every 5 minutes in the compose `scheduler` service, which starts with
+the stack. Repeated runs do not duplicate open alerts. Every ledger write is journalled in
+`ledger_writes` (migration 0004); one left PENDING/FAILED by a ledger outage is replayed in
+order (a batch before its events and custody transfers), and writes that arrive behind it
+are queued rather than rejected. An administrator or security analyst can run the same
+sweep with `POST /api/v1/blockchain/anchors/retry`.
+
 ## 13. Running the full demonstration
 
 ```bash
@@ -196,7 +270,7 @@ demonstration** → audit-chain verification. 25 steps, every check asserted.
 ## 14. Tests
 
 ```bash
-python3 -m pytest backend/tests/ -q                       # 469 tests
+python3 -m pytest backend/tests/ -q                       # 791 tests
 python3 -m pytest backend/tests/security/ -q               # RBAC, tenancy, injection, headers
 python3 -m pytest backend/tests/performance/ -q -s         # NFR measurements, printed
 ```
@@ -241,10 +315,31 @@ Five containers, one per component:
 | `db` | `postgres:16-alpine` | PostgreSQL | api only |
 
 ```bash
-docker compose up -d --build                 # whole stack; open http://127.0.0.1:8080
+./scripts/start.sh                           # Fabric + the whole stack; open http://127.0.0.1:8080
+./scripts/start.sh --rebuild                 # the same, rebuilding the images first
+./scripts/stop.sh                            # stop both halves again (data survives)
 docker compose --profile simulator up        # also run the IoT simulator against the api
 docker compose logs -f api                   # follow one service
 ```
+
+`start.sh` checks the prerequisites first (Docker running, `.env`, `$FABRIC_DIR`, Node 22 for
+the bridge), starts Fabric unless it is already running, waits for the bridge to answer, brings
+the stack up, waits for the platform and prints the demo accounts. Re-running it is harmless:
+a Fabric network that is already up is reused rather than torn down and rebuilt, so a seeded
+demonstration survives a second start. Only `./scripts/start.sh --fresh` destroys data — it
+runs `docker compose down -v` and `fabric_down.sh`, then starts clean and re-seeds — and it
+asks for confirmation unless `--yes` is passed.
+
+Underneath it is the two manual steps, which still work on their own:
+
+```bash
+export FABRIC_DIR=$HOME/absp-fabric
+BRIDGE_HOST=0.0.0.0 ./scripts/fabric_up.sh                 # Fabric network + bridge on :8300
+COMPOSE_FABRIC_BRIDGE_URL=http://host.docker.internal:8300 docker compose up -d
+```
+
+Without the Fabric half, `docker compose up -d --build` on its own is enough; the mirror is
+optional (§12).
 
 `.env` must define `JWT_SECRET`, `ENCRYPTION_KEY`, `POSTGRES_PASSWORD` and `SERVICE_TOKEN`
 (see `.env.example`). The first start seeds the same demonstration dataset as `run_local.sh`.
@@ -253,7 +348,8 @@ Every image is non-root with a read-only root filesystem, no capabilities and a 
 
 ### Kubernetes
 
-The same five services run on Kubernetes from `infrastructure/k8s/`: `base/` is the
+The same five application services run on Kubernetes from `infrastructure/k8s/`, with the
+scheduler's sweeps as a CronJob rather than a sixth Deployment: `base/` is the
 production-shaped set (default-deny NetworkPolicies, non-root read-only pods, HPA, Ingress) and
 `local/` adapts it for a local k3d cluster.
 
@@ -264,11 +360,26 @@ kubectl --context k3d-absp -n absp get pods
 ```
 
 The scripts never change your current kubectl context. Secrets are created from `.env` and
-never written to disk.
+never written to disk. `K8S_HOST_PORT` (default 8080) and `K8S_CLUSTER` (default `absp`) move the
+published port and the cluster name, so it can run beside the compose stack:
+`K8S_HOST_PORT=8081 ./scripts/k8s_up.sh`.
+
+This path has been run, once, on a single-node k3d cluster on the development machine. From a
+cold cluster, import of the four images, the `db-init` Job (with `--seed`), the StatefulSets and
+Deployments all came up Ready in about a minute; the `api` pod and the Job restarted a few times
+while the database was still pulling its image, which is the retry loop doing its job. Through the
+published port, `admin@absp.demo` logged in, the batch list returned the seeded data, the
+ledger replay verified (27 blocks, 55 signatures), and a hand-triggered run of the
+`security-sweeps` CronJob completed. The default-deny NetworkPolicies are enforced by k3s: the
+frontend pod could reach `api:8000` and could not reach `db:5432`. What this does **not** show:
+it is one node and one run, with the Ingress and TLS (deleted in `local/`), the HPA under load and
+a multi-node scheduler never exercised, and nothing here touches a cloud cluster. The Fabric mirror is
+off in this deployment ("no bridge configured").
 
 ### Terraform (local)
 
-`infrastructure/terraform-local/` deploys the same five containers, two networks and three
+`infrastructure/terraform-local/` deploys the same five application containers (no scheduler;
+run the sweeps by hand), two networks and three
 volumes to this machine's Docker with the `kreuzwerker/docker` provider. The AWS configuration in
 `infrastructure/terraform/` is separate and untouched.
 
@@ -278,7 +389,17 @@ volumes to this machine's Docker with the `kreuzwerker/docker` provider. The AWS
 ```
 
 Secrets are passed from `.env` as `TF_VAR_*` and never written to a tfvars file; the local
-state file holds them and is gitignored.
+state file holds them and is gitignored. The published port is the `frontend_port` variable
+(default 8080, always bound to 127.0.0.1): `TF_VAR_frontend_port=8082 ./scripts/tf_local_up.sh`.
+
+This path has been applied and destroyed once on the development machine with the port set to
+8082. `init` and `apply` created the 11 resources, the UI answered, `admin@absp.demo` logged in,
+the batch list returned seeded data and the ledger replay verified; `tf_local_down.sh` then
+removed all of them (empty state, no `absp-*` containers, volumes or networks left). One thing to
+know: an `apply` that is killed part-way can leave a container that Terraform never recorded, and
+the next apply then fails with a name conflict on it (`docker rm -f absp-api` clears it). The
+database is reached on the internal network only, and, as with compose, the sweeps do not run
+here.
 
 ## 17. CI/CD
 
@@ -322,6 +443,8 @@ Post-deploy: `python3 scripts/smoke_test.py --api-url https://your-deployment`.
 | Telemetry returns 404 "Device authentication failed" | Wrong or stale device secret, or the device is not `ACTIVE` | Re-provision the device or check `demo_device_secrets.json` |
 | Login returns 429 | The authentication rate limiter (10/minute/IP) — a real security control | Wait for `Retry-After`, do not disable the limiter |
 | A view shows "Not available to your role" | The signed-in role lacks the required permission | Sign in as a role with that permission |
+| `fabric_up.sh` stops with "needs Node.js 22 or newer" | The Fabric gateway library requires Node 22.12+ (`.nvmrc`) | `nvm install 22 && nvm alias default 22`, then run `./scripts/start.sh` again |
+| `start.sh` reports "The bridge did not answer" | The gateway failed to start | Read `$FABRIC_DIR/bridge.log`; `./scripts/start.sh --fresh` rebuilds the network (and wipes the demo data) |
 
 ## 20. Demo workflow for the oral presentation
 
@@ -335,8 +458,11 @@ Post-deploy: `python3 scripts/smoke_test.py --api-url https://your-deployment`.
 ## 21. Requirements coverage
 
 Three requirements from the exam brief are only partly met: no independent accessibility
-audit or assistive-technology user testing; Hyperledger Fabric and BLAST implemented as model
-and algorithm rather than the named products running; and OpenDroneMap/QGIS not integrated.
+audit or assistive-technology user testing; BLAST implemented as an algorithm (k-mer seeding
+with Smith-Waterman) rather than the named product running; and the QGIS GeoJSON export, which
+has been validated with GDAL against a real OpenDroneMap run (§13) but never opened in QGIS
+desktop. Hyperledger Fabric is no longer on this list: §12 runs the named
+product.
 
 ## 22. Known limitations
 
@@ -344,14 +470,27 @@ What is real, what is simulated, and what remains outstanding:
 
 * IoT devices, telemetry values, satellite scene data and hazard sequences are **simulated** —
   the fleet is simulated, the security envelope around it is not.
+* Drone imagery has been run **once** against real photographs (ODM's Caliterra sample, RGB only)
+  and the export validated with GDAL, not QGIS desktop. Not yet run: a multispectral flight with a
+  near-infrared band (the NDVI path from real pixels), a large orthophoto at full resolution, or
+  imagery of one of this platform's own fields. The API does not check that a footprint lies on
+  the field it is filed against, and `captured_at` defaults to the file's modified time (when ODM
+  finished) unless `--captured-at` is given.
 * AI models use **synthetic labelled demonstration datasets**; reported metrics describe the
   synthetic task only.
-* The ledger is a **local single-node permissioned cryptographic ledger**, not a deployed
-  Hyperledger Fabric consortium.
-* Terraform and Kubernetes manifests are implemented and validate, but have **never been applied**
-  to live cloud infrastructure.
-* CI and Security workflows run **green on GitHub-hosted runners** (commit `d3c1c60`): `iac-scan`,
-  `lint-and-test`, `build-and-scan-image`, `secret-scan`, `smart-contract-tests`, `dast`.
+* The local ledger is a **single-node permissioned cryptographic ledger** and remains the
+  system of record. Every anchor is mirrored to a **real Hyperledger Fabric 2.5 network**
+  (§12) — two organisations, a Raft orderer, `AND(Org1MSP.peer, Org2MSP.peer)` endorsement —
+  but that is Fabric's own test network with both organisations on this machine, not a
+  production consortium across separate companies.
+* The Kubernetes manifests and the local Terraform configuration have each been run once on this
+  machine (k3d and the local Docker engine) and served real traffic (§16). The AWS Terraform in
+  `infrastructure/terraform/` validates and plans but has **never been applied**, and nothing has
+  run on a live cloud cluster.
+* CI and Security workflows run on GitHub-hosted runners over every pull request — `lint-and-test`,
+  `build-and-scan-image` (one image per service), `iac-scan`, `secret-scan`, `smart-contract-tests`,
+  `dast` and `iot-attack-tests`. The container gate earns its place: it failed the branch on three
+  fixable nginx CVEs, which were fixed by re-pinning the base image rather than by relaxing the gate.
 * Container scanning: all HIGH/CRITICAL findings with an available vendor fix were remediated.
   60 HIGH/CRITICAL findings remain in Debian base-image OS packages with no published fix at the
   time of testing, and are documented as residual risk.

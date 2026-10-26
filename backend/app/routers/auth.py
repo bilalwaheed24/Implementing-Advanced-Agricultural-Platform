@@ -51,7 +51,13 @@ def logout(request: Request, principal: CurrentUser, db: DbSession) -> dict[str,
 
 
 @router.get("/me", summary="Current principal and effective permissions")
-def me(principal: CurrentUser) -> dict[str, object]:
+def me(principal: CurrentUser, db: DbSession) -> dict[str, object]:
+    from ..models import Organization
+
+    # The caller's own organisation name. Every role may know whom it works for, while the
+    # partner directory is open only to the roles that hand records over.
+    organization = db.get(Organization, principal.org_id)
     return {"id": principal.id, "email": principal.email, "full_name": principal.full_name,
             "role": principal.role, "org_id": principal.org_id,
+            "org_name": organization.name if organization else None,
             "permissions": principal.permissions()}

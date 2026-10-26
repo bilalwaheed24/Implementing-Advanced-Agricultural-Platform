@@ -1,13 +1,16 @@
-import { el, api, badge, field, fmtDate, can, toast } from '/static/assets/core.js';
+import { el, api, badge, field, fmtDate, fmtDay, can, toast, jurisdictionLabel, humanize }
+  from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
-import { createPanel, remoteSelect, choiceSelect } from '/static/views/formkit.js';
+import { createPanel, remoteSelect, choiceSelect, atNoon } from '/static/views/formkit.js';
 
+// The same codes the compliance rules and labelling rules evaluate (services/compliance.py,
+// services/gmo.py LABELLING_RULES). A code outside this list would record an approval that
+// no rule ever recognises.
 const JURISDICTIONS = [
+  ['US-USDA', 'United States — USDA'],
+  ['US-FDA', 'United States — FDA'],
   ['EU', 'European Union'],
-  ['US', 'United States'],
-  ['BR', 'Brazil'],
-  ['CA', 'Canada'],
-  ['JP', 'Japan'],
+  ['CODEX', 'Codex Alimentarius (international)'],
 ];
 
 const DECISIONS = [
@@ -29,7 +32,12 @@ function approvalForm(reload) {
   const decision = choiceSelect(DECISIONS);
   const reference = el('input', { maxlength: '120',
     placeholder: 'your decision reference, e.g. EFSA-GMO-2026-004' });
+  const approvedOn = el('input', { type: 'date' });
+  const expiresOn = el('input', { type: 'date' });
   const decided = el('div', { class: 'hint' });
+  // Local noon (or now, for today), as every other date form: midnight UTC is the
+  // previous evening west of Greenwich.
+  const asInstant = (input) => atNoon(input.value);
 
   // Show what is already on record for the chosen event, so a decision is never taken blind.
   event.addEventListener('change', async () => {
@@ -38,7 +46,8 @@ function approvalForm(reload) {
     try {
       const approvals = await api(`/gmo/events/${event.value}/approvals`);
       decided.textContent = approvals.length
-        ? `On record: ${approvals.map((a) => `${a.jurisdiction} ${a.status}`).join(', ')}`
+        ? `On record: ${approvals.map((a) => `${jurisdictionLabel(a.jurisdiction)} — `
+          + `${humanize(a.status).toLowerCase()}`).join(', ')}`
         : 'No jurisdictional decision recorded yet.';
     } catch { decided.textContent = ''; }
   });
@@ -47,19 +56,27 @@ function approvalForm(reload) {
     toggleLabel: 'Record a jurisdictional decision',
     submitLabel: 'Record decision',
     hint: 'A granted approval may later be withdrawn by rejecting it; a rejected one must be '
-      + 'resubmitted as pending rather than flipped straight back to approved.',
+      + 'resubmitted as pending rather than flipped straight back to approved. An approval '
+      + 'stops counting for plantings and batches after its expiry date.',
     controls: [
       ['GMO event', event, decided],
       ['Jurisdiction', jurisdiction],
       ['Decision', decision],
       ['Reference', reference],
+      ['Decision date', approvedOn],
+      ['Expires on', expiresOn],
     ],
     submit: async () => {
+      if (approvedOn.value && expiresOn.value && expiresOn.value <= approvedOn.value) {
+        throw new Error('The expiry date must be after the decision date.');
+      }
       await api(`/gmo/events/${event.value}/approvals`, { method: 'POST', body: {
         jurisdiction: jurisdiction.value, status: decision.value,
         reference: reference.value || null,
+        approved_at: asInstant(approvedOn), expires_at: asInstant(expiresOn),
       } });
-      return `Decision recorded: ${jurisdiction.value} ${decision.value}`;
+      return `Decision recorded: ${jurisdictionLabel(jurisdiction.value)} — `
+        + `${humanize(decision.value).toLowerCase()}`;
     },
     onDone: reload,
   });
@@ -120,11 +137,35 @@ function registerForm(reload) {
   return el('div', {}, [toggle, form]);
 }
 
+/* Each jurisdictional decision on record, with its expiry. An APPROVED decision that is not
+ * live (expired, or its decision date still ahead) is shown as such rather than as approved,
+ * because it no longer permits seed lots, plantings or batches. */
+function approvalsCell(row) {
+  const approvals = row.approvals || [];
+  if (!approvals.length) {
+    return el('span', { class: 'hint', text: 'Awaiting a decision' });
+  }
+  return el('div', {}, approvals.map((a) => {
+    const lapsed = a.status === 'APPROVED' && a.live === false;
+    const status = lapsed ? 'Not in force' : a.status;
+    return el('div', { class: 'u-mt-6' }, [
+      el('span', { text: `${jurisdictionLabel(a.jurisdiction)} ` }),
+      badge(status, lapsed ? 'warning' : 'neutral'),
+      a.expires_at ? el('span', { class: 'hint',
+        text: ` ${lapsed && new Date(a.expires_at) <= new Date() ? 'expired' : 'expires'} `
+          + fmtDay(a.expires_at) }) : null,
+    ]);
+  }));
+}
+
 export const render = listView({
   title: 'GMO transformation event registry',
   subtitle: 'Every event is anchored to the permissioned ledger with a SHA-256 content hash, '
     + 'endorsed by the biotech developer and the regulator.',
   endpoint: '/gmo/events',
+  // The regulator's queue: events with no decision yet, or one still pending.
+  filters: [{ key: 'awaiting_decision', label: 'Decision', allLabel: 'All events',
+    options: ['true'], optionLabel: () => 'Awaiting a decision' }],
   actions: ({ reload }) => {
     const panels = [
       can('gmo:write') ? registerForm(reload) : null,
@@ -138,11 +179,19 @@ export const render = listView({
     { label: 'Crop', key: 'crop_type' },
     { label: 'Trait', key: 'trait' },
     { label: 'Developer', key: 'developer' },
+    { label: 'Approvals', render: (row) => approvalsCell(row) },
     { label: 'Anchor', render: (row) => badge(row.anchor_status) },
+    // Plain text, not a link: the blockchain page has no per-transaction view to land on.
     { label: 'Ledger', render: (row) => row.tx_id
-      ? el('a', { href: `#/blockchain?tx=${row.tx_id}`, class: 'mono',
-        text: row.tx_id.slice(0, 12) }) : '—' },
+      ? el('span', { class: 'mono', title: row.tx_id, text: `${row.tx_id.slice(0, 12)}…` })
+      : '—' },
   ],
+  // Client-side: the event list endpoint has no text search parameter.
+  search: { placeholder: 'Event code, crop, trait or developer',
+    fields: (row) => `${row.event_code} ${row.crop_type} ${row.trait} ${row.developer}` },
+  emptyFor: (active) => (active.awaiting_decision
+    ? { title: 'No events are awaiting a decision.',
+      message: 'Every registered event has a jurisdictional decision on record.' } : null),
   emptyTitle: 'No GMO events registered',
   emptyMessage: 'Screen a sequence first, then register the event against that screening.',
 });

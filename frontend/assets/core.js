@@ -47,19 +47,31 @@ export function field(labelText, control, extras = []) {
 }
 
 /* ---------------- formatting ---------------- */
+/* Dates read "23 Sep 2026" (and "23 Sep 2026, 14:05"), the form the server writes into
+ * alert and notification text. Month names are spelled out here rather than taken from the
+ * locale, which gives "Sept" in some browsers and so mixed two styles on one screen. */
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov',
+  'Dec'];
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+const pad2 = (n) => String(n).padStart(2, '0');
+function dayText(date) {
+  return `${date.getDate()} ${MONTHS[date.getMonth()]} ${date.getFullYear()}`;
+}
 export function fmtDate(value) {
   if (!value) return '—';
+  // A bare date has no time of day to show (and parsing it as UTC midnight would show the
+  // previous day west of Greenwich).
+  if (DATE_ONLY.test(String(value))) return fmtDay(value);
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString(undefined, {
-    year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit',
-  });
+  return `${dayText(date)}, ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
 }
 export function fmtDay(value) {
   if (!value) return '—';
+  const bare = DATE_ONLY.exec(String(value));
+  if (bare) return `${Number(bare[3])} ${MONTHS[Number(bare[2]) - 1]} ${bare[1]}`;
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value)
-    : date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' });
+  return Number.isNaN(date.getTime()) ? String(value) : dayText(date);
 }
 export function fmtNum(value, digits = 2) {
   if (value === null || value === undefined || value === '') return '—';
@@ -89,9 +101,14 @@ export function titleCase(value) {
 /* Terms whose natural English form is not simply the title-cased enum. Everything else
  * falls through to titleCase, so this stays short rather than becoming a dictionary. */
 const TERM_LABELS = {
-  KNOCK_IN: 'Knock-in', KNOCK_OUT: 'Knock-out', KNOCKOUT: 'Knockout',
+  KNOCK_IN: 'Knock-in', KNOCK_OUT: 'Knock-out', KNOCKOUT: 'Knock-out', KNOCKIN: 'Knock-in',
   BASE_EDIT: 'Base edit', PRIME_EDIT: 'Prime edit', MULTIPLEX: 'Multiplex',
   NON_GMO: 'Non-GMO', CONTAINS_GMO: 'Contains GMO', NO_GMO_RECORDED: 'No GMO recorded',
+  // Notification category; the rest of the UI writes "hand-over".
+  HANDOVER: 'Hand-over',
+  // Device types, written as the registration form writes them.
+  COLD_CHAIN_SENSOR: 'Cold-chain sensor', LAB_INSTRUMENT: 'Lab instrument',
+  NOT_FLAGGED: 'Not flagged',
 };
 
 /* Role codes shown to people. Sentence case, and the full job title rather than a
@@ -108,12 +125,23 @@ const ROLE_LABELS = {
  * One label used by both the filter and the table so the two cannot disagree. */
 const JURISDICTION_LABELS = {
   'US-USDA': 'USDA (US)', 'US-FDA': 'FDA (US)', EU: 'EU',
-  CODEX: 'Codex Alimentarius', GS1: 'GS1',
+  // GS1 is a data standard (product and batch identifiers), not a legal jurisdiction.
+  CODEX: 'Codex Alimentarius', GS1: 'GS1 data standard',
 };
 
 export function jurisdictionLabel(value) {
   const key = String(value || '').toUpperCase();
   return JURISDICTION_LABELS[key] || titleCase(value);
+}
+
+/* Organisation types, one label for the registration dropdown, tables and pickers. */
+const ORG_TYPE_LABELS = {
+  FARM: 'Farm', SUPPLY: 'Processor / supply chain', BIOTECH: 'Biotech developer',
+  REGULATOR: 'Regulator / certifier',
+};
+export function orgTypeLabel(value) {
+  const key = String(value || '').toUpperCase();
+  return ORG_TYPE_LABELS[key] || humanize(key);
 }
 
 export function roleLabel(value) {
@@ -142,7 +170,144 @@ export function termLabel(value) {
 const ENUM_TOKEN = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g;
 
 export function humanizeText(value) {
-  return String(value ?? '').replace(ENUM_TOKEN, (match) => termLabel(match));
+  return String(value ?? '').replace(ENUM_TOKEN, (match) => humanize(match));
+}
+
+/* Status and outcome codes whose plain reading is not just the words of the enum. */
+const STATUS_LABELS = {
+  APPROVED_AUTO: 'Approved automatically', APPROVED_BY_REVIEW: 'Approved after review',
+  PENDING_REVIEW: 'Pending review', IN_TRANSIT: 'In transit', NON_COMPLIANT: 'Not compliant',
+  RETAIL_SELLING: 'On sale', NOT_SUBMITTED: 'Not submitted',
+};
+
+/* One enum value (APPROVED_AUTO, KNOCK_IN, PLANT_PATHOGEN) as a reader would say it:
+ * "Approved automatically", "Knock-in", "Plant pathogen". Anything that is not
+ * enum-shaped is returned unchanged, so it is safe on free text. */
+export function humanize(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const text = String(value);
+  const key = text.toUpperCase();
+  if (STATUS_LABELS[key]) return STATUS_LABELS[key];
+  if (!/^[A-Z0-9_]+$/.test(text)) return text;
+  return termLabel(text);
+}
+
+/* Record types as stored in audit and notification rows (CrisprAssessment, SeedLot). */
+const ENTITY_LABELS = {
+  SequenceScreening: 'Sequence screening', CrisprAssessment: 'CRISPR assessment',
+  SeedLot: 'Seed lot', GMOEvent: 'GMO event', GmoEvent: 'GMO event',
+  GMOApproval: 'GMO approval', SupplyChainEvent: 'Supply-chain event',
+  FraudAssessment: 'Fraud assessment', ComplianceReport: 'Compliance report',
+  AIAnalysis: 'AI analysis', SatelliteScene: 'Imagery scene', HazardSequence: 'Hazard sequence',
+  Organization: 'Organisation', AuditLog: 'Audit record', BlockchainTx: 'Ledger transaction',
+  RefreshToken: 'Session',
+};
+
+/* Where a record of a given type can be opened, and the permission that screen needs.
+ * A type with a detail route gets the record itself; otherwise its list. */
+const ENTITY_ROUTES = {
+  Device: [(id) => `#/device/${id}`, 'device:read'],
+  Batch: [(id) => `#/batch/${id}`, 'supply:read'],
+  SeedLot: [() => '#/seed-lots', 'gmo:read'],
+  SequenceScreening: [(id) => `#/screening/${id}`, 'biosecurity:read'],
+  CrisprAssessment: [() => '#/crispr', 'biosecurity:read'],
+  Certification: [() => '#/certifications', 'cert:read'],
+  Farm: [(id) => `#/farm/${id}`, 'farm:read'],
+  Field: [() => '#/farms', 'farm:read'],
+  Crop: [() => '#/farms', 'farm:read'],
+  Incident: [(id) => `#/incident/${id}`, 'incident:read'],
+  Alert: [() => '#/alerts', 'alert:read'],
+  GMOEvent: [() => '#/gmo', 'gmo:read'],
+  Shipment: [() => '#/shipments', 'supply:read'],
+  Product: [() => '#/products', 'supply:read'],
+  FraudAssessment: [() => '#/fraud', 'supply:read'],
+  ComplianceReport: [() => '#/compliance', 'compliance:read'],
+  User: [() => '#/users', 'user:read'],
+  SatelliteScene: [() => '#/satellite', 'telemetry:read'],
+  DeviceVulnerability: [() => '#/devices', 'device:read'],
+};
+
+/* The in-app link for a record, or null when it has no screen or the role cannot open it. */
+export function entityHref(type, id) {
+  const route = ENTITY_ROUTES[type];
+  if (!route || !id) return null;
+  const [href, permission] = route;
+  return !permission || can(permission) ? href(id) : null;
+}
+
+export function entityLabel(value) {
+  if (!value) return '';
+  if (ENTITY_LABELS[value]) return ENTITY_LABELS[value];
+  // CamelCase to words, sentence case: "DeviceVulnerability" -> "Device vulnerability".
+  const words = String(value).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/_/g, ' ')
+    .split(' ').filter(Boolean);
+  return words.map((word, index) => {
+    if (ACRONYMS.has(word.toUpperCase())) return word.toUpperCase();
+    const lower = word.toLowerCase();
+    return index === 0 ? lower.charAt(0).toUpperCase() + lower.slice(1) : lower;
+  }).join(' ');
+}
+
+/* "1 finding", "3 findings": a count with its noun, never "finding(s)". */
+export function plural(count, singular, pluralForm = `${singular}s`) {
+  const number = Number(count) || 0;
+  return `${number.toLocaleString()} ${number === 1 ? singular : pluralForm}`;
+}
+
+/* ---------------- sensor channels ---------------- */
+/* Telemetry channel keys (ai/anomaly.py FEATURES) as a reader names them, with the unit.
+ * One table for every screen that shows a channel, so "yield_t_ha" never reaches the page
+ * as "Yield t ha". */
+const CHANNELS = {
+  air_temp_c: ['Air temperature', '°C'], soil_temp_c: ['Soil temperature', '°C'],
+  temp_c: ['Temperature', '°C'], chamber_temp_c: ['Chamber temperature', '°C'],
+  freezer_temp_c: ['Freezer temperature', '°C'],
+  humidity_pct: ['Humidity', '%'], soil_moisture_pct: ['Soil moisture', '%'],
+  moisture_pct: ['Moisture', '%'], co2_pct: ['CO₂', '%'], battery_pct: ['Battery', '%'],
+  ph: ['Soil pH', ''], ec_ds_m: ['Conductivity', 'dS/m'],
+  nitrogen_ppm: ['Nitrogen', 'ppm'], phosphorus_ppm: ['Phosphorus', 'ppm'],
+  potassium_ppm: ['Potassium', 'ppm'], rainfall_mm: ['Rainfall', 'mm'],
+  solar_w_m2: ['Solar radiation', 'W/m²'], wind_speed_ms: ['Wind speed', 'm/s'],
+  speed_ms: ['Speed', 'm/s'], speed_kmh: ['Speed', 'km/h'],
+  cabinet_airflow_ms: ['Cabinet airflow', 'm/s'], altitude_m: ['Altitude', 'm'],
+  swath_m: ['Swath width', 'm'], images_captured: ['Images captured', ''],
+  yield_t_ha: ['Yield', 't/ha'], flow_l_min: ['Flow', 'L/min'],
+  pressure_bar: ['Pressure', 'bar'], duration_s: ['Duration', 's'], shock_g: ['Shock', 'g'],
+  anomaly_score: ['Anomaly score', ''],
+};
+/* Fallback for a channel not in the table: compound units first, then single suffixes. */
+const UNIT_SUFFIXES = [
+  [['t', 'ha'], 't/ha'], [['l', 'min'], 'L/min'], [['w', 'm2'], 'W/m²'], [['ds', 'm'], 'dS/m'],
+  [['kmh'], 'km/h'], [['ms'], 'm/s'], [['pct'], '%'], [['c'], '°C'], [['mm'], 'mm'],
+  [['ppm'], 'ppm'], [['kg'], 'kg'], [['m'], 'm'], [['g'], 'g'], [['ha'], 'ha'],
+  [['bar'], 'bar'], [['s'], 's'],
+];
+
+/* [name, unit] for a channel key; unit is '' when the quantity has none. */
+export function channelParts(key) {
+  const known = CHANNELS[String(key || '').toLowerCase()];
+  if (known) return known;
+  const parts = String(key || '').toLowerCase().split('_').filter(Boolean);
+  for (const [suffix, unit] of UNIT_SUFFIXES) {
+    const tail = parts.slice(-suffix.length);
+    if (parts.length > suffix.length && tail.join('_') === suffix.join('_')) {
+      return [termLabel(parts.slice(0, -suffix.length).join('_')), unit];
+    }
+  }
+  return [termLabel(parts.join('_')), ''];
+}
+
+/* "Yield (t/ha)", "Moisture (%)", "Soil pH": a heading or axis caption for a channel. */
+export function channelLabel(key) {
+  const [name, unit] = channelParts(key);
+  return unit ? `${name} (${unit})` : name;
+}
+
+/* "Yield 7.2 t/ha", "Moisture 14%": one reading in running text. */
+export function channelReading(key, value, digits = 1) {
+  const [name, unit] = channelParts(key);
+  const tight = unit === '%' || unit === '°C';
+  return `${name} ${fmtNum(value, digits)}${unit && !tight ? ' ' : ''}${unit}`;
 }
 
 /* ---------------- severity ---------------- */
@@ -169,8 +334,19 @@ export function badge(value, fallback = 'neutral') {
   const kind = SEVERITY_CLASS[key] || fallback;
   return el('span', { class: `badge ${kind}` }, [
     el('span', { class: 'icon', 'aria-hidden': 'true', text: SEVERITY_ICON[kind] || '·' }),
-    titleCase(value || 'unknown'),
+    badgeLabel(value),
   ]);
+}
+
+/* A badge reads exactly as the same value does in a table column, filter or dropdown
+ * (humanize: "Non-GMO", "In transit", "Device health"). Free text passed in ("Low risk")
+ * is kept in its own sentence case; only its first letter is raised. */
+function badgeLabel(value) {
+  const text = String(value || 'unknown');
+  if (/^[A-Z0-9_]+$/.test(text.toUpperCase()) && !/\s/.test(text)) {
+    return humanize(text.toUpperCase());
+  }
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 /* ---------------- toasts ---------------- */
@@ -244,8 +420,11 @@ export async function api(path, { method = 'GET', body, retry = true, raw = fals
   const headers = { 'Content-Type': 'application/json' };
   if (current?.access_token) headers.Authorization = `Bearer ${current.access_token}`;
 
+  // no-store: counts and lists must reflect a change made a moment ago, never a cached copy
+  // (the server also sends Cache-Control: no-store; this covers an intermediary that ignores it).
   const response = await fetch(path.startsWith('/api') ? path : API + path, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body),
+    cache: 'no-store',
   });
 
   if (response.status === 401 && retry && current?.refresh_token) {
@@ -264,12 +443,110 @@ export async function api(path, { method = 'GET', body, retry = true, raw = fals
   return safeJson(response);
 }
 
+/* ---------------- trading-partner directory ---------------- */
+/* Names of the active organisations, fetched once per page load and shared by every view
+ * that has to say who holds a record or offer whom to hand it to. */
+let directoryPromise = null;
+let directoryUser = null;
+/* The server offers the directory only to roles that hand records over (or administer
+ * users); for any other role the call is a predictable 403, so it is not made. */
+const DIRECTORY_PERMISSIONS = ['supply:write', 'gmo:write', 'user:read'];
+export function orgDirectory() {
+  const user = session.read()?.id || null;
+  if (user !== directoryUser) { directoryPromise = null; directoryUser = user; }
+  if (!DIRECTORY_PERMISSIONS.some((permission) => can(permission))) {
+    return Promise.resolve([]);
+  }
+  if (!directoryPromise) {
+    directoryPromise = api('/admin/organizations/directory').catch(() => {
+      directoryPromise = null;
+      return [];
+    });
+  }
+  return directoryPromise;
+}
+
+/* A span that shows an organisation's name once the directory has loaded. The caller's own
+ * organisation is named from the session, so it reads correctly even for a role that has
+ * no directory access. */
+export function orgName(orgId, fallback = '—', { ownSuffix = ' (you)' } = {}) {
+  const span = el('span', { text: orgId ? '…' : fallback });
+  if (orgId) {
+    orgDirectory().then((rows) => {
+      const current = session.read();
+      const found = rows.find((row) => row.id === orgId);
+      const own = orgId === current?.org_id;
+      span.textContent = found ? found.name
+        : (own ? (current?.org_name || 'Your organisation') : fallback);
+      if (own && ownSuffix && (found || current?.org_name)) span.textContent += ownSuffix;
+    });
+  }
+  return span;
+}
+
+/* Re-render the current view in place after a change. A full page reload would also wipe
+ * the confirmation toast the action just raised, so the user never saw it succeed. */
+export function refreshView() {
+  window.dispatchEvent(new HashChangeEvent('hashchange'));
+}
+
 /* ---------------- permissions ---------------- */
 export function can(permission) {
   const current = session.read();
   return Boolean(current?.permissions?.includes(permission));
 }
 export function role() { return session.read()?.role || ''; }
+
+/* Roles that read across organisations (backend core/permissions.py CROSS_TENANT_ROLES), so
+ * copy saying "your organisation" is not true for them. */
+const CROSS_TENANT_ROLES = new Set(['ADMIN', 'REGULATOR', 'SECURITY_ANALYST',
+  'BIOSAFETY_OFFICER']);
+export function isCrossTenant(value = role()) {
+  return CROSS_TENANT_ROLES.has(String(value || '').toUpperCase());
+}
+
+/* Menu items withheld from roles that hold the read permission but can never see data there:
+ * the records belong to other organisations (each organisation sees its own rows only).
+ * The page itself stays reachable; this only keeps the menu to what the role works with.
+ * Shared by the menu (app.js) and the Settings capability list, so the two agree. */
+export const NOT_USEFUL_FOR = {
+  '#/devices': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/telemetry': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/satellite': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/ai': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER', 'BIOTECH_RESEARCHER'],
+  '#/gmo': ['FARM_OPERATOR', 'AGRONOMIST', 'SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/seed-lots': ['SUPPLY_CHAIN_OPERATOR', 'CERTIFIER'],
+  '#/batches': ['BIOTECH_RESEARCHER', 'CERTIFIER'],
+  '#/products': ['BIOTECH_RESEARCHER', 'CERTIFIER', 'AGRONOMIST'],
+  '#/shipments': ['BIOTECH_RESEARCHER', 'CERTIFIER', 'AGRONOMIST'],
+  '#/fraud': ['BIOTECH_RESEARCHER', 'CERTIFIER', 'AGRONOMIST'],
+};
+export function menuHidden(path, value = role()) {
+  return (NOT_USEFUL_FOR[path] || []).includes(String(value || '').toUpperCase());
+}
+
+/* Farm and field names, so a field is always named with its farm: two farms may both have
+ * a "Block C". Loaded once per render; a role without farm:read gets empty maps and callers
+ * fall back to the name they already have. */
+export async function loadFieldPlaces() {
+  const places = { farms: new Map(), fields: new Map() };
+  if (!can('farm:read')) return places;
+  const [farms, fields] = await Promise.all([
+    api('/farms?page=1&page_size=200').catch(() => ({ items: [] })),
+    api('/fields?page=1&page_size=200').catch(() => ({ items: [] })),
+  ]);
+  for (const row of farms.items || []) places.farms.set(row.id, row.name);
+  for (const row of fields.items || []) places.fields.set(row.id, row);
+  return places;
+}
+/* "Green Valley North — Block C". `fallbackName` is used when the field is not loaded. */
+export function fieldPlaceName(places, fieldId, fallbackName = null) {
+  const fieldRow = places?.fields?.get(fieldId);
+  const name = fieldRow?.name || fallbackName;
+  if (!name) return null;
+  const farm = fieldRow ? places.farms.get(fieldRow.farm_id) : null;
+  return farm ? `${farm} — ${name}` : name;
+}
 
 /* ---------------- rendering helpers ---------------- */
 export function loading(label = 'Loading…') {
@@ -311,8 +588,9 @@ export function errorBox(error) {
   return el('div', { class: 'card', role: 'alert' }, parts);
 }
 
-export function tile(label, value, hint) {
-  return el('div', { class: 'tile' }, [
+/* A count tile. With `href` the whole tile is a link to the list it counts. */
+export function tile(label, value, hint, href = null) {
+  return el(href ? 'a' : 'div', { class: href ? 'tile tile-link' : 'tile', href }, [
     el('div', { class: 'label', text: label }),
     el('div', { class: 'value', text: value === undefined || value === null ? '—' : String(value) }),
     hint ? el('div', { class: 'hint', text: hint }) : null,
@@ -356,7 +634,7 @@ export function pager(page, pageSize, total, onChange) {
     el('button', {
       disabled: page <= 1, onClick: () => onChange(page - 1), text: 'Previous',
     }),
-    el('span', { class: 'hint', text: `Page ${page} of ${pages} — ${total} record(s)` }),
+    el('span', { class: 'hint', text: `Page ${page} of ${pages} — ${plural(total, 'record')}` }),
     el('button', {
       disabled: page >= pages, onClick: () => onChange(page + 1), text: 'Next',
     }),

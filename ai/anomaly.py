@@ -30,6 +30,8 @@ FEATURES: dict[str, list[str]] = {
     "YIELD_MONITOR": ["yield_t_ha", "moisture_pct", "speed_kmh", "swath_m"],
     "IRRIGATION_CONTROLLER": ["flow_l_min", "pressure_bar", "duration_s"],
     "COLD_CHAIN_SENSOR": ["temp_c", "humidity_pct", "shock_g"],
+    # Biotech / seed-testing lab equipment: incubator, biosafety cabinet, -80 C freezer.
+    "LAB_INSTRUMENT": ["chamber_temp_c", "co2_pct", "cabinet_airflow_ms", "freezer_temp_c"],
 }
 
 # Physically plausible ranges — validation, and the rule-based fallback detector.
@@ -42,7 +44,8 @@ RANGES: dict[str, tuple[float, float]] = {
     "speed_ms": (0, 60), "yield_t_ha": (0, 50), "moisture_pct": (0, 100),
     "speed_kmh": (0, 60), "swath_m": (0, 20), "flow_l_min": (0, 2000),
     "pressure_bar": (0, 20), "duration_s": (0, 86400), "temp_c": (-40, 60),
-    "shock_g": (0, 50),
+    "shock_g": (0, 50), "chamber_temp_c": (-20, 120), "co2_pct": (0, 25),
+    "cabinet_airflow_ms": (0, 5), "freezer_temp_c": (-100, 30),
 }
 
 # Typical operating band per channel; a reading outside it is suspicious but legal.
@@ -54,7 +57,8 @@ TYPICAL: dict[str, tuple[float, float]] = {
     "altitude_m": (0, 400), "battery_pct": (10, 100), "speed_ms": (0, 25),
     "yield_t_ha": (0.5, 20), "moisture_pct": (8, 35), "speed_kmh": (0, 20),
     "swath_m": (1, 12), "flow_l_min": (0, 900), "pressure_bar": (0.5, 8),
-    "temp_c": (-25, 25), "shock_g": (0, 5),
+    "temp_c": (-25, 25), "shock_g": (0, 5), "chamber_temp_c": (30, 42), "co2_pct": (3, 8),
+    "cabinet_airflow_ms": (0.35, 0.6), "freezer_temp_c": (-90, -65),
 }
 
 

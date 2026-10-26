@@ -22,6 +22,13 @@ os.environ["LEDGER_DATA_DIR"] = str(TEST_DIR / "ledger")
 os.environ["JWT_SECRET"] = secrets.token_urlsafe(48)
 os.environ["ENCRYPTION_KEY"] = base64.b64encode(secrets.token_bytes(32)).decode()
 os.environ["DEMO_MODE"] = "true"
+# A developer's .env may point at a running Fabric bridge or split services (fabric_up.sh writes
+# FABRIC_BRIDGE_URL into it). Tests must never depend on, or write to, those: the real
+# environment wins over .env, so pin them empty here. Tests that need a bridge start their own.
+os.environ["FABRIC_BRIDGE_URL"] = ""
+os.environ["FABRIC_BRIDGE_TOKEN"] = ""
+os.environ["AI_SERVICE_URL"] = ""
+os.environ["LEDGER_SERVICE_URL"] = ""
 os.environ["BCRYPT_ROUNDS"] = "12"
 # Generous limits so functional tests are not throttled; the limiter itself is
 # tested explicitly in tests/security/test_rate_limiting.py.
@@ -229,9 +236,9 @@ def provisioned_device(client, auth, farm, field):
 
 @pytest.fixture(scope="session")
 def product(db, orgs) -> Product:
-    existing = db.query(Product).filter(Product.gtin == "09999900000017").one_or_none()
+    existing = db.query(Product).filter(Product.gtin == "09999900000016").one_or_none()
     if existing is None:
-        existing = Product(org_id=orgs["SUPPLY"].id, gtin="09999900000017",
+        existing = Product(org_id=orgs["SUPPLY"].id, gtin="09999900000016",
                            name="Test Sweetcorn", category="Chilled vegetables",
                            storage_temp_min_c=0.0, storage_temp_max_c=4.0)
         db.add(existing)
