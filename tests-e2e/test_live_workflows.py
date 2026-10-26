@@ -124,7 +124,9 @@ class TestSupplyChain:
 
     def test_records_a_custody_event_and_the_batch_state_moves(self, page):
         login(page, "SUPPLY_CHAIN_OPERATOR")
-        go(page, "#/batches")
+        # A batch the processor holds now: one still in transit to it offers only "Arrived",
+        # so the first row of the unfiltered list may have no custody-event form.
+        go(page, "#/batches?held=true")
         page.locator("table tbody tr td a").first.click()
         page.wait_for_timeout(2000)
         before = page.evaluate("() => document.body.innerText")
