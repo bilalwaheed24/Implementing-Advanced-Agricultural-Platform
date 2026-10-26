@@ -214,13 +214,25 @@ and ingests it as a DRONE scene; the API anchors the file's SHA-256 on the ledge
 ```bash
 pip install -r requirements/geo.txt                       # rasterio, for these scripts only
 docker run --rm -v "$PWD/odm:/datasets" opendronemap/odm --project-path /datasets project --fast-orthophoto
-python3 scripts/odm_ingest.py --project odm/project --field-id <field id>
+python3 scripts/odm_ingest.py --project odm/project --field-id <field id> --captured-at <flight time, ISO 8601>
 python3 scripts/make_sample_orthophoto.py --lat 42.03 --lon -93.63 --out sample.tif   # synthetic test image
 ```
 
 The **Satellite & Drone** page has *Download fields for QGIS (GeoJSON)*: every field polygon
 with its latest index and stress level, plus each drone footprint. In QGIS: Layer > Add Layer >
 Add Vector Layer, then style by `index_mean`.
+
+Run once against real imagery: ODM's public Caliterra sample (77 photographs from a drone over
+Texas) was processed with `opendronemap/odm --fast-orthophoto` into a 1789 x 1937 px,
+10 cm RGB orthophoto, ingested as a DRONE scene by a farm operator (an agronomist cannot: it
+lacks `telemetry:write`), and the file's SHA-256 was found on both the local ledger and
+Fabric. It has no near-infrared band, so it took the VARI path and stayed out of the NDVI
+stress ranking. The exported GeoJSON was opened with GDAL (`ogrinfo`, `ogr2ogr`), the library
+QGIS reads files with: EPSG:4326, a footprint at lon -98.0911..-98.0892, lat 30.1704..30.1722,
+which matches the photographs' EXIF GPS. That is GDAL validation, not a QGIS desktop session.
+The ingest script needs only `requirements/geo.txt`; the first real run showed it had been
+importing the backend's own packages, which is fixed. The export mixes polygons and points
+in one layer (a field with no boundary is exported as a point), so QGIS offers it as sublayers.
 
 ### Hyperledger Fabric mirror
 
@@ -423,9 +435,9 @@ Post-deploy: `python3 scripts/smoke_test.py --api-url https://your-deployment`.
 
 Three requirements from the exam brief are only partly met: no independent accessibility
 audit or assistive-technology user testing; BLAST implemented as an algorithm (k-mer seeding
-with Smith-Waterman) rather than the named product running; and the OpenDroneMap ingestion and
-QGIS GeoJSON export, while implemented and tested (§13), have never been run against imagery
-from a real drone flight. Hyperledger Fabric is no longer on this list: §12 runs the named
+with Smith-Waterman) rather than the named product running; and the QGIS GeoJSON export, which
+has been validated with GDAL against a real OpenDroneMap run (§13) but never opened in QGIS
+desktop. Hyperledger Fabric is no longer on this list: §12 runs the named
 product.
 
 ## 22. Known limitations
@@ -434,6 +446,12 @@ What is real, what is simulated, and what remains outstanding:
 
 * IoT devices, telemetry values, satellite scene data and hazard sequences are **simulated** —
   the fleet is simulated, the security envelope around it is not.
+* Drone imagery has been run **once** against real photographs (ODM's Caliterra sample, RGB only)
+  and the export validated with GDAL, not QGIS desktop. Not yet run: a multispectral flight with a
+  near-infrared band (the NDVI path from real pixels), a large orthophoto at full resolution, or
+  imagery of one of this platform's own fields. The API does not check that a footprint lies on
+  the field it is filed against, and `captured_at` defaults to the file's modified time (when ODM
+  finished) unless `--captured-at` is given.
 * AI models use **synthetic labelled demonstration datasets**; reported metrics describe the
   synthetic task only.
 * The local ledger is a **single-node permissioned cryptographic ledger** and remains the

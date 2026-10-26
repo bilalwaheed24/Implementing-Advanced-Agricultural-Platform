@@ -86,3 +86,38 @@ def test_drone_vari_does_not_distort_the_ndvi_stress_ranking(client, auth, field
     ranking = client.get("/api/v1/telemetry/insights/field-stress",
                          headers=auth("FARM_OPERATOR")).json()["ranking"]
     assert all(row["ndvi_mean"] != 0.21 for row in ranking if row["field_id"] == field_id)
+
+
+def _load_ingest_script():
+    import importlib.util
+    from pathlib import Path
+    pytest.importorskip("numpy")
+    path = Path(__file__).resolve().parents[2] / "scripts" / "odm_ingest.py"
+    spec = importlib.util.spec_from_file_location("odm_ingest_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_ingest_script_checksum_matches_the_service():
+    """The script restates scene_checksum so it runs without the backend's dependencies; the
+    API refuses a scene whose checksum differs, so the two must never drift apart."""
+    script = _load_ingest_script()
+    captured = datetime(2026, 10, 26, 15, 51, 57, tzinfo=timezone.utc)
+    digest = hashlib.sha256(b"ortho").hexdigest()
+    for file_hash in (None, digest):
+        assert script.scene_checksum("ODM-X", "field-1", captured, -0.0246, file_hash) == \
+            scene_checksum("ODM-X", "field-1", captured, -0.0246, file_hash)
+
+
+def test_ingest_script_does_not_import_the_backend():
+    """Found on a real run: importing app.services.telemetry made the script need sqlalchemy
+    on an operator's laptop that only has requirements/geo.txt."""
+    import ast
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[2] / "scripts" / "odm_ingest.py").read_text()
+    imported = {n.module.split(".")[0] for n in ast.walk(ast.parse(source))
+                if isinstance(n, ast.ImportFrom) and n.module}
+    imported |= {a.name.split(".")[0] for n in ast.walk(ast.parse(source))
+                 if isinstance(n, ast.Import) for a in n.names}
+    assert "app" not in imported and "sqlalchemy" not in imported

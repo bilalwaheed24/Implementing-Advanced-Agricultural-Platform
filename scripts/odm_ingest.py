@@ -33,9 +33,6 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "backend"))
-
 MAX_SIDE = 2000          # pixels: statistics are computed on a downsampled copy
 
 
@@ -45,6 +42,20 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def scene_checksum(scene_id: str, field_id: str, captured_at: datetime, ndvi_mean: float,
+                   file_sha256: str | None = None) -> str:
+    """Same checksum as backend/app/services/telemetry.scene_checksum, restated with the standard
+    library only: this script runs on an operator's laptop that has rasterio but not the backend's
+    dependencies. backend/tests/test_imagery.py fails if the two ever disagree."""
+    payload = {"scene_id": scene_id, "field_id": field_id,
+               "captured_at": captured_at.isoformat(), "ndvi_mean": ndvi_mean}
+    if file_sha256:
+        payload["file_sha256"] = file_sha256
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str,
+                           ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def analyse(path: Path, nir_band: int | None) -> dict:
@@ -149,13 +160,15 @@ def main() -> int:
     east, north = stats["footprint"]["coordinates"][0][2]
     print(f"Footprint WGS84 lon {west:.5f}..{east:.5f}, lat {south:.5f}..{north:.5f}")
 
+    if not args.captured_at:
+        print("Warning         --captured-at not given: using the orthophoto file's modified time, "
+              "which is when ODM finished, not when the drone flew. Pass the flight time.",
+              file=sys.stderr)
     captured = (datetime.fromisoformat(args.captured_at) if args.captured_at
                 else datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc))
     if captured.tzinfo is None:
         captured = captured.replace(tzinfo=timezone.utc)
     scene_id = args.scene_id or f"ODM-{captured:%Y%m%d}-{digest[:8].upper()}"
-
-    from app.services.telemetry import scene_checksum                    # noqa: PLC0415
 
     body = {"scene_id": scene_id, "field_id": args.field_id, "provider": "OpenDroneMap",
             "captured_at": captured.isoformat(), "ndvi_mean": stats["mean"],
