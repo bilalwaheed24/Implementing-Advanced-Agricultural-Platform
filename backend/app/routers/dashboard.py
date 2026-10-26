@@ -150,9 +150,12 @@ def dashboard(db: DbSession, principal: CurrentUser) -> dict:
         # Unresolved (OPEN or ACKNOWLEDGED): an acknowledged alert still needs attention. The
         # tile, its link (#/alerts?status=UNRESOLVED) and the dashboard's alert card all use
         # this one definition, so their numbers agree.
-        # Security-oversight alerts (DATA_THEFT, LEDGER) are not counted for other roles: they
-        # cannot open them (repositories.oversight_conditions), and a count that moved when
-        # an exfiltration finding about a colleague was raised would itself tip them off.
+        # Security-oversight alerts (DATA_THEFT, LEDGER) are not counted for tenant roles:
+        # they cannot open them (repositories.oversight_conditions), and a count that moved
+        # when an exfiltration finding about a colleague was raised would itself tip them off.
+        # The tile follows the same filter as the list, so the roles that may now read those
+        # categories (a regulator, a biosafety officer) do see them counted here, and the
+        # number on the tile matches the rows behind its link.
         unresolved = Alert.status.in_(UNRESOLVED_ALERT_STATUSES)
         hidden = oversight_conditions(Alert, principal.role)
         by_severity = select(Alert.severity, func.count()).where(unresolved, *hidden)

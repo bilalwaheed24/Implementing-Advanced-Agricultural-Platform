@@ -191,6 +191,16 @@ SECURITY_OVERSIGHT_ROLES = frozenset({Role.ADMIN, Role.SECURITY_ANALYST})
 # with it). LEDGER alerts are platform integrity, likewise not a tenant's to dismiss.
 OVERSIGHT_ALERT_CATEGORIES = frozenset({"DATA_THEFT", "LEDGER"})
 
+# Roles that may READ OVERSIGHT_ALERT_CATEGORIES and their incidents without being able to
+# work them. Oversight of the platform is the point of these two roles: a regulator audits how
+# the operator handles insider findings and ledger integrity, and a biosafety officer who is
+# shown a BIOSECURITY incident but not the DATA_THEFT alert about the same account is being
+# asked to judge a containment she cannot see the whole of. Read only, deliberately: the
+# acknowledge/resolve gate stays SECURITY_OVERSIGHT_ROLES, so neither role can clear a finding
+# or close its incident, and neither is added to the notification fan-out (see
+# services/notifications.fan_out) — these alerts are read when they are looked for, not pushed.
+OVERSIGHT_ALERT_READER_ROLES = frozenset({Role.REGULATOR, Role.BIOSAFETY_OFFICER})
+
 
 # Cross-tenant roles whose reach across organisations is limited to certain alert and incident
 # categories (round 6). A biosafety officer oversees biosecurity on every tenant, so she reads
@@ -199,8 +209,18 @@ OVERSIGHT_ALERT_CATEGORIES = frozenset({"DATA_THEFT", "LEDGER"})
 # outside these categories she sees only her own organisation's alerts and incidents. Her audit
 # trail is limited the same way: biosecurity entries (AUDIT_CROSS_TENANT_ACTION_PREFIXES) from
 # every organisation, everything else from her own organisation only.
+#
+# DATA_THEFT and LEDGER were added to her reach afterwards, and this deliberately widens what
+# round 6 narrowed. Round 6 was about noise and tenancy — a farm's offline sensor and another
+# company's expired certificate were never hers to read. These two are the opposite case: the
+# owner ruled that platform-integrity and insider findings must be auditable by the oversight
+# roles in every organisation, because a biosafety officer who holds a BIOSECURITY incident
+# open while a DATA_THEFT alert names the same account is judging a containment with a piece
+# missing. It is a read widening only — OVERSIGHT_ALERT_READER_ROLES says why, and the
+# acknowledge/resolve gate is untouched, so the round 4 finding (a tenant clearing an alert
+# about itself) stays fixed.
 CATEGORY_LIMITED_CROSS_TENANT: dict[Role, frozenset[str]] = {
-    Role.BIOSAFETY_OFFICER: frozenset({"BIOSECURITY", "DURC"}),
+    Role.BIOSAFETY_OFFICER: frozenset({"BIOSECURITY", "DURC", "DATA_THEFT", "LEDGER"}),
 }
 AUDIT_CROSS_TENANT_ACTION_PREFIXES: dict[Role, tuple[str, ...]] = {
     Role.BIOSAFETY_OFFICER: ("biosecurity.",),
@@ -218,6 +238,12 @@ def cross_tenant_categories(role: str) -> frozenset[str] | None:
 
 def is_security_oversight(role: str) -> bool:
     return role in {r.value for r in SECURITY_OVERSIGHT_ROLES}
+
+
+def may_read_oversight_alerts(role: str) -> bool:
+    """Whether `role` may READ OVERSIGHT_ALERT_CATEGORIES. Never a licence to work them:
+    acknowledge, resolve and incident assignment all ask is_security_oversight instead."""
+    return role in {r.value for r in SECURITY_OVERSIGHT_ROLES | OVERSIGHT_ALERT_READER_ROLES}
 
 
 # Roles that must be approved by an administrator before their first login.

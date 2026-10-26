@@ -153,7 +153,12 @@ def _require_alert_authority(principal, alert: Alert) -> None:
     A DATA_THEFT alert is filed under the suspect's own organisation, so alert:write in that
     tenant let a colleague, or the suspect, clear "Possible data exfiltration by ..." and close
     the incident with it. Since round 5 a tenant cannot even read such an alert
-    (repositories.oversight_conditions), so this is a second line of defence."""
+    (repositories.oversight_conditions), so for a tenant this is a second line of defence.
+
+    For a regulator or a biosafety officer it is the only one: both may now read these alerts
+    across tenants (permissions.OVERSIGHT_ALERT_READER_ROLES), so get_or_404 hands them the
+    row, and a biosafety officer holds alert:write for her own categories. Reading one is
+    oversight; clearing it is still security operations' call, so they are refused here."""
     if alert.category in OVERSIGHT_ALERT_CATEGORIES and not is_security_oversight(principal.role):
         security_event("authorisation denied", actor_id=principal.id, role=principal.role,
                        required="security oversight", alert_id=alert.id,

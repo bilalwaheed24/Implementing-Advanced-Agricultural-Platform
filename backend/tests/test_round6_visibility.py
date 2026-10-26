@@ -1,6 +1,8 @@
 """Round 6: visibility, alerts and notification routing.
 
-A biosafety officer reads other tenants' biosecurity alerts only, certificate-only custody
+A biosafety officer reads other tenants' biosecurity alerts only — plus, since the oversight
+read widening, their data-theft and ledger ones, which test_oversight_alert_reads.py pins and
+which the tests here deliberately leave out of her "hidden" cases. Certificate-only custody
 views, oversight incident assignees, ledger-rejection notices to the submitting organisation,
 holder names on batches and seed lots, the data-theft detector's recency rule, one notification
 per blocked screening, settled regulator notices, migration 0013 and readable jurisdictions.
