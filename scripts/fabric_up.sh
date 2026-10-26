@@ -6,7 +6,8 @@
 #   ./scripts/fabric_up.sh            # then start the platform: ./scripts/run_local.sh
 #   ./scripts/fabric_down.sh          # stop everything and remove the network
 #
-# Needs Docker, Node.js 18+, curl and git. The first run downloads Fabric images (~2 GB).
+# Needs Docker, Node.js 22.12+ (see .nvmrc), curl and git. The first run downloads Fabric
+# images (~2 GB).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -15,6 +16,29 @@ FABRIC_VERSION="${FABRIC_VERSION:-2.5.16}"             # LTS
 CA_VERSION="${CA_VERSION:-1.5.17}"
 BRIDGE_PORT="${BRIDGE_PORT:-8300}"
 BRIDGE_HOST="${BRIDGE_HOST:-127.0.0.1}"                # 0.0.0.0 when the API runs in Docker
+NODE_MIN_MAJOR=22                                      # keep in step with .nvmrc
+
+# Checked here, before the ~2 GB download and the network start, because the bridge is
+# launched at the very end: @hyperledger/fabric-gateway 1.13 declares node >=22.12.0, and on
+# Node 20 it fails inside the gateway with an error that says nothing about the version.
+# `|| true`: with pipefail a missing node would otherwise abort here with no explanation.
+NODE_MAJOR=$(node --version 2>/dev/null | sed 's/^v//; s/\..*//' || true)
+if [ "${ALLOW_NODE_MISMATCH:-0}" != "1" ] && [ "${NODE_MAJOR:-0}" -lt "$NODE_MIN_MAJOR" ]; then
+  {
+    echo "The Fabric bridge needs Node.js $NODE_MIN_MAJOR or newer (.nvmrc);" \
+         "this machine runs $(node --version 2>/dev/null || echo 'no node at all')."
+    if [ -s "$HOME/.nvm/nvm.sh" ]; then
+      echo "Install and make it the default with:"
+      echo "  source \"\$HOME/.nvm/nvm.sh\" && nvm install 22 && nvm alias default 22"
+    else
+      echo "Install it with:"
+      echo "  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -"
+      echo "  sudo apt-get install -y nodejs"
+    fi
+    echo "Then run this script again. ALLOW_NODE_MISMATCH=1 skips this check."
+  } >&2
+  exit 1
+fi
 
 mkdir -p "$FABRIC_DIR"
 cd "$FABRIC_DIR"

@@ -4,7 +4,7 @@
     "description": "HTTP bridge from the ABSP API to the absp-anchor chaincode on Hyperledger Fabric",
     "main": "server.js",
     "engines": {
-        "node": ">=18"
+        "node": ">=22.12.0"
     },
     "scripts": {
         "start": "node server.js",

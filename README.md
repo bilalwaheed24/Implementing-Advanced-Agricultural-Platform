@@ -56,7 +56,7 @@ agri-biotech-security-platform/
 ├── iot/                Device simulator (DEMO/SIMULATION fleet, real security envelope)
 ├── frontend/           28 view modules, framework-free ES modules, public verify.html
 ├── infrastructure/     Terraform (AWS) and Kubernetes manifests
-├── scripts/            run_local.sh, seed_demo.py, demo_flow.py, train_models.py, smoke_test.py
+├── scripts/            start.sh, stop.sh, run_local.sh, seed_demo.py, demo_flow.py, train_models.py
 ├── security/           Disclosure policy and OWASP ZAP rules
 ├── fabric/             Hyperledger Fabric chaincode (absp-anchor) and the gateway bridge
 ├── .github/workflows/  CI and security pipelines
@@ -72,7 +72,10 @@ agri-biotech-security-platform/
 ## 5. Prerequisites
 
 - Python 3.12 with the packages in `requirements.txt` installed (`pip install -r requirements.txt`)
-- Node.js is **not** required — the frontend has no build step
+- Node.js is **not** required for the platform itself — the frontend has no build step. The
+  optional Hyperledger Fabric mirror (§12) does need Node.js 22.12 or newer for its bridge
+  (`@hyperledger/fabric-gateway` requires it); the version is pinned in `.nvmrc` and in
+  `engines` in `fabric/gateway/package.json`. With nvm: `nvm install 22 && nvm alias default 22`
 - Docker (optional, for the containerised path)
 - No internet access is required to run the platform
 
@@ -107,6 +110,14 @@ Sign in at `http://127.0.0.1:8000/` with any seeded account (password `DemoPassw
 | `regulator@absp.demo` | Regulator |
 
 Consumer verification needs no login: `http://127.0.0.1:8000/verify.html`.
+
+That is the no-Docker path, and it runs the ledger in-process. For the full containerised
+demonstration — all five services plus the Hyperledger Fabric mirror behind them, on
+`http://127.0.0.1:8080` — one command covers both halves (§16):
+
+```bash
+./scripts/start.sh
+```
 
 ## 7. Manual setup
 
@@ -217,7 +228,9 @@ Add Vector Layer, then style by `index_mean`.
 deploys the `absp-anchor` chaincode with `AND('Org1MSP.peer','Org2MSP.peer')` endorsement and
 starts the bridge. With `FABRIC_BRIDGE_URL` set, every ledger anchor is also written to Fabric,
 and record and batch verification return a second verdict read from Fabric. See
-`fabric/README.md`; `./scripts/fabric_down.sh` removes it.
+`fabric/README.md`; `./scripts/fabric_down.sh` removes it. The bridge needs Node.js 22.12 or
+newer (§5); `fabric_up.sh` checks that before it downloads anything. `./scripts/start.sh`
+starts this and the compose stack together (§16).
 
 ### Scheduled security sweeps
 
@@ -290,10 +303,31 @@ Five containers, one per component:
 | `db` | `postgres:16-alpine` | PostgreSQL | api only |
 
 ```bash
-docker compose up -d --build                 # whole stack; open http://127.0.0.1:8080
+./scripts/start.sh                           # Fabric + the whole stack; open http://127.0.0.1:8080
+./scripts/start.sh --rebuild                 # the same, rebuilding the images first
+./scripts/stop.sh                            # stop both halves again (data survives)
 docker compose --profile simulator up        # also run the IoT simulator against the api
 docker compose logs -f api                   # follow one service
 ```
+
+`start.sh` checks the prerequisites first (Docker running, `.env`, `$FABRIC_DIR`, Node 22 for
+the bridge), starts Fabric unless it is already running, waits for the bridge to answer, brings
+the stack up, waits for the platform and prints the demo accounts. Re-running it is harmless:
+a Fabric network that is already up is reused rather than torn down and rebuilt, so a seeded
+demonstration survives a second start. Only `./scripts/start.sh --fresh` destroys data — it
+runs `docker compose down -v` and `fabric_down.sh`, then starts clean and re-seeds — and it
+asks for confirmation unless `--yes` is passed.
+
+Underneath it is the two manual steps, which still work on their own:
+
+```bash
+export FABRIC_DIR=$HOME/absp-fabric
+BRIDGE_HOST=0.0.0.0 ./scripts/fabric_up.sh                 # Fabric network + bridge on :8300
+COMPOSE_FABRIC_BRIDGE_URL=http://host.docker.internal:8300 docker compose up -d
+```
+
+Without the Fabric half, `docker compose up -d --build` on its own is enough; the mirror is
+optional (§12).
 
 `.env` must define `JWT_SECRET`, `ENCRYPTION_KEY`, `POSTGRES_PASSWORD` and `SERVICE_TOKEN`
 (see `.env.example`). The first start seeds the same demonstration dataset as `run_local.sh`.
@@ -371,6 +405,8 @@ Post-deploy: `python3 scripts/smoke_test.py --api-url https://your-deployment`.
 | Telemetry returns 404 "Device authentication failed" | Wrong or stale device secret, or the device is not `ACTIVE` | Re-provision the device or check `demo_device_secrets.json` |
 | Login returns 429 | The authentication rate limiter (10/minute/IP) — a real security control | Wait for `Retry-After`, do not disable the limiter |
 | A view shows "Not available to your role" | The signed-in role lacks the required permission | Sign in as a role with that permission |
+| `fabric_up.sh` stops with "needs Node.js 22 or newer" | The Fabric gateway library requires Node 22.12+ (`.nvmrc`) | `nvm install 22 && nvm alias default 22`, then run `./scripts/start.sh` again |
+| `start.sh` reports "The bridge did not answer" | The gateway failed to start | Read `$FABRIC_DIR/bridge.log`; `./scripts/start.sh --fresh` rebuilds the network (and wipes the demo data) |
 
 ## 20. Demo workflow for the oral presentation
 
