@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 # Delete the local k3d cluster created by scripts/k8s_up.sh, including its volumes.
 set -euo pipefail
-k3d cluster delete absp
+k3d cluster delete "${K8S_CLUSTER:-absp}"

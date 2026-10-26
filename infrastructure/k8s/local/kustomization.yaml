@@ -1,5 +1,6 @@
 # Local demo on k3d (scripts/k8s_up.sh): demo mode and data, locally built images, the UI on a
-# NodePort that k3d maps to http://127.0.0.1:8080, and no Ingress (no TLS controller).
+# NodePort that k3d maps to http://127.0.0.1:8080 (K8S_HOST_PORT changes the host side; k8s_up.sh
+# then adjusts CORS_ORIGINS), and no Ingress (no TLS controller).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
