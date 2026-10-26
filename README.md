@@ -67,7 +67,7 @@ agri-biotech-security-platform/
 ```
 
 `backend/` contains `app/` (16 routers, 11 service modules, 34-table model layer),
-`migrations/` (forward-only SQL runner) and `tests/` (501 tests).
+`migrations/` (forward-only SQL runner) and `tests/` (791 tests).
 
 ## 5. Prerequisites
 
@@ -112,7 +112,7 @@ Sign in at `http://127.0.0.1:8000/` with any seeded account (password `DemoPassw
 Consumer verification needs no login: `http://127.0.0.1:8000/verify.html`.
 
 That is the no-Docker path, and it runs the ledger in-process. For the full containerised
-demonstration — all five services plus the Hyperledger Fabric mirror behind them, on
+demonstration — all six services plus the Hyperledger Fabric mirror behind them, on
 `http://127.0.0.1:8080` — one command covers both halves (§16):
 
 ```bash
@@ -258,7 +258,7 @@ demonstration** → audit-chain verification. 25 steps, every check asserted.
 ## 14. Tests
 
 ```bash
-python3 -m pytest backend/tests/ -q                       # 501 tests
+python3 -m pytest backend/tests/ -q                       # 791 tests
 python3 -m pytest backend/tests/security/ -q               # RBAC, tenancy, injection, headers
 python3 -m pytest backend/tests/performance/ -q -s         # NFR measurements, printed
 ```
@@ -336,7 +336,8 @@ Every image is non-root with a read-only root filesystem, no capabilities and a 
 
 ### Kubernetes
 
-The same five services run on Kubernetes from `infrastructure/k8s/`: `base/` is the
+The same five application services run on Kubernetes from `infrastructure/k8s/`, with the
+scheduler's sweeps as a CronJob rather than a sixth Deployment: `base/` is the
 production-shaped set (default-deny NetworkPolicies, non-root read-only pods, HPA, Ingress) and
 `local/` adapts it for a local k3d cluster.
 
@@ -351,7 +352,8 @@ never written to disk.
 
 ### Terraform (local)
 
-`infrastructure/terraform-local/` deploys the same five containers, two networks and three
+`infrastructure/terraform-local/` deploys the same five application containers (no scheduler;
+run the sweeps by hand), two networks and three
 volumes to this machine's Docker with the `kreuzwerker/docker` provider. The AWS configuration in
 `infrastructure/terraform/` is separate and untouched.
 
@@ -420,8 +422,11 @@ Post-deploy: `python3 scripts/smoke_test.py --api-url https://your-deployment`.
 ## 21. Requirements coverage
 
 Three requirements from the exam brief are only partly met: no independent accessibility
-audit or assistive-technology user testing; Hyperledger Fabric and BLAST implemented as model
-and algorithm rather than the named products running; and OpenDroneMap/QGIS not integrated.
+audit or assistive-technology user testing; BLAST implemented as an algorithm (k-mer seeding
+with Smith-Waterman) rather than the named product running; and the OpenDroneMap ingestion and
+QGIS GeoJSON export, while implemented and tested (§13), have never been run against imagery
+from a real drone flight. Hyperledger Fabric is no longer on this list: §12 runs the named
+product.
 
 ## 22. Known limitations
 
@@ -431,12 +436,17 @@ What is real, what is simulated, and what remains outstanding:
   the fleet is simulated, the security envelope around it is not.
 * AI models use **synthetic labelled demonstration datasets**; reported metrics describe the
   synthetic task only.
-* The ledger is a **local single-node permissioned cryptographic ledger**, not a deployed
-  Hyperledger Fabric consortium.
+* The local ledger is a **single-node permissioned cryptographic ledger** and remains the
+  system of record. Every anchor is mirrored to a **real Hyperledger Fabric 2.5 network**
+  (§12) — two organisations, a Raft orderer, `AND(Org1MSP.peer, Org2MSP.peer)` endorsement —
+  but that is Fabric's own test network with both organisations on this machine, not a
+  production consortium across separate companies.
 * Terraform and Kubernetes manifests are implemented and validate, but have **never been applied**
   to live cloud infrastructure.
-* CI and Security workflows run **green on GitHub-hosted runners** (commit `d3c1c60`): `iac-scan`,
-  `lint-and-test`, `build-and-scan-image`, `secret-scan`, `smart-contract-tests`, `dast`.
+* CI and Security workflows run on GitHub-hosted runners over every pull request — `lint-and-test`,
+  `build-and-scan-image` (one image per service), `iac-scan`, `secret-scan`, `smart-contract-tests`,
+  `dast` and `iot-attack-tests`. The container gate earns its place: it failed the branch on three
+  fixable nginx CVEs, which were fixed by re-pinning the base image rather than by relaxing the gate.
 * Container scanning: all HIGH/CRITICAL findings with an available vendor fix were remediated.
   60 HIGH/CRITICAL findings remain in Debian base-image OS packages with no published fix at the
   time of testing, and are documented as residual risk.

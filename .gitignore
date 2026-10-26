@@ -71,3 +71,6 @@ junit*.xml
 # Hyperledger Fabric: downloaded network and Node dependencies
 fabric/.network/
 node_modules/
+
+# Claude Code agent worktrees
+.claude/
