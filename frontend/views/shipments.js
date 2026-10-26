@@ -1,5 +1,5 @@
 import { el, api, badge, can, fmtDate, fmtNum, toast, session, titleCase, humanize,
-         orgName }
+         orgName , orgTypeLabel}
   from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { createPanel, remoteSelect, dateInput, todayIso, atNoon } from '/static/views/formkit.js';
@@ -51,7 +51,7 @@ export function shipmentForm({ batch: fixedBatch = null, reload,
   const receiver = remoteSelect({
     endpoint: '/admin/organizations/directory', required: false,
     filter: (org) => org.id !== me && RECEIVER_ORG_TYPES.includes(org.org_type),
-    label: (org) => `${org.name} (${titleCase(org.org_type)})`,
+    label: (org) => `${org.name} (${orgTypeLabel(org.org_type)})`,
     placeholder: 'Nobody — an internal move (keep custody)',
     emptyLabel: 'No trading partner registered',
   });

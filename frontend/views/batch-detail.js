@@ -41,11 +41,11 @@ function recordEventPanel(batch, reload, { only = null } = {}) {
   const reachable = BATCH_TRANSITIONS[batch.state] || [];
   const steps = Object.entries(STEP_TO_STATE)
     .filter(([step, state]) => reachable.includes(state) && (!only || only.includes(step)))
-    .map(([step, state]) => [step, `${titleCase(step)} → ${titleCase(state)}`]);
+    .map(([step, state]) => [step, `${humanize(step)} → ${humanize(state)}`]);
 
   if (!steps.length) {
     return el('p', { class: 'hint',
-      text: `This batch is ${titleCase(batch.state)}, which is a final state. No further `
+      text: `This batch is ${humanize(batch.state)}, which is a final state. No further `
         + 'custody event can be recorded.' });
   }
 
@@ -72,7 +72,7 @@ function recordEventPanel(batch, reload, { only = null } = {}) {
   return createPanel({
     toggleLabel: 'Record a custody event',
     submitLabel: 'Record event',
-    hint: `This batch is ${titleCase(batch.state)}. Only the steps it can legally move to are `
+    hint: `This batch is ${humanize(batch.state)}. Only the steps it can legally move to are `
       + 'listed. Quantity may fall but never rise — the server enforces conservation. To pass '
       + 'the batch to another organisation, create a shipment in the Shipments card.',
     controls: [
@@ -93,7 +93,7 @@ function recordEventPanel(batch, reload, { only = null } = {}) {
         unit: unit.value || null,
         occurred_at: atNoon(occurred.value),
       } });
-      return `Event recorded — batch is now ${titleCase(STEP_TO_STATE[step.value])}`;
+      return `Event recorded — batch is now ${humanize(STEP_TO_STATE[step.value])}`;
     },
     onDone: reload,
   });
@@ -108,7 +108,7 @@ function claimPanel(batch, claimed, hasGmo, reload) {
     filter: (row) => row.subject_org_id === me && row.status === 'ACTIVE'
       && !claimed.has(row.cert_code)
       && !(hasGmo && ['ORGANIC', 'NON_GMO'].includes(row.cert_type)),
-    label: (row) => `${row.cert_code} — ${titleCase(row.cert_type)}, ${row.standard}`,
+    label: (row) => `${row.cert_code} — ${humanize(row.cert_type)}, ${row.standard}`,
     placeholder: 'Select one of your certifications',
     emptyLabel: 'No unclaimed active certification issued to your organisation',
   });
@@ -229,7 +229,7 @@ function labelCard(batch, context, { canPrint = false } = {}) {
 function gmoCell(gmo) {
   if (!gmo) return el('td', { text: 'No GMO lineage' });
   const approvals = gmo.approvals.length
-    ? gmo.approvals.map((a) => `${jurisdictionLabel(a.jurisdiction)}: ${titleCase(a.status)}`
+    ? gmo.approvals.map((a) => `${jurisdictionLabel(a.jurisdiction)}: ${humanize(a.status)}`
       + (a.expires_at ? ` until ${fmtDay(a.expires_at)}` : '')).join(' · ')
     : 'no approval on record';
   return el('td', {}, [
@@ -296,8 +296,8 @@ export async function render({ id }) {
   const timeline = el('ul', { class: 'timeline' }, custody.events.map((event) =>
     el('li', { class: event.anchor_status === 'ANCHORED' ? '' : 'unverified' }, [
       el('div', {}, [
-        el('strong', { text: titleCase(event.biz_step) }),
-        ' — ', el('span', { class: 'hint', text: titleCase(event.disposition) }),
+        el('strong', { text: humanize(event.biz_step) }),
+        ' — ', el('span', { class: 'hint', text: humanize(event.disposition) }),
       ]),
       el('div', { class: 'when', text: fmtDate(event.occurred_at) }),
       event.location_name ? el('div', { class: 'hint', text: event.location_name }) : null,
@@ -316,7 +316,7 @@ export async function render({ id }) {
   const certifications = custody.certifications.length
     ? table([
       { label: 'Certification', key: 'cert_code' },
-      { label: 'Type', render: (row) => titleCase(row.cert_type) },
+      { label: 'Type', render: (row) => humanize(row.cert_type) },
       { label: 'Standard', key: 'standard' },
       { label: 'Issuer', key: 'issuer' },
       { label: 'Valid to', render: (row) => fmtDay(row.valid_to) },

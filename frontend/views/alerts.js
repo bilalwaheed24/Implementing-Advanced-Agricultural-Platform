@@ -1,5 +1,5 @@
 import { el, api, badge, fmtDate, humanizeText, titleCase, toast,
-         can, role } from '/static/assets/core.js';
+         can, role , humanize} from '/static/assets/core.js';
 import { listView } from '/static/views/listview.js';
 import { entityLink, incidentLink } from '/static/views/entity-links.js';
 
@@ -84,7 +84,7 @@ export const render = listView({
     { label: 'Raised', render: (row) => el('div', {}, [fmtDate(row.created_at),
       occurrenceHint(row)]) },
     { label: 'Severity', render: (row) => badge(row.severity) },
-    { label: 'Category', render: (row) => titleCase(row.category) },
+    { label: 'Category', render: (row) => humanize(row.category) },
     { label: 'Title', render: (row) => {
         const more = extraReasons(row);
         return el('div', {}, [

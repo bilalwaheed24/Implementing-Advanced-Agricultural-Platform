@@ -749,7 +749,7 @@ def transfer_custody(db: Session, batch: Batch, from_org_id: str, to_org_id: str
                              "ledger_status": receipt.get("status")})
     notifications.notify_org(
         db, to_org_id, "HANDOVER", f"Batch {batch.batch_code} handed over to you",
-        f"{batch.quantity:g} {batch.unit}. "
+        f"{notifications.human_quantity(batch.quantity, batch.unit)}. "
         + ("Mark it arrived when it reaches you." if batch.state == "IN_TRANSIT"
            else "Record its receipt to continue the chain of custody."), "Batch", batch.id)
     return receipt

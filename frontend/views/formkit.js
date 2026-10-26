@@ -148,7 +148,9 @@ export function createPanel({ toggleLabel, submitLabel, controls, submit, onDone
       if (onDone) onDone();
     } catch (error) {
       message.textContent = error.message
-        + (error.fields || []).map((f) => ` (${f.field}: ${f.message})`).join('');
+        // Pydantic prefixes a validator's own text with "Value error, "; the reader needs only
+        // the reason, next to the field it is about.
+        + (error.fields || []).map((f) => ` (${f.field}: ${String(f.message).replace(/^Value error, /, '')})`).join('');
     } finally {
       button.disabled = false;
       button.textContent = original;

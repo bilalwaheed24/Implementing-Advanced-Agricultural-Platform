@@ -220,7 +220,8 @@ export const render = listView({
     // A batch handed to this organisation but still on the road is not in its custody yet.
     { label: 'Held by', render: (row) => (row.state === 'IN_TRANSIT'
       && row.custodian_org_id === session.read()?.org_id
-      ? el('span', { text: 'In transit to you' }) : orgName(row.custodian_org_id)) },
+      ? el('span', { text: 'In transit to you' })
+      : (row.custodian_name || orgName(row.custodian_org_id))) },
     { label: 'Anchor', render: (row) => badge(row.anchor_status) },
     { label: 'Integrity', render: (row) => badge(row.integrity_status) },
     { label: 'Verify code', render: (row) => el('a', { href: `/verify.html?code=${row.verification_code}`,

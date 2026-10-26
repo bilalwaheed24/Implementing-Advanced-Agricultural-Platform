@@ -175,7 +175,7 @@ export async function render() {
       barChart(Object.entries(bySeverity)
         .sort(([a], [b]) => rank(a) - rank(b))
         .map(([label, value]) => ({
-          label: titleCase(label), value, colour: severityColour(label),
+          label: humanize(label), value, colour: severityColour(label),
         })), { label: 'Open or acknowledged alerts by severity' }),
       el('ul', { class: 'reasons' }, alerts.items.map(alertItem)),
       el('a', { href: UNRESOLVED_ALERTS, text: 'View all open alerts →' }),
