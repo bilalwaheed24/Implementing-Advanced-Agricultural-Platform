@@ -348,7 +348,21 @@ kubectl --context k3d-absp -n absp get pods
 ```
 
 The scripts never change your current kubectl context. Secrets are created from `.env` and
-never written to disk.
+never written to disk. `K8S_HOST_PORT` (default 8080) and `K8S_CLUSTER` (default `absp`) move the
+published port and the cluster name, so it can run beside the compose stack:
+`K8S_HOST_PORT=8081 ./scripts/k8s_up.sh`.
+
+This path has been run, once, on a single-node k3d cluster on the development machine. From a
+cold cluster, import of the four images, the `db-init` Job (with `--seed`), the StatefulSets and
+Deployments all came up Ready in about a minute; the `api` pod and the Job restarted a few times
+while the database was still pulling its image, which is the retry loop doing its job. Through the
+published port, `admin@absp.demo` logged in, the batch list returned the seeded data, the
+ledger replay verified (27 blocks, 55 signatures), and a hand-triggered run of the
+`security-sweeps` CronJob completed. The default-deny NetworkPolicies are enforced by k3s: the
+frontend pod could reach `api:8000` and could not reach `db:5432`. What this does **not** show:
+it is one node and one run, with the Ingress and TLS (deleted in `local/`), the HPA under load and
+a multi-node scheduler never exercised, and nothing here touches a cloud cluster. The Fabric mirror is
+off in this deployment ("no bridge configured").
 
 ### Terraform (local)
 
@@ -363,7 +377,17 @@ volumes to this machine's Docker with the `kreuzwerker/docker` provider. The AWS
 ```
 
 Secrets are passed from `.env` as `TF_VAR_*` and never written to a tfvars file; the local
-state file holds them and is gitignored.
+state file holds them and is gitignored. The published port is the `frontend_port` variable
+(default 8080, always bound to 127.0.0.1): `TF_VAR_frontend_port=8082 ./scripts/tf_local_up.sh`.
+
+This path has been applied and destroyed once on the development machine with the port set to
+8082. `init` and `apply` created the 11 resources, the UI answered, `admin@absp.demo` logged in,
+the batch list returned seeded data and the ledger replay verified; `tf_local_down.sh` then
+removed all of them (empty state, no `absp-*` containers, volumes or networks left). One thing to
+know: an `apply` that is killed part-way can leave a container that Terraform never recorded, and
+the next apply then fails with a name conflict on it (`docker rm -f absp-api` clears it). The
+database is reached on the internal network only, and, as with compose, the sweeps do not run
+here.
 
 ## 17. CI/CD
 
@@ -441,8 +465,10 @@ What is real, what is simulated, and what remains outstanding:
   (§12) — two organisations, a Raft orderer, `AND(Org1MSP.peer, Org2MSP.peer)` endorsement —
   but that is Fabric's own test network with both organisations on this machine, not a
   production consortium across separate companies.
-* Terraform and Kubernetes manifests are implemented and validate, but have **never been applied**
-  to live cloud infrastructure.
+* The Kubernetes manifests and the local Terraform configuration have each been run once on this
+  machine (k3d and the local Docker engine) and served real traffic (§16). The AWS Terraform in
+  `infrastructure/terraform/` validates and plans but has **never been applied**, and nothing has
+  run on a live cloud cluster.
 * CI and Security workflows run on GitHub-hosted runners over every pull request — `lint-and-test`,
   `build-and-scan-image` (one image per service), `iac-scan`, `secret-scan`, `smart-contract-tests`,
   `dast` and `iot-attack-tests`. The container gate earns its place: it failed the branch on three
