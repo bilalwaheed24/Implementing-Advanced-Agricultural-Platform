@@ -1,6 +1,6 @@
 /* Shared list-view factory: fetch, paginate, filter, render. Used by the simple
  * catalogue screens so each one stays a declaration rather than a copy. */
-import { el, api, table, loading, errorBox, pager, empty, titleCase } from '/static/assets/core.js';
+import { el, api, table, loading, errorBox, pager, empty, humanize } from '/static/assets/core.js';
 
 /* Rows of the loaded set fetched when a client-side search is active: the most the API
  * returns in one page. */
@@ -71,7 +71,9 @@ export function listView({ title, subtitle, endpoint, columns, filters = [], act
      * [value, label] pairs. */
     const optionNodes = (filter, options) => options.map((option) => {
       const [value, text] = Array.isArray(option)
-        ? option : [option, (filter.optionLabel || titleCase)(option)];
+        // humanize, as the badges use: "In transit" and "Non-GMO" read the same in a filter
+        // and in the rows it filters.
+        ? option : [option, (filter.optionLabel || humanize)(option)];
       return el('option', { value, text,
         selected: state.filters[filter.key] === value ? 'selected' : null });
     });
